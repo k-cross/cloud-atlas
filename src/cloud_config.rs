@@ -1,3 +1,4 @@
+pub mod collector {
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_config::model::ResourceType;
 use aws_sdk_config::{Client, Error, Region, PKG_VERSION};
@@ -34,7 +35,7 @@ async fn show_resources(verbose: bool, client: &Client) -> Result<(), Error> {
     Ok(())
 }
 
-async fn run(verbose: bool, region: String) -> Result<(), Error> {
+pub async fn run(verbose: bool, region: String) -> Result<(), Error> {
     let region_provider = RegionProviderChain::first_try(region.map(Region::new))
         .or_default_provider()
         .or_else(Region::new("us-west-2"));
@@ -58,4 +59,5 @@ async fn run(verbose: bool, region: String) -> Result<(), Error> {
     }
 
     show_resources(verbose, &client).await
+}
 }
