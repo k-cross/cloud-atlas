@@ -29,13 +29,15 @@ struct Opt {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), aws_sdk_config::Error> {
     let Opt { region, verbose, user, pass, uri } = Opt::parse();
 
     if verbose {
         tracing_subscriber::fmt::init();
     }
 
-    let graph = neo4j_client::graph_client::setup_client(user, pass, uri);
-    let configs = cloud_config::collector::run(verbose, region);
+    let _graph = neo4j_client::graph_client::setup_client(user, pass, uri).await;
+    let _configs = cloud_config::collector::run(verbose, region).await?;
+
+    Ok(())
 }
