@@ -23,22 +23,23 @@ pub mod collector {
 
             let resources = resp.resource_identifiers().unwrap_or_default();
 
+            // grab exactly 1 of each type for now to discover more info about its structure
             if !resources.is_empty() || verbose {
                 println!();
                 println!("Resources of type {}:", value);
+                r_map.insert(value.to_string(), resources.get(0).unwrap().clone());
             }
             
-            r_map.insert()
+            //for resource in resources {
 
-            for resource in resources {
-                println!(
-                    "  Resource ID: {}",
-                    resource.resource_id().as_deref().unwrap_or_default()
-                );
-            }
+            //    println!(
+            //        "  Resource ID: {}",
+            //        resource.resource_id().as_deref().unwrap_or_default()
+            //    );
+            //}
         }
 
-        println!();
+        println!("{:#?}", r_map);
 
         Ok(())
     }
