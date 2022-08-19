@@ -14,3 +14,5 @@ aws-config = "0.47"
 aws-sdk-config = "0.17"
 tracing-subscriber = {version="0.3.5", features = ["env-filter"]}
 clap = { version = "3.2.17", features = ["derive"] }
+aws-sdk-ec2 = "0.17.0"
+aws-types = "0.47.0"

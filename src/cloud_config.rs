@@ -1,6 +1,6 @@
 pub mod collector {
-    // dependencies
     use aws_config::meta::region::RegionProviderChain;
+    // dependencies
     use aws_sdk_config::model::ResourceType;
     use aws_sdk_config::{Client, Error, Region};
 
@@ -44,11 +44,10 @@ pub mod collector {
         Ok(())
     }
 
-    pub async fn run(verbose: bool, region: String) -> Result<(), Error> {
+    pub async fn runner(verbose: bool, region: String) -> Result<(), Error> {
         let region_provider = RegionProviderChain::first_try(Region::new(region))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
-        println!();
 
         if verbose {
             println!(
