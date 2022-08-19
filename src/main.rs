@@ -1,9 +1,11 @@
+// project
+use crate::amazon::{instance, resource};
+
+pub mod amazon;
+pub mod neo4j_client;
+
 // dependencies
 use clap::Parser;
-
-pub mod neo4j_client;
-pub mod cloud_config;
-pub mod ec2;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
@@ -38,8 +40,8 @@ async fn main() -> Result<(), aws_sdk_config::Error> {
     }
 
     let _graph = neo4j_client::graph_client::setup_client(user, pass, uri).await;
-    let _configs = cloud_config::collector::runner(verbose, region).await?;
-    let (running_insts, offline_insts) = ec2::collector::runner(region).await?;
+    let _configs = resource::collector::runner(verbose, region).await?;
+    let (running_insts, offline_insts) = instance::collector::runner(region).await?;
 
     Ok(())
 }
