@@ -1,8 +1,11 @@
 pub mod collector {
-// dependencies
-use aws_config::meta::region::RegionProviderChain;
-use aws_sdk_ec2::{Client, Error, Region};
-use aws_sdk_ec2::model::{Instance, Tag};
+    // dependencies
+    use aws_config::meta::region::RegionProviderChain;
+    use aws_sdk_ec2::{Client, Error, Region};
+    use aws_sdk_ec2::model::{Instance, Tag};
+
+    //project
+    use crate::cloud;
 
 async fn match_instances(client: &Client) -> Result<(Vec<Instance>, Vec<Instance>), Error> {
     let resp = client
