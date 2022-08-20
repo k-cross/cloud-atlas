@@ -33,7 +33,13 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), aws_sdk_config::Error> {
-    let Opt { region, verbose, user, pass, uri } = Opt::parse();
+    let Opt {
+        region,
+        verbose,
+        user,
+        pass,
+        uri,
+    } = Opt::parse();
 
     if verbose {
         tracing_subscriber::fmt::init();

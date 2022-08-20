@@ -1,6 +1,9 @@
 pub mod collector {
-    use aws_config::meta::region::RegionProviderChain;
+    // project
+    use crate::cloud;
+
     // dependencies
+    use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_config::model::ResourceType;
     use aws_sdk_config::{Client, Error, Region};
 
@@ -29,7 +32,7 @@ pub mod collector {
                 println!("Resources of type {}:", value);
                 r_map.insert(value.to_string(), resources.get(0).unwrap().clone());
             }
-            
+
             //for resource in resources {
 
             //    println!(
@@ -44,7 +47,7 @@ pub mod collector {
         Ok(())
     }
 
-    pub async fn runner(verbose: bool, region: String) -> Result<(), Error> {
+    pub async fn runner(verbose: bool, region: String) -> Result<(), cloud::Error> {
         let region_provider = RegionProviderChain::first_try(Region::new(region))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
@@ -62,9 +65,14 @@ pub mod collector {
         let client = Client::new(&shared_config);
 
         if !verbose {
-            println!("You won't see any output if you don't have any resources defined in the region.");
+            println!(
+                "You won't see any output if you don't have any resources defined in the region."
+            );
         }
 
-        show_resources(verbose, &client).await
+        match show_resources(verbose, &client).await {
+            Ok(res) => Ok(res),
+            err => cloud::Error::AwsConfigError(err),
+        }
     }
 }
