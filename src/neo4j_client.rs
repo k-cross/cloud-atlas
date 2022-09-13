@@ -12,13 +12,11 @@ pub mod graph_client {
         user: String,
         pass: String,
         uri: String,
-    ) -> Result<Arc<Graph>, neo4rs::Error> {
-        let graph = Arc::new(
-            Graph::new(uri.as_str(), user.as_str(), pass.as_str())
-                .await
-                .unwrap(),
-        );
-        Ok(graph)
+    ) -> Result<Arc<Graph>, Box<dyn std::error::Error>> {
+        match Graph::new(uri.as_str(), user.as_str(), pass.as_str()).await {
+            Ok(res) => Ok(Arc::new(res)),
+            Err(_) => Err("Error connecting to Neo4J".into()),
+        }
     }
 }
 

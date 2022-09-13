@@ -32,7 +32,7 @@ struct Opt {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), aws_sdk_config::Error> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Opt {
         region,
         verbose,
@@ -45,9 +45,12 @@ async fn main() -> Result<(), aws_sdk_config::Error> {
         tracing_subscriber::fmt::init();
     }
 
-    let _graph = neo4j_client::graph_client::setup_client(user, pass, uri).await;
-    let _configs = resource::collector::runner(verbose, region).await?;
-    let (running_insts, offline_insts) = instance::collector::runner(region).await?;
+    let _graph = neo4j_client::graph_client::setup_client(user, pass, uri).await?;
+    let configs = resource::collector::runner(verbose, region.as_str()).await?;
+    let (running_insts, _offline_insts) = instance::collector::runner(region.as_str()).await?;
+
+    println!("AWS Config: {:#?}", configs);
+    //println!("AWS Instances: {:#?}", running_insts);
 
     Ok(())
 }

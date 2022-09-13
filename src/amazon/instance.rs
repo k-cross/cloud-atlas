@@ -4,9 +4,6 @@ pub mod collector {
     use aws_sdk_ec2::model::{Instance, Tag};
     use aws_sdk_ec2::{Client, Error, Region};
 
-    //project
-    use crate::cloud;
-
     async fn match_instances(client: &Client) -> Result<(Vec<Instance>, Vec<Instance>), Error> {
         let resp = client.describe_instances().send().await?;
 
@@ -27,8 +24,8 @@ pub mod collector {
         Ok((running_insts, offline_insts))
     }
 
-    pub async fn runner(region: String) -> Result<(Vec<Instance>, Vec<Instance>), Error> {
-        let region_provider = RegionProviderChain::first_try(Region::new(region))
+    pub async fn runner(region: &str) -> Result<(Vec<Instance>, Vec<Instance>), Box<dyn std::error::Error>> {
+        let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
         let shared_config = aws_config::from_env().region(region_provider).load().await;
@@ -36,7 +33,7 @@ pub mod collector {
 
         match match_instances(&client).await {
             Ok(res) => Ok(res),
-            err => cloud::Error::AwsEC2Error(err),
+            Err(e) => Err(e.into()),
         }
     }
 }
