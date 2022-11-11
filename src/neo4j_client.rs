@@ -1,12 +1,10 @@
 pub mod graph_client {
-    // dependencies
+    use std::sync::Arc;
     use futures::stream::*;
     use neo4rs::Graph;
     //use std::sync::atomic::{AtomicU32, Ordering};
     //use uuid::Uuid;
 
-    // system
-    use std::sync::Arc;
 
     pub async fn setup_client(
         user: String,

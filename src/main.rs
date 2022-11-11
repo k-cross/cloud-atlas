@@ -1,11 +1,8 @@
-// project
 use crate::amazon::{instance, resource};
+use clap::Parser;
 
 pub mod amazon;
 pub mod neo4j_client;
-
-// dependencies
-use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]

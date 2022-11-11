@@ -1,5 +1,4 @@
 pub mod collector {
-    // dependencies
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_ec2::model::{Instance, Tag};
     use aws_sdk_ec2::{Client, Error, Region};

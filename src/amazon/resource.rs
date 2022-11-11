@@ -1,10 +1,7 @@
 pub mod collector {
-    // dependencies
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_config::model::{ResourceType, ResourceIdentifier};
     use aws_sdk_config::{Client, Error, Region};
-
-    // system
     use std::collections::HashMap;
 
     // Lists resources
