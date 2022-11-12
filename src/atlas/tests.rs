@@ -1,9 +1,12 @@
 mod tests {
     use crate::atlas::projector;
+    use crate::cloud::{Provider, AmazonCollection};
     use aws_sdk_ec2::model::*;
 
-    fn make_instances() -> Vec<Instance> {
-        vec![
+    fn make_aws_provider() -> Vec<Instance> {
+      Provider {
+        AWS(vec![AmazonCollection::AmazonInstances(
+          vec![
             Instance {
                 ami_launch_index: Some(0),
                 image_id: Some("ami-09d3b8424b6c5d4aa"),
@@ -128,7 +131,7 @@ mod tests {
                         group_id: Some("sg-0e7924cea43567852"),
                     },
                     GroupIdentifier {
-                        group_name: Some("launch-wizard-6-sulav"),
+                        group_name: Some("launch-wizard-6-sec2"),
                         group_id: Some("sg-04c42260980ef15e5"),
                     },
                 ]),
@@ -354,11 +357,14 @@ mod tests {
                     auto_recovery: Some(Default),
                 }),
             },
-        ]
+        ])])
+      }
     }
 
     #[test]
     fn amazon_instance_graph() {
-        let instances = make_instances();
+        let provider = make_aws_provider();
+        let g = projector::build(provider, "us-east-1".to_owned());
+        dbg!(g);
     }
 }

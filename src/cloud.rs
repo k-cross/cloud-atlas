@@ -14,14 +14,14 @@ pub enum Provider {
 }
 
 pub enum AmazonCollection {
-    AmazonInstance(Vec<AWSInstance>),
-    AmazonResource(HashMap<String, Vec<AWSResource>>),
+    AmazonInstances(Vec<AWSInstance>),
+    AmazonResources(HashMap<String, Vec<AWSResource>>),
 }
 
 pub enum GoogleCollection {
-    GoogleInstance,
+    GoogleInstances,
 }
 
 pub enum MicrosoftCollection {
-    MicrosoftInstance,
+    MicrosoftInstances,
 }
