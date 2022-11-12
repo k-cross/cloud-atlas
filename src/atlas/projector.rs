@@ -1,9 +1,9 @@
 use crate::cloud::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
-use petgraph;
+use petgraph::Graph;
 
 fn main() {}
 
-fn project(data: Provider) {
+fn project(data: Provider, region: String) {
     match data {
         Provider::AWS(aws_data) => aws_projector(aws_data),
         Provider::GCP(gcp_data) => gcp_projector(gcp_data),
@@ -11,7 +11,9 @@ fn project(data: Provider) {
     }
 }
 
-fn aws_projector(aws_data: Vec<AmazonCollection>) {}
+fn aws_projector(aws_data: Vec<AmazonCollection>) {
+    let graph = Graph::new();
+}
 
 fn gcp_projector(gcp_data: Vec<GoogleCollection>) {
     todo!()
