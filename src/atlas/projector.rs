@@ -48,8 +48,8 @@ fn aws_projector<'a>(
                     match inst.placement.as_ref() {
                         Some(place) => {
                             graph.add_edge(
-                                inst.image_id.as_ref().unwrap().as_str(),
                                 place.availability_zone.as_ref().unwrap().as_str(),
+                                inst.image_id.as_ref().unwrap().as_str(),
                                 0,
                             );
                         }
