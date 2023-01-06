@@ -1,6 +1,8 @@
 use crate::cloud::amazon::provider;
 use crate::atlas::projector;
 use clap::Parser;
+use petgraph::dot::{Config, Dot};
+use std::fs;
 
 pub mod cloud;
 pub mod atlas;
@@ -50,7 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // println!("AWS Config: {:#?}", aws_provider);
     let g = projector::build(&aws_provider, region.as_str());
-    dbg!(g);
+    //dbg!(g);
+    let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
+    fs::write("atlas.dot", s)?;
 
     Ok(())
 }
