@@ -2,8 +2,9 @@ pub mod collector {
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_ec2::model::{Instance, Tag};
     use aws_sdk_ec2::{Client, Error, Region};
+    use crate::cloud::definition::AmazonCollection;
 
-    async fn match_instances(client: &Client) -> Result<(Vec<Instance>, Vec<Instance>), Error> {
+    async fn match_instances(client: &Client) -> Result<(AmazonCollection, AmazonCollection), Error> {
         let resp = client.describe_instances().send().await?;
 
         let mut running_insts = Vec::new();
@@ -20,10 +21,12 @@ pub mod collector {
             }
         }
 
-        Ok((running_insts, offline_insts))
+        let r = AmazonCollection::AmazonInstances(running_insts);
+        let o = AmazonCollection::AmazonInstances(offline_insts);
+        Ok((r, o))
     }
 
-    pub async fn runner(region: &str) -> Result<(Vec<Instance>, Vec<Instance>), Box<dyn std::error::Error>> {
+    pub async fn runner(region: &str) -> Result<(AmazonCollection, AmazonCollection), Box<dyn std::error::Error>> {
         let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));

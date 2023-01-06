@@ -1,8 +1,8 @@
-use crate::amazon::{instance, resource};
+use crate::cloud::amazon::provider;
 use crate::atlas::projector;
 use clap::Parser;
 
-pub mod amazon;
+pub mod cloud;
 pub mod atlas;
 pub mod neo4j_client;
 
@@ -45,13 +45,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let _graph = neo4j_client::graph_client::setup_client(user, pass, uri).await?;
-    // TODO remove once provider is built
-    let configs = resource::collector::runner(verbose, region.as_str()).await?;
-    let (running_insts, _offline_insts) = instance::collector::runner(region.as_str()).await?;
+    let aws_provider = provider::build_aws(verbose, region.clone()).await?;
 
-    println!("AWS Config: {:#?}", configs);
-    //println!("AWS Instances: {:#?}", running_insts);
-    let g = projector::build(provider, region);
+
+    // println!("AWS Config: {:#?}", aws_provider);
+    let g = projector::build(&aws_provider, region.as_str());
     dbg!(g);
 
     Ok(())
