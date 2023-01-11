@@ -1,9 +1,10 @@
 use crate::cloud::definition::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
+use crate::Opt;
 use petgraph::graphmap::DiGraphMap;
 
-pub fn build<'b>(data: &'b Provider, region: &'b str) -> DiGraphMap<&'b str, u8> {
+pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
     match data {
-        Provider::AWS(aws_data) => aws_projector(&aws_data, region),
+        Provider::AWS(aws_data) => aws_projector(&aws_data, opts),
         Provider::GCP(gcp_data) => gcp_projector(&gcp_data),
         Provider::Azure(azure_data) => azure_projector(&azure_data),
     }
@@ -11,9 +12,12 @@ pub fn build<'b>(data: &'b Provider, region: &'b str) -> DiGraphMap<&'b str, u8>
 
 fn aws_projector<'a>(
     aws_data: &'a Vec<AmazonCollection>,
-    region: &'a str,
+    opts: &'a Opt,
 ) -> DiGraphMap<&'a str, u8> {
     let mut graph = DiGraphMap::new();
+    let region = opts.region.as_str();
+
+    // TODO: start building mappings by ARN
 
     for x in aws_data {
         match x {
@@ -76,9 +80,9 @@ fn aws_projector<'a>(
                     }
 
                     // add region info
-                    graph.add_edge(region, inst.image_id.as_ref().unwrap().as_str(), 0);
-
-                    // add tag info if exists
+                    if opts.all {
+                        graph.add_edge(region, inst.image_id.as_ref().unwrap().as_str(), 0);
+                    }
                 }
             }
             AmazonCollection::AmazonResources(resource_map) => {
@@ -89,9 +93,13 @@ fn aws_projector<'a>(
                             graph.add_edge(res_name.as_str(), r.resource_id().unwrap(), 0);
 
                             // add region edges
-                            graph.add_edge(region, r.resource_id().unwrap(), 0);
+                            if opts.all {
+                                graph.add_edge(region, r.resource_id().unwrap(), 0);
+                            }
                         }
-                        graph.add_edge(region, res_name.as_str(), 0);
+                        if opts.all {
+                            graph.add_edge(region, res_name.as_str(), 0);
+                        }
                     }
                 }
             }

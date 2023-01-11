@@ -6,26 +6,17 @@ use std::fs;
 
 pub mod cloud;
 pub mod atlas;
-pub mod neo4j_client;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
-struct Opt {
+pub struct Opt {
     /// The AWS Region.
     #[clap(short, long, default_value = "us-east-1")]
     region: String,
 
-    /// The Neo4J Username.
-    #[clap(short, long, default_value = "neo4j")]
-    user: String,
-
-    /// The Neo4J Password.
-    #[clap(short, long, default_value = "password")]
-    pass: String,
-
-    /// The Neo4J URI.
-    #[clap(long, default_value = "127.0.0.1:7687")]
-    uri: String,
+    /// Include all mappings by default
+    #[clap(short, long)]
+    all: bool,
 
     /// Whether to display additional information.
     #[clap(short, long)]
@@ -34,25 +25,20 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Opt {
-        region,
-        verbose,
-        user,
-        pass,
-        uri,
-    } = Opt::parse();
+    let opts = Opt::parse();
 
-    if verbose {
-        tracing_subscriber::fmt::init();
-    }
+    if opts.verbose { tracing_subscriber::fmt::init(); }
 
-    let _graph = neo4j_client::graph_client::setup_client(user, pass, uri).await?;
-    let aws_provider = provider::build_aws(verbose, region.clone()).await?;
+    let aws_provider = provider::build_aws(opts.verbose, opts.region.clone()).await?;
 
+    // TODO: log output
+    if opts.verbose { dbg!(&aws_provider); }
 
-    // println!("AWS Config: {:#?}", aws_provider);
-    let g = projector::build(&aws_provider, region.as_str());
-    //dbg!(g);
+    let g = projector::build(&aws_provider, &opts);
+
+    // TODO: log output
+    if opts.verbose { dbg!(&g); }
+
     let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
     fs::write("atlas.dot", s)?;
 
