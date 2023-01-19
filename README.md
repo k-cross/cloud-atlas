@@ -7,15 +7,15 @@ It builds from existing cloud configurations as they exist in reality, not an id
 
 ## Goals
 
-[ ] Visualize graph in comprehensible layout
-[ ] Make the graph explorable
-[ ] Work across GCP, AWS, and Azure
-[ ] Extendable for on-prem use-cases
+- [ ] Visualize graph in comprehensible layout
+- [ ] Make the graph explorable
+- [ ] Work across GCP, AWS, and Azure
+- [ ] Extendable for on-prem use-cases
 
 ### Status
 
-[x] Works with AWS
-[x] Outputs a `dot`
+- [x] Works with AWS
+- [x] Outputs a `dot`
 
 The best tool for exploring the dot file so far has been [gephi](https://gephi.org/).
 Current work is being done to build better relationships in the graph output.
