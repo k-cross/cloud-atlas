@@ -14,8 +14,8 @@ It builds from existing cloud configurations as they exist in reality, not an id
 
 ### Status
 
-[*] Works with AWS
-[*] Outputs a `dot`
+[x] Works with AWS
+[x] Outputs a `dot`
 
 The best tool for exploring the dot file so far has been [gephi](https://gephi.org/).
 Current work is being done to build better relationships in the graph output.
