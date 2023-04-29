@@ -3,22 +3,15 @@ pub mod collector {
     use aws_sdk_networkmanager::{Client, Error, Region};
     use crate::cloud::definition::AmazonCollection;
 
-    async fn match_instances(client: &Client) -> Result<AmazonCollection, Error> {
-        let resp = client.describe_global_networks().send().await?;
+    async fn get_networks(client: &Client) -> Result<AmazonCollection, Error> {
+        let global_nets = client.describe_global_networks().send().await?;
+        let mut g_nets = Vec::new();
 
-        for reservation in resp.reservations().unwrap_or_default() {
-            for instance in reservation.instances().unwrap_or_default() {
-                match instance.state.clone().unwrap().name {
-                    Some(aws_sdk_ec2::model::InstanceStateName::Running) => {
-                        running_insts.push(instance.to_owned())
-                    }
-                    _ => offline_insts.push(instance.to_owned()),
-                }
-            }
+        for net in global_nets.global_networks().unwrap_or_default() {
+            g_nets.push(net.to_owned());
         }
 
-        let r = AmazonCollection::AmazonInstances(running_insts);
-        Ok((r, o))
+        Ok(AmazonCollection::AmazonNetworks(g_nets))
     }
 
     pub async fn runner(region: &str) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
@@ -28,7 +21,7 @@ pub mod collector {
         let shared_config = aws_config::from_env().region(region_provider).load().await;
         let client = Client::new(&shared_config);
 
-        match match_instances(&client).await {
+        match get_networks(&client).await {
             Ok(res) => Ok(res),
             Err(e) => Err(e.into()),
         }

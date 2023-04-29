@@ -103,6 +103,9 @@ fn aws_projector<'a>(
                     }
                 }
             }
+            AmazonCollection::AmazonNetworks(nets) => {
+                todo!()
+            }
         }
     }
 
