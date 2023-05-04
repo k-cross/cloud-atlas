@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if opts.verbose { tracing_subscriber::fmt::init(); }
 
     let aws_provider = provider::build_aws(opts.verbose, opts.region.clone()).await?;
+    dbg!(&aws_provider);
 
     // TODO: log output
     if opts.verbose { dbg!(&aws_provider); }
