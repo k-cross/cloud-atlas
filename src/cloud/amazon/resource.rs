@@ -1,7 +1,7 @@
 pub mod collector {
     use aws_config::meta::region::RegionProviderChain;
-    use aws_sdk_config::model::{ResourceType, ResourceIdentifier};
-    use aws_sdk_config::{Client, Error, Region};
+    use aws_sdk_config::types::{ResourceType, ResourceIdentifier};
+    use aws_sdk_config::{Client, Error, config::Region};
     use crate::cloud::definition::AmazonCollection;
     use std::collections::HashMap;
 

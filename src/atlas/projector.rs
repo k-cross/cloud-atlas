@@ -82,12 +82,21 @@ fn aws_projector<'a>(
                     if use_aws_resource(res_name.as_str()) {
                         for r in rs {
                             // add region edges
-                            graph.add_edge(region, res_name.as_str(), 0);
+                            if use_global(res_name.as_str()) {
+                                graph.add_edge("global", res_name.as_str(), 0);
+                            } else {
+                                graph.add_edge(region, res_name.as_str(), 0);
+                            }
 
                             // add main edges
                             graph.add_edge(res_name.as_str(), r.resource_id().unwrap(), 0);
                         }
                     }
+                }
+            }
+            AmazonCollection::AmazonClusters(clusters) => {
+                for cluster in clusters {
+                    graph.add_edge(region, cluster.cluster_arn().unwrap_or_default(), 0);
                 }
             }
             // TODO: possibly remove
@@ -110,5 +119,12 @@ fn use_aws_resource(name: &str) -> bool {
     match name {
         "AWS::CodeDeploy::DeploymentConfig" => false,
         _ => true,
+    }
+}
+
+fn use_global(name: &str) -> bool {
+    match name {
+        "AWS::S3::Bucket" => true,
+        _ => false,
     }
 }

@@ -1,17 +1,20 @@
 pub mod collector {
     use aws_config::meta::region::RegionProviderChain;
-    use aws_sdk_networkmanager::{Client, Error, config::Region};
+    use aws_sdk_ecs::types::Cluster;
+    use aws_sdk_ecs::{config::Region, Client, Error};
     use crate::cloud::definition::AmazonCollection;
 
-    async fn get_networks(client: &Client) -> Result<AmazonCollection, Error> {
-        let global_nets = client.describe_global_networks().send().await?;
-        let mut g_nets = Vec::new();
+    async fn get_clusters(client: &Client) -> Result<Vec<Cluster>, Error> {
+        let resp = client
+            .describe_clusters()
+            .send()
+            .await?;
 
-        for net in global_nets.global_networks().unwrap_or_default() {
-            g_nets.push(net.to_owned());
-        }
+        let cs = if let Some(clusters) = resp.clusters {
+            clusters.to_owned()
+        } else { Vec::new() };
 
-        Ok(AmazonCollection::AmazonNetworks(g_nets))
+        Ok(cs)
     }
 
     pub async fn runner(region: &str) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
@@ -21,8 +24,8 @@ pub mod collector {
         let shared_config = aws_config::from_env().region(region_provider).load().await;
         let client = Client::new(&shared_config);
 
-        match get_networks(&client).await {
-            Ok(res) => Ok(res),
+        match get_clusters(&client).await {
+            Ok(res) => Ok(AmazonCollection::AmazonClusters(res)),
             Err(e) => Err(e.into()),
         }
     }
