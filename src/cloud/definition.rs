@@ -1,5 +1,7 @@
-use aws_sdk_config::model::ResourceIdentifier as AWSResource;
-use aws_sdk_ec2::model::Instance as AWSInstance;
+use aws_sdk_config::types::ResourceIdentifier as AWSResource;
+use aws_sdk_ec2::types::Instance as AWSInstance;
+use aws_sdk_ecs::types::Cluster as AWSCluster;
+use aws_sdk_networkmanager::types::GlobalNetwork as AWSNetwork;
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -18,7 +20,9 @@ pub enum Provider {
 #[derive(Debug)]
 pub enum AmazonCollection {
     AmazonInstances(Vec<AWSInstance>),
+    AmazonNetworks(Vec<AWSNetwork>),
     AmazonResources(HashMap<String, Vec<AWSResource>>),
+    AmazonClusters(Vec<AWSCluster>),
 }
 
 #[derive(Debug)]
