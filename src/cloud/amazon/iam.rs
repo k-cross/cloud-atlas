@@ -3,7 +3,6 @@ pub mod collector {
     use aws_sdk_iam::types::{User, Policy, Group, Role};
     use aws_sdk_iam::{config::Region, Client, Error};
     use crate::cloud::definition::AmazonCollection;
-    use std::collections::HashMap;
 
     async fn get_iam_info(client: &Client) -> Result<(Vec<User>, Vec<Role>, Vec<Group>, Vec<Policy>), Error> {
         let user_req = client
@@ -19,7 +18,7 @@ pub mod collector {
             .send();
 
         let role_req = client
-            .list_policies()
+            .list_roles()
             .send();
 
         let user_resp = user_req.await?;
@@ -55,12 +54,14 @@ pub mod collector {
 
         match get_iam_info(&client).await {
             Ok((users, roles, groups, policies)) => {
+              Ok(
                 AmazonCollection::AmazonIAM {
                     groups: groups,
                     policies: policies,
                     roles: roles,
                     users: users,
                 }
+              )
             }
             Err(e) => Err(e.into()),
         }
