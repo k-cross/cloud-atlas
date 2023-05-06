@@ -45,8 +45,15 @@ fn aws_projector<'a>(
                             0,
                         );
 
+                        //track both ipv4 across region and ami-id
                         graph.add_edge(
                             place.availability_zone.as_ref().unwrap().as_str(),
+                            inst.private_ip_address.as_ref().unwrap().as_str(),
+                            0,
+                        );
+
+                        graph.add_edge(
+                            inst.image_id.as_ref().unwrap().as_str(),
                             inst.private_ip_address.as_ref().unwrap().as_str(),
                             0,
                         );
@@ -97,6 +104,30 @@ fn aws_projector<'a>(
             AmazonCollection::AmazonClusters(clusters) => {
                 for cluster in clusters {
                     graph.add_edge(region, cluster.cluster_arn().unwrap_or_default(), 0);
+                }
+            }
+            AmazonCollection::AmazonLambdas(lambdas) => {
+                for lambda in lambdas {
+                    graph.add_edge(region, lambda.function_name().unwrap_or_default(), 0);
+                    graph.add_edge(
+                        lambda.function_name().unwrap_or_default(),
+                        lambda.role().unwrap_or_default(),
+                        0,
+                    );
+                    graph.add_edge(
+                        lambda.function_name().unwrap_or_default(),
+                        lambda.function_arn().unwrap_or_default(),
+                        0,
+                    );
+                }
+
+                if opts.verbose {
+                    dbg!(&lambdas);
+                }
+            }
+            AmazonCollection::AmazonEventbridge(buses) => {
+                if opts.verbose {
+                    dbg!(&buses);
                 }
             }
             // TODO: possibly remove
