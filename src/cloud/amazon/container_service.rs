@@ -1,18 +1,17 @@
 pub mod collector {
+    use crate::cloud::definition::AmazonCollection;
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_ecs::types::Cluster;
     use aws_sdk_ecs::{config::Region, Client, Error};
-    use crate::cloud::definition::AmazonCollection;
 
     async fn get_clusters(client: &Client) -> Result<Vec<Cluster>, Error> {
-        let resp = client
-            .describe_clusters()
-            .send()
-            .await?;
+        let resp = client.describe_clusters().send().await?;
 
         let cs = if let Some(clusters) = resp.clusters {
             clusters.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         Ok(cs)
     }

@@ -1,18 +1,17 @@
 pub mod collector {
+    use crate::cloud::definition::AmazonCollection;
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_eventbridge::types::EventBus;
     use aws_sdk_eventbridge::{config::Region, Client, Error};
-    use crate::cloud::definition::AmazonCollection;
 
     async fn get_event_info(client: &Client) -> Result<Vec<EventBus>, Error> {
-        let resp = client
-            .list_event_buses()
-            .send()
-            .await?;
+        let resp = client.list_event_buses().send().await?;
 
         let es = if let Some(buses) = resp.event_buses {
             buses.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         Ok(es)
     }

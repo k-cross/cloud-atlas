@@ -17,7 +17,7 @@ pub enum CloudError {
 
 #[derive(Debug)]
 pub enum Provider {
-    AWS(Vec<AmazonCollection>),
+    AWS(Vec<(String, AmazonCollection)>),
     GCP(Vec<GoogleCollection>),
     Azure(Vec<MicrosoftCollection>),
 }
