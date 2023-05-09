@@ -11,13 +11,12 @@ pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
 }
 
 fn aws_projector<'a>(
-    aws_data: &'a Vec<AmazonCollection>,
+    aws_data: &'a Vec<(&str, AmazonCollection)>,
     opts: &'a Opt,
 ) -> DiGraphMap<&'a str, u8> {
     let mut graph = DiGraphMap::new();
-    let region = opts.region.as_str();
 
-    for x in aws_data {
+    for (region, x) in aws_data {
         match x {
             AmazonCollection::AmazonInstances(instance_data) => {
                 for inst in instance_data {
@@ -144,31 +143,63 @@ fn aws_projector<'a>(
                 }
 
                 for u in us {
-                  graph.add_edge(region, u.arn().unwrap_or_default(), 0);
-                  graph.add_edge(u.arn().unwrap_or_default(), u.path().unwrap_or_default(), 0);
-                  graph.add_edge(u.arn().unwrap_or_default(), u.user_name().unwrap_or_default(), 0);
-                  graph.add_edge(u.arn().unwrap_or_default(), u.user_id().unwrap_or_default(), 0);
+                    graph.add_edge(region, u.arn().unwrap_or_default(), 0);
+                    graph.add_edge(u.arn().unwrap_or_default(), u.path().unwrap_or_default(), 0);
+                    graph.add_edge(
+                        u.arn().unwrap_or_default(),
+                        u.user_name().unwrap_or_default(),
+                        0,
+                    );
+                    graph.add_edge(
+                        u.arn().unwrap_or_default(),
+                        u.user_id().unwrap_or_default(),
+                        0,
+                    );
                 }
 
                 for r in rs {
-                  graph.add_edge(region, r.arn().unwrap_or_default(), 0);
-                  graph.add_edge(r.arn().unwrap_or_default(), r.path().unwrap_or_default(), 0);
-                  graph.add_edge(r.arn().unwrap_or_default(), r.role_id().unwrap_or_default(), 0);
-                  graph.add_edge(r.arn().unwrap_or_default(), r.role_name().unwrap_or_default(), 0);
+                    graph.add_edge(region, r.arn().unwrap_or_default(), 0);
+                    graph.add_edge(r.arn().unwrap_or_default(), r.path().unwrap_or_default(), 0);
+                    graph.add_edge(
+                        r.arn().unwrap_or_default(),
+                        r.role_id().unwrap_or_default(),
+                        0,
+                    );
+                    graph.add_edge(
+                        r.arn().unwrap_or_default(),
+                        r.role_name().unwrap_or_default(),
+                        0,
+                    );
                 }
 
                 for g in gs {
-                  graph.add_edge(region, g.arn().unwrap_or_default(), 0);
-                  graph.add_edge(g.arn().unwrap_or_default(), g.path().unwrap_or_default(), 0);
-                  graph.add_edge(g.arn().unwrap_or_default(), g.group_id().unwrap_or_default(), 0);
-                  graph.add_edge(g.arn().unwrap_or_default(), g.group_name().unwrap_or_default(), 0);
+                    graph.add_edge(region, g.arn().unwrap_or_default(), 0);
+                    graph.add_edge(g.arn().unwrap_or_default(), g.path().unwrap_or_default(), 0);
+                    graph.add_edge(
+                        g.arn().unwrap_or_default(),
+                        g.group_id().unwrap_or_default(),
+                        0,
+                    );
+                    graph.add_edge(
+                        g.arn().unwrap_or_default(),
+                        g.group_name().unwrap_or_default(),
+                        0,
+                    );
                 }
 
                 for p in ps {
-                  graph.add_edge(region, p.arn().unwrap_or_default(), 0);
-                  graph.add_edge(p.arn().unwrap_or_default(), p.path().unwrap_or_default(), 0);
-                  graph.add_edge(p.arn().unwrap_or_default(), p.policy_name().unwrap_or_default(), 0);
-                  graph.add_edge(p.arn().unwrap_or_default(), p.policy_id().unwrap_or_default(), 0);
+                    graph.add_edge(region, p.arn().unwrap_or_default(), 0);
+                    graph.add_edge(p.arn().unwrap_or_default(), p.path().unwrap_or_default(), 0);
+                    graph.add_edge(
+                        p.arn().unwrap_or_default(),
+                        p.policy_name().unwrap_or_default(),
+                        0,
+                    );
+                    graph.add_edge(
+                        p.arn().unwrap_or_default(),
+                        p.policy_id().unwrap_or_default(),
+                        0,
+                    );
                 }
             }
             // TODO: possibly remove

@@ -1,31 +1,31 @@
+use crate::cloud::definition::Provider;
 use crate::cloud::amazon::{
     container_service, 
+    eventbridge,
+    iam, 
     instance, 
+    lambda,
     network,
     resource,
-    iam,
     lambda,
     eventbridge,
 };
-use crate::cloud::definition::Provider;
 
-pub async fn build_aws(verbose: bool, region: String) -> Result<Provider, Box<dyn std::error::Error>> {
-    let resource_col  = resource::collector::runner(verbose, region.as_str());
-    let instance_col  = instance::collector::runner(region.as_str());
-    let network_col   = network::collector::runner(region.as_str());
-    let container_col = container_service::collector::runner(region.as_str());
-    let lambda_col    = lambda::collector::runner(region.as_str());
-    let evts_col      = eventbridge::collector::runner(region.as_str());
-    let iam_col       = iam::collector::runner(region.as_str());
+pub async fn build_aws(verbose: bool, regions: Vec<String>) -> Result<Provider, Box<dyn std::error::Error>> {
+    let mut services = Vec::new();
 
-    // await for the collectors to finish
-    let  nets           =  network_col.await?;
-    let  resources      =  resource_col.await?;
-    let  running_insts  =  instance_col.await?;
-    let  conts          =  container_col.await?;
-    let  funcs          =  lambda_col.await?;
-    let  evts           =  evts_col.await?;
-    let  iam            =  iam_col.await?;
+    for r in regions {
+      // TODO: add conditionals from options to remove services if needed
+      services.push((r.as_str(), resource::collector::runner(verbose, r.as_str())));
+      services.push((r.as_str(), instance::collector::runner(r.as_str())));
+      services.push((r.as_str(), network::collector::runner(r.as_str())));
+      services.push((r.as_str(), container_service::collector::runner(r.as_str())));
+      services.push((r.as_str(), lambda::collector::runner(r.as_str())));
+      services.push((r.as_str(), eventbridge::collector::runner(r.as_str())));
+      services.push((r.as_str(), iam::collector::runner(r.as_str())));
+    }
 
-    Ok(Provider::AWS(vec![running_insts, resources, nets, conts, funcs, evts, iam]))
+    services = services.into_iter().map(|x, y| (x, y.await?) ).collect();
+
+    Ok(Provider::AWS(services))
 }

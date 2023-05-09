@@ -11,8 +11,8 @@ pub mod atlas;
 #[clap(about, version, long_about = None)]
 pub struct Opt {
     /// The AWS Region.
-    #[clap(short, long, default_value = "us-east-1")]
-    region: String,
+    #[clap(short, long, default_value = vec!["us-east-1"])]
+    region: Vec<String>,
 
     /// Include all mappings by default
     #[clap(short, long)]
