@@ -1,12 +1,14 @@
 pub mod collector {
-    use aws_config::meta::region::RegionProviderChain;
-    use aws_sdk_config::types::{ResourceType, ResourceIdentifier};
-    use aws_sdk_config::{Client, Error, config::Region};
     use crate::cloud::definition::AmazonCollection;
+    use aws_config::meta::region::RegionProviderChain;
+    use aws_sdk_config::types::{ResourceIdentifier, ResourceType};
+    use aws_sdk_config::{config::Region, Client, Error};
     use std::collections::HashMap;
 
     // Lists resources
-    async fn scan_resources(client: &Client) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Error> {
+    async fn scan_resources(
+        client: &Client,
+    ) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Error> {
         let mut r_map = HashMap::new();
 
         for value in ResourceType::values() {
@@ -29,13 +31,19 @@ pub mod collector {
         Ok(r_map)
     }
 
-    pub async fn runner(verbose: bool, region: &str) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    pub async fn runner(
+        verbose: bool,
+        region: &str,
+    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
         let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
 
         if verbose {
-            println!("Region: {}", region_provider.region().await.unwrap().as_ref());
+            println!(
+                "Region: {}",
+                region_provider.region().await.unwrap().as_ref()
+            );
             println!();
         }
 

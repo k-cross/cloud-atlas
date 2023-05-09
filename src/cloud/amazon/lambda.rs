@@ -1,18 +1,17 @@
 pub mod collector {
+    use crate::cloud::definition::AmazonCollection;
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_lambda::types::FunctionConfiguration;
     use aws_sdk_lambda::{config::Region, Client, Error};
-    use crate::cloud::definition::AmazonCollection;
 
     async fn get_lambdas(client: &Client) -> Result<Vec<FunctionConfiguration>, Error> {
-        let resp = client
-            .list_functions()
-            .send()
-            .await?;
+        let resp = client.list_functions().send().await?;
 
         let fs = if let Some(funcs) = resp.functions() {
             funcs.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         Ok(fs)
     }

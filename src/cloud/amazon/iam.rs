@@ -1,25 +1,19 @@
 pub mod collector {
-    use aws_config::meta::region::RegionProviderChain;
-    use aws_sdk_iam::types::{User, Policy, Group, Role};
-    use aws_sdk_iam::{config::Region, Client, Error};
     use crate::cloud::definition::AmazonCollection;
+    use aws_config::meta::region::RegionProviderChain;
+    use aws_sdk_iam::types::{Group, Policy, Role, User};
+    use aws_sdk_iam::{config::Region, Client, Error};
 
-    async fn get_iam_info(client: &Client) -> Result<(Vec<User>, Vec<Role>, Vec<Group>, Vec<Policy>), Error> {
-        let user_req = client
-            .list_users()
-            .send();
+    async fn get_iam_info(
+        client: &Client,
+    ) -> Result<(Vec<User>, Vec<Role>, Vec<Group>, Vec<Policy>), Error> {
+        let user_req = client.list_users().send();
 
-        let group_req = client
-            .list_groups()
-            .send();
+        let group_req = client.list_groups().send();
 
-        let policy_req = client
-            .list_policies()
-            .send();
+        let policy_req = client.list_policies().send();
 
-        let role_req = client
-            .list_roles()
-            .send();
+        let role_req = client.list_roles().send();
 
         let user_resp = user_req.await?;
         let role_resp = role_req.await?;
@@ -28,19 +22,27 @@ pub mod collector {
 
         let us = if let Some(users) = user_resp.users() {
             users.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         let rs = if let Some(roles) = role_resp.roles() {
             roles.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         let gs = if let Some(groups) = group_resp.groups() {
             groups.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         let ps = if let Some(policies) = policy_resp.policies() {
             policies.to_owned()
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
 
         Ok((us, rs, gs, ps))
     }
@@ -53,16 +55,12 @@ pub mod collector {
         let client = Client::new(&shared_config);
 
         match get_iam_info(&client).await {
-            Ok((users, roles, groups, policies)) => {
-              Ok(
-                AmazonCollection::AmazonIAM {
-                    groups: groups,
-                    policies: policies,
-                    roles: roles,
-                    users: users,
-                }
-              )
-            }
+            Ok((users, roles, groups, policies)) => Ok(AmazonCollection::AmazonIAM {
+                groups: groups,
+                policies: policies,
+                roles: roles,
+                users: users,
+            }),
             Err(e) => Err(e.into()),
         }
     }

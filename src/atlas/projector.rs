@@ -11,10 +11,10 @@ pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
 }
 
 fn aws_projector<'a>(
-    aws_data: &'a Vec<(&str, AmazonCollection)>,
+    aws_data: &'a Vec<(String, AmazonCollection)>,
     opts: &'a Opt,
 ) -> DiGraphMap<&'a str, u8> {
-    let mut graph = DiGraphMap::new();
+    let mut graph: DiGraphMap<&str, u8> = DiGraphMap::new();
 
     for (region, x) in aws_data {
         match x {

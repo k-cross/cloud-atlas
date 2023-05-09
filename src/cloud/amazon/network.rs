@@ -1,7 +1,7 @@
 pub mod collector {
-    use aws_config::meta::region::RegionProviderChain;
-    use aws_sdk_networkmanager::{Client, Error, config::Region};
     use crate::cloud::definition::AmazonCollection;
+    use aws_config::meta::region::RegionProviderChain;
+    use aws_sdk_networkmanager::{config::Region, Client, Error};
 
     async fn get_networks(client: &Client) -> Result<AmazonCollection, Error> {
         let global_nets = client.describe_global_networks().send().await?;
