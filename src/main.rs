@@ -11,7 +11,7 @@ pub mod cloud;
 #[clap(about, version, long_about = None)]
 pub struct Opt {
     /// The AWS Region.
-    #[clap(short, long, value_parser, default_values = vec!["us-east-1"])]
+    #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"])]
     regions: Vec<String>,
 
     /// Include all mappings by default
