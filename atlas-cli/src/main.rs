@@ -1,5 +1,5 @@
-use crate::atlas::projector;
-use crate::cloud::amazon::provider;
+use cloud_atlas::atlas::projector;
+use cloud_atlas::cloud::amazon::provider;
 use clap::Parser;
 use petgraph::dot::{Config, Dot};
 use std::fs;
@@ -31,19 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing_subscriber::fmt::init();
     }
 
-    let aws_provider = provider::build_aws(opts.verbose, &opts).await?;
-
-    // TODO: log output
-    if opts.verbose {
-        dbg!(&aws_provider);
-    }
-
-    let g = projector::build(&aws_provider, &opts);
-
-    // TODO: log output
-    if opts.verbose {
-        dbg!(&g);
-    }
+    let g = cloud_atlas::graph(opts).await?;
 
     let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
     fs::write("atlas.dot", s)?;
