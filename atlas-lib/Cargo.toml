@@ -1,0 +1,23 @@
+[package]
+name = "atlas-lib"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+aws-config = "0.55"
+aws-sdk-config = "0.27"
+aws-sdk-ec2 = "0.27"
+aws-sdk-ecs = "0.27"
+aws-sdk-eventbridge = "0.27"
+aws-sdk-iam = "0.27.0"
+aws-sdk-lambda = "0.27"
+aws-sdk-networkmanager = "0.27"
+aws-types = "0.55"
+clap = { version = "4.0", features = ["derive", "unicode"] }
+futures = "0.3"
+petgraph = "0.6"
+tokio = { version = "1.21", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1.2", features = ["v4"] }
