@@ -1,11 +1,6 @@
-use cloud_atlas::atlas::projector;
-use cloud_atlas::cloud::amazon::provider;
 use clap::Parser;
 use petgraph::dot::{Config, Dot};
 use std::fs;
-
-pub mod atlas;
-pub mod cloud;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
@@ -31,8 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing_subscriber::fmt::init();
     }
 
-    let g = cloud_atlas::graph(opts).await?;
+    let settings = atlas_lib::Settings {
+        regions: opts.regions,
+        all: opts.all,
+        verbose: opts.verbose,
+    };
 
+    let g = atlas_lib::graph(settings).await?;
     let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
     fs::write("atlas.dot", s)?;
 

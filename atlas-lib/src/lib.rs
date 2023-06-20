@@ -1,7 +1,5 @@
 use crate::atlas::projector;
 use crate::cloud::amazon::provider;
-use petgraph::dot::{Config, Dot};
-use std::fs;
 
 pub mod atlas;
 pub mod cloud;
@@ -9,19 +7,16 @@ pub mod cloud;
 #[derive(Debug)]
 pub struct Settings {
     /// The AWS Region.
-    #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"])]
     regions: Vec<String>,
 
     /// Include all mappings by default
-    #[clap(short, long)]
     all: bool,
 
     /// Whether to display additional information.
-    #[clap(short, long)]
     verbose: bool,
 }
 
-async pub fn graph(opts: Settings) -> Result<petgraph::DiGraphMap<&str, u8>, Box<dyn std::error::Error>> {
+pub async fn graph(opts: Settings) -> Result<petgraph::DiGraphMap<&'a str, u8>, Box<dyn std::error::Error>> {
     if opts.verbose {
         tracing_subscriber::fmt::init();
     }

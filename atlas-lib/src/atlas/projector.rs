@@ -1,8 +1,8 @@
 use crate::cloud::definition::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
-use crate::Opt;
+use crate::Settings;
 use petgraph::graphmap::DiGraphMap;
 
-pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
+pub fn build<'b>(data: &'b Provider, opts: &'b Settings) -> DiGraphMap<&'b str, u8> {
     match data {
         Provider::AWS(aws_data) => aws_projector(&aws_data, opts),
         Provider::GCP(gcp_data) => gcp_projector(&gcp_data),
@@ -12,7 +12,7 @@ pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
 
 fn aws_projector<'a>(
     aws_data: &'a Vec<(String, AmazonCollection)>,
-    opts: &'a Opt,
+    opts: &'a Settings,
 ) -> DiGraphMap<&'a str, u8> {
     let mut graph: DiGraphMap<&str, u8> = DiGraphMap::new();
 

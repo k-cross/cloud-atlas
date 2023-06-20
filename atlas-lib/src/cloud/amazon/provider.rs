@@ -2,9 +2,9 @@ use crate::cloud::amazon::{
     container_service, eventbridge, iam, instance, lambda, network, resource,
 };
 use crate::cloud::definition::Provider;
-use crate::Opt;
+use crate::Settings;
 
-pub async fn build_aws(verbose: bool, opts: &Opt) -> Result<Provider, Box<dyn std::error::Error>> {
+pub async fn build_aws(verbose: bool, opts: &Settings) -> Result<Provider, Box<dyn std::error::Error>> {
     let mut services = Vec::new();
 
     for r in opts.regions.clone() {
