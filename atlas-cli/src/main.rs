@@ -1,6 +1,8 @@
 use clap::Parser;
 use petgraph::dot::{Config, Dot};
 use std::fs;
+use atlas_lib::atlas::projector;
+use atlas_lib::cloud::amazon::provider;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
@@ -32,7 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         verbose: opts.verbose,
     };
 
-    let g = atlas_lib::graph(settings).await?;
+    let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
+    let g = projector::build(&aws_provider, &settings);
+    //let (_provider, g) = atlas_lib::graph(&settings).await?;
     let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
     fs::write("atlas.dot", s)?;
 
