@@ -36,7 +36,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
     let g = projector::build(&aws_provider, &settings);
-    //let (_provider, g) = atlas_lib::graph(&settings).await?;
     let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
     fs::write("atlas.dot", s)?;
 
