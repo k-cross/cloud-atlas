@@ -1,8 +1,8 @@
 use crate::cloud::definition::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
-use crate::Opt;
+use crate::Settings;
 use petgraph::graphmap::DiGraphMap;
 
-pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
+pub fn build<'b>(data: &'b Provider, opts: &'b Settings) -> DiGraphMap<&'b str, u8> {
     match data {
         Provider::AWS(aws_data) => aws_projector(&aws_data, opts),
         Provider::GCP(gcp_data) => gcp_projector(&gcp_data),
@@ -10,9 +10,9 @@ pub fn build<'b>(data: &'b Provider, opts: &'b Opt) -> DiGraphMap<&'b str, u8> {
     }
 }
 
-fn aws_projector<'a>(
+pub fn aws_projector<'a>(
     aws_data: &'a Vec<(String, AmazonCollection)>,
-    opts: &'a Opt,
+    opts: &'a Settings,
 ) -> DiGraphMap<&'a str, u8> {
     let mut graph: DiGraphMap<&str, u8> = DiGraphMap::new();
 
@@ -129,92 +129,17 @@ fn aws_projector<'a>(
                     dbg!(&buses);
                 }
             }
-            AmazonCollection::AmazonIAM {
-                groups: gs,
-                roles: rs,
-                users: us,
-                policies: ps,
-            } => {
-                if opts.verbose {
-                    dbg!(&us);
-                    dbg!(&ps);
-                    dbg!(&gs);
-                    dbg!(&rs);
-                }
-
-                for u in us {
-                    graph.add_edge(region, u.arn().unwrap_or_default(), 0);
-                    graph.add_edge(u.arn().unwrap_or_default(), u.path().unwrap_or_default(), 0);
-                    graph.add_edge(
-                        u.arn().unwrap_or_default(),
-                        u.user_name().unwrap_or_default(),
-                        0,
-                    );
-                    graph.add_edge(
-                        u.arn().unwrap_or_default(),
-                        u.user_id().unwrap_or_default(),
-                        0,
-                    );
-                }
-
-                for r in rs {
-                    graph.add_edge(region, r.arn().unwrap_or_default(), 0);
-                    graph.add_edge(r.arn().unwrap_or_default(), r.path().unwrap_or_default(), 0);
-                    graph.add_edge(
-                        r.arn().unwrap_or_default(),
-                        r.role_id().unwrap_or_default(),
-                        0,
-                    );
-                    graph.add_edge(
-                        r.arn().unwrap_or_default(),
-                        r.role_name().unwrap_or_default(),
-                        0,
-                    );
-                }
-
-                for g in gs {
-                    graph.add_edge(region, g.arn().unwrap_or_default(), 0);
-                    graph.add_edge(g.arn().unwrap_or_default(), g.path().unwrap_or_default(), 0);
-                    graph.add_edge(
-                        g.arn().unwrap_or_default(),
-                        g.group_id().unwrap_or_default(),
-                        0,
-                    );
-                    graph.add_edge(
-                        g.arn().unwrap_or_default(),
-                        g.group_name().unwrap_or_default(),
-                        0,
-                    );
-                }
-
-                for p in ps {
-                    graph.add_edge(region, p.arn().unwrap_or_default(), 0);
-                    graph.add_edge(p.arn().unwrap_or_default(), p.path().unwrap_or_default(), 0);
-                    graph.add_edge(
-                        p.arn().unwrap_or_default(),
-                        p.policy_name().unwrap_or_default(),
-                        0,
-                    );
-                    graph.add_edge(
-                        p.arn().unwrap_or_default(),
-                        p.policy_id().unwrap_or_default(),
-                        0,
-                    );
-                }
-            }
-            // TODO: possibly remove
-            AmazonCollection::AmazonNetworks(_nets) => (),
         }
     }
 
     graph
 }
 
-fn gcp_projector<'a>(_gcp_data: &Vec<GoogleCollection>) -> DiGraphMap<&'a str, u8> {
+pub fn gcp_projector<'a>(_gcp_data: &Vec<GoogleCollection>) -> DiGraphMap<&'a str, u8> {
     todo!()
 }
 
-fn azure_projector<'a>(_azure_data: &Vec<MicrosoftCollection>) -> DiGraphMap<&'a str, u8> {
+pub fn azure_projector<'a>(_azure_data: &Vec<MicrosoftCollection>) -> DiGraphMap<&'a str, u8> {
     todo!()
 }
 

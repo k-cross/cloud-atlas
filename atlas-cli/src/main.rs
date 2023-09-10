@@ -1,11 +1,8 @@
-use crate::atlas::projector;
-use crate::cloud::amazon::provider;
 use clap::Parser;
 use petgraph::dot::{Config, Dot};
 use std::fs;
-
-pub mod atlas;
-pub mod cloud;
+use atlas_lib::atlas::projector;
+use atlas_lib::cloud::amazon::provider;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
@@ -31,20 +28,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing_subscriber::fmt::init();
     }
 
-    let aws_provider = provider::build_aws(opts.verbose, &opts).await?;
+    let settings = atlas_lib::Settings {
+        regions: opts.regions,
+        all: opts.all,
+        verbose: opts.verbose,
+    };
 
-    // TODO: log output
-    if opts.verbose {
-        dbg!(&aws_provider);
-    }
-
-    let g = projector::build(&aws_provider, &opts);
-
-    // TODO: log output
-    if opts.verbose {
-        dbg!(&g);
-    }
-
+    let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
+    let g = projector::build(&aws_provider, &settings);
     let s = format!("{:?}", Dot::with_config(&g, &[Config::EdgeNoLabel]));
     fs::write("atlas.dot", s)?;
 
