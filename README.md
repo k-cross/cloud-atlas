@@ -7,20 +7,16 @@ It builds from existing cloud configurations as they exist in reality, not an id
 
 ## Goals
 
-- [ ] Visualize graph in comprehensible layout
-    - [ ] Create a view for _networks_ (subnets, load ballancers, etc)
-    - [ ] Create a view for _security_ (security groups, acls, etc)
-    - [ ] Create a view for _services_ (a less fine grained view of networks)
-    - [x] Create a view with everything
+- [ ] Visualize graph in comprehensible layout exploring network/service layers
 - [ ] Make the graph explorable
-    - [x] Outputs a `dot`
+    - [x] Outputs a `dot` and explorable w/ other tools like `gephi`
 - [ ] Work across GCP, AWS, and Azure
     - [x] AWS
 - [ ] Extendable for on-prem use-cases
 
 ### Status
 
-The best tool for exploring the dot file so far has been [gephi](https://gephi.org/).
+The best tool I know of for exploring the dot file so far has been [gephi](https://gephi.org/).
 Current work is being done to build better relationships in the graph output.
 The graph only generates for a single AWS region, but it is intended to give multi-region relationships eventually.
 
@@ -39,4 +35,5 @@ This is a simple CLI utility.
 
 ## Running
 
-Using `atlas` assumes that AWS credentials are in place because it makes requests to AWS resources via the API.
+Using `atlas` assumes that AWS credentials are in place.
+It runs and generates an `atlas.dot` file in the directory being run.
