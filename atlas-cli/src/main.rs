@@ -18,6 +18,10 @@ pub struct Opt {
     /// Whether to display additional information.
     #[clap(short, long)]
     verbose: bool,
+
+    /// Whether to exclude non-explicitly defined values by default
+    #[clap(short, long, hide(true))]
+    exclude: bool,
 }
 
 #[tokio::main]
@@ -32,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         regions: opts.regions,
         all: opts.all,
         verbose: opts.verbose,
+        exclude_by_default: opts.exclude,
     };
 
     let aws_provider = provider::build_aws(settings.verbose, &settings).await?;

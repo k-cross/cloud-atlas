@@ -7,10 +7,10 @@ pub mod collector {
     async fn get_lambdas(client: &Client) -> Result<Vec<FunctionConfiguration>, Error> {
         let resp = client.list_functions().send().await?;
 
-        let fs = if let Some(funcs) = resp.functions() {
-            funcs.to_owned()
-        } else {
+        let fs = if resp.functions().is_empty() {
             Vec::new()
+        } else {
+            resp.functions().to_owned()
         };
 
         Ok(fs)

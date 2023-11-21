@@ -20,7 +20,7 @@ pub mod collector {
                 .send()
                 .await?;
 
-            let resources = resp.resource_identifiers().unwrap_or_default();
+            let resources = resp.resource_identifiers();
 
             // grab exactly 1 of each type for now to discover more info about its structure
             if !resources.is_empty() {

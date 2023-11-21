@@ -14,8 +14,8 @@ pub mod collector {
         let resp = client.describe_instances().filters(filter).send().await?;
         let mut running_insts = Vec::new();
 
-        for reservation in resp.reservations().unwrap_or_default() {
-            for instance in reservation.instances().unwrap_or_default() {
+        for reservation in resp.reservations() {
+            for instance in reservation.instances() {
                 running_insts.push(instance.to_owned());
             }
         }

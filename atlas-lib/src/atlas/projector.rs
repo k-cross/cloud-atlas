@@ -85,7 +85,7 @@ pub fn aws_projector<'a>(
             }
             AmazonCollection::AmazonResources(resource_map) => {
                 for (res_name, rs) in resource_map {
-                    if use_aws_resource(res_name.as_str()) {
+                    if use_aws_resource(res_name.as_str(), opts.exclude_by_default) {
                         for r in rs {
                             // add region edges
                             if use_global(res_name.as_str()) {
@@ -143,10 +143,43 @@ pub fn azure_projector<'a>(_azure_data: &Vec<MicrosoftCollection>) -> DiGraphMap
     todo!()
 }
 
-fn use_aws_resource(name: &str) -> bool {
+fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
     match name {
-        "AWS::CodeDeploy::DeploymentConfig" => false,
-        _ => true,
+        // false assoc. unclear if needed
+        "AWS::RDS::DBClusterSnapshot" => false,
+        "AWS::StepFunctions::StateMachine" => false,
+        "AWS::ApiGateway::Stage" => false,
+        "AWS::ApiGatewayV2::Api" => false,
+        "AWS::EC2::NetworkAcl" => false,
+        "AWS::EC2::EIP" => false,
+        "AWS::EC2::NetworkInterface" => false,
+        "AWS::SNS::Topic" => false,
+        // true assoc.
+        "AWS::RDS::DBCluster" => true,
+        "AWS::S3::Bucket" => true,
+        "AWS::SQS::Queue" => true,
+        "AWS::EC2::RouteTable" => true,
+        "AWS::EC2::VPC" => true,
+        "AWS::EC2::Instance" => true,
+        "AWS::ElasticLoadBalancing::LoadBalancer" => true,
+        "AWS::ElasticLoadBalancingV2::LoadBalancer" => true,
+        "AWS::Redshift::ClusterSubnetGroup" => true,
+        "AWS::RDS::DBSubnetGroup" => true,
+        "AWS::EC2::Subnet" => true,
+        "AWS::EC2::InternetGateway" => true,
+        "AWS::ECS::Cluster" => true,
+        "AWS::Lambda::Function" => true,
+        "AWS::RDS::DBInstance" => true,
+        "AWS::EKS::Cluster" => true,
+        // listeners are probably too granular
+        "AWS::ElasticLoadBalancingV2::Listener" => true,
+        // TODO: below are unclear if actually wanted/needed
+        "AWS::Route53Resolver::ResolverRuleAssociation" => true,
+        "AWS::EC2::VPCEndpoint" => true,
+        "AWS::Route53Resolver::ResolverRule" => true,
+        "AWS::DynamoDB::Table" => true,
+        // exclude by default
+        _ => !exclude_by_default.to_owned(),
     }
 }
 
