@@ -11,4 +11,7 @@ pub struct Settings {
 
     /// Whether to display additional information.
     pub verbose: bool,
+
+    /// Whether or not to exclude unknown graph entites by default or try to map them
+    pub exclude_by_default: bool,
 }
