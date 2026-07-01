@@ -1,15 +1,16 @@
 # Cloud Atlas
 
-A project that that reads cloud configurations and outputs graph data.
-The goal is to make it easy to gain fast visual insight into how infrastructure is configured and connected.
+A project that discovers cloud configurations and maintains a live, in-memory property graph of the infrastructure.
+The goal is to make it easy to gain fast visual insight into how infrastructure is configured and connected by keeping a digital twin of the environment continuously synchronized with real-world reality.
 This is intended to be a visual aide to help with discussions involving architecture, and triage.
 It builds from existing cloud configurations as they exist in reality, not an idealized view of intent.
 
 ## Goals
 
+- [ ] Maintain a live, in-memory graph continuously synchronized via event streams (e.g., AWS EventBridge)
 - [ ] Visualize graph in comprehensible layout exploring network/service layers
 - [ ] Make the graph explorable
-    - [x] Outputs a `dot` and explorable w/ other tools like `gephi`
+    - [x] Outputs a point-in-time `dot` file (explorable w/ other tools like `gephi`)
 - [ ] Work across GCP, AWS, and Azure
     - [x] AWS
 - [ ] Extendable for on-prem use-cases
