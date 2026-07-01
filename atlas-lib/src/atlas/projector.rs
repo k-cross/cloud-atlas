@@ -1,8 +1,10 @@
 use crate::Settings;
 use crate::cloud::definition::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
-use petgraph::graphmap::DiGraphMap;
+use petgraph::graph::{Graph, NodeIndex};
+use std::collections::HashMap;
+use crate::atlas::definition::{Node, Edge};
 
-pub fn build<'b>(data: &'b Provider, opts: &'b Settings) -> DiGraphMap<&'b str, u8> {
+pub fn build<'b>(data: &'b Provider, opts: &'b Settings) -> Graph<Node, Edge> {
     match data {
         Provider::AWS(aws_data) => aws_projector(&aws_data, opts),
         Provider::GCP(gcp_data) => gcp_projector(&gcp_data),
@@ -13,72 +15,83 @@ pub fn build<'b>(data: &'b Provider, opts: &'b Settings) -> DiGraphMap<&'b str, 
 pub fn aws_projector<'a>(
     aws_data: &'a Vec<(String, AmazonCollection)>,
     opts: &'a Settings,
-) -> DiGraphMap<&'a str, u8> {
-    let mut graph: DiGraphMap<&str, u8> = DiGraphMap::new();
+) -> Graph<Node, Edge> {
+    let mut graph: Graph<Node, Edge> = Graph::new();
+    let mut node_map: HashMap<Node, NodeIndex> = HashMap::new();
+
+    let mut get_or_add_node = |graph: &mut Graph<Node, Edge>, node: Node| -> NodeIndex {
+        if let Some(&idx) = node_map.get(&node) {
+            idx
+        } else {
+            let idx = graph.add_node(node.clone());
+            node_map.insert(node, idx);
+            idx
+        }
+    };
 
     for (region, x) in aws_data {
+        let region_node = Node::Region { name: region.to_string() };
+        let region_idx = get_or_add_node(&mut graph, region_node);
+
         match x {
             AmazonCollection::AmazonInstances(instance_data) => {
                 for inst in instance_data {
-                    // add region info
-                    graph.add_edge(region, inst.vpc_id.as_ref().unwrap().as_str(), 0);
+                    let mut vpc_idx = None;
+                    if let Some(vpc_id) = inst.vpc_id.as_ref() {
+                        let node = Node::Vpc { id: vpc_id.to_string() };
+                        let idx = get_or_add_node(&mut graph, node);
+                        graph.add_edge(region_idx, idx, Edge::Contains);
+                        vpc_idx = Some(idx);
+                    }
 
-                    // add main edges
-                    graph.add_edge(
-                        inst.vpc_id.as_ref().unwrap().as_str(),
-                        inst.subnet_id.as_ref().unwrap().as_str(),
-                        0,
-                    );
+                    let mut subnet_idx = None;
+                    if let Some(subnet_id) = inst.subnet_id.as_ref() {
+                        let node = Node::Subnet { id: subnet_id.to_string() };
+                        let idx = get_or_add_node(&mut graph, node);
+                        if let Some(v_idx) = vpc_idx {
+                            graph.add_edge(v_idx, idx, Edge::Contains);
+                        }
+                        subnet_idx = Some(idx);
+                    }
 
-                    graph.add_edge(
-                        inst.subnet_id.as_ref().unwrap().as_str(),
-                        inst.image_id.as_ref().unwrap().as_str(),
-                        0,
-                    );
+                    let mut inst_idx = None;
+                    if let Some(instance_id) = inst.instance_id.as_ref() {
+                        let node = Node::Instance { id: instance_id.to_string() };
+                        let idx = get_or_add_node(&mut graph, node);
+                        if let Some(s_idx) = subnet_idx {
+                            graph.add_edge(s_idx, idx, Edge::Contains);
+                        }
+                        inst_idx = Some(idx);
+                    }
 
-                    // get AZ info
                     if let Some(place) = inst.placement.as_ref() {
-                        graph.add_edge(
-                            inst.image_id.as_ref().unwrap().as_str(),
-                            place.availability_zone.as_ref().unwrap().as_str(),
-                            0,
-                        );
-
-                        //track both ipv4 across region and ami-id
-                        graph.add_edge(
-                            place.availability_zone.as_ref().unwrap().as_str(),
-                            inst.private_ip_address.as_ref().unwrap().as_str(),
-                            0,
-                        );
-
-                        graph.add_edge(
-                            inst.image_id.as_ref().unwrap().as_str(),
-                            inst.private_ip_address.as_ref().unwrap().as_str(),
-                            0,
-                        );
-
-                        if let Some(ipv6_addr) = inst.ipv6_address.as_ref() {
-                            graph.add_edge(
-                                place.availability_zone.as_ref().unwrap().as_str(),
-                                ipv6_addr.as_str(),
-                                0,
-                            );
+                        if let Some(az_name) = place.availability_zone.as_ref() {
+                            let node = Node::Az { name: az_name.to_string() };
+                            let az_idx = get_or_add_node(&mut graph, node);
+                            
+                            if let Some(i_idx) = inst_idx {
+                                graph.add_edge(az_idx, i_idx, Edge::Contains);
+                            }
                         }
                     }
 
-                    // add tags if they exist
+                    if let Some(private_ip) = inst.private_ip_address.as_ref() {
+                        let node = Node::IpAddress { ip: private_ip.to_string() };
+                        let ip_idx = get_or_add_node(&mut graph, node);
+                        if let Some(i_idx) = inst_idx {
+                            graph.add_edge(i_idx, ip_idx, Edge::HasIp);
+                        }
+                    }
+
                     if let Some(tags) = inst.tags.as_ref() {
                         for tag in tags {
-                            graph.add_edge(
-                                tag.key.as_ref().unwrap().as_ref(),
-                                tag.value.as_ref().unwrap().as_ref(),
-                                0,
-                            );
-                            graph.add_edge(
-                                inst.image_id.as_ref().unwrap().as_str(),
-                                tag.key.as_ref().unwrap().as_ref(),
-                                0,
-                            );
+                            if let (Some(k), Some(v)) = (tag.key.as_ref(), tag.value.as_ref()) {
+                                let node = Node::Tag { key: k.to_string(), value: v.to_string() };
+                                let tag_idx = get_or_add_node(&mut graph, node);
+                                if let Some(i_idx) = inst_idx {
+                                    graph.add_edge(i_idx, tag_idx, Edge::HasTag);
+                                }
+                            }
                         }
                     }
                 }
@@ -87,37 +100,44 @@ pub fn aws_projector<'a>(
                 for (res_name, rs) in resource_map {
                     if use_aws_resource(res_name.as_str(), opts.exclude_by_default) {
                         for r in rs {
-                            // add region edges
-                            if use_global(res_name.as_str()) {
-                                graph.add_edge("global", res_name.as_str(), 0);
-                            } else {
-                                graph.add_edge(region, res_name.as_str(), 0);
-                            }
+                            if let Some(id) = r.resource_id() {
+                                let node = Node::Generic { id: id.to_string() };
+                                let idx = get_or_add_node(&mut graph, node);
 
-                            // add main edges
-                            graph.add_edge(res_name.as_str(), r.resource_id().unwrap(), 0);
+                                if use_global(res_name.as_str()) {
+                                    let global_node = Node::Region { name: "global".to_string() };
+                                    let g_idx = get_or_add_node(&mut graph, global_node);
+                                    graph.add_edge(g_idx, idx, Edge::Generic);
+                                } else {
+                                    graph.add_edge(region_idx, idx, Edge::Generic);
+                                }
+                            }
                         }
                     }
                 }
             }
             AmazonCollection::AmazonClusters(clusters) => {
                 for cluster in clusters {
-                    graph.add_edge(region, cluster.cluster_arn().unwrap_or_default(), 0);
+                    if let Some(arn) = cluster.cluster_arn() {
+                        let node = Node::Generic { id: arn.to_string() };
+                        let idx = get_or_add_node(&mut graph, node);
+                        graph.add_edge(region_idx, idx, Edge::Generic);
+                    }
                 }
             }
             AmazonCollection::AmazonLambdas(lambdas) => {
                 for lambda in lambdas {
-                    graph.add_edge(region, lambda.function_name().unwrap_or_default(), 0);
-                    graph.add_edge(
-                        lambda.function_name().unwrap_or_default(),
-                        lambda.role().unwrap_or_default(),
-                        0,
-                    );
-                    graph.add_edge(
-                        lambda.function_name().unwrap_or_default(),
-                        lambda.function_arn().unwrap_or_default(),
-                        0,
-                    );
+                    if let Some(name) = lambda.function_name() {
+                        let node = Node::Generic { id: name.to_string() };
+                        let idx = get_or_add_node(&mut graph, node);
+                        graph.add_edge(region_idx, idx, Edge::Generic);
+                        
+                        if let Some(role) = lambda.role() {
+                            let role_node = Node::Generic { id: role.to_string() };
+                            let r_idx = get_or_add_node(&mut graph, role_node);
+                            graph.add_edge(idx, r_idx, Edge::AttachedTo);
+                        }
+                    }
                 }
 
                 if opts.verbose {
@@ -135,11 +155,11 @@ pub fn aws_projector<'a>(
     graph
 }
 
-pub fn gcp_projector<'a>(_gcp_data: &Vec<GoogleCollection>) -> DiGraphMap<&'a str, u8> {
+pub fn gcp_projector<'a>(_gcp_data: &Vec<GoogleCollection>) -> Graph<Node, Edge> {
     todo!()
 }
 
-pub fn azure_projector<'a>(_azure_data: &Vec<MicrosoftCollection>) -> DiGraphMap<&'a str, u8> {
+pub fn azure_projector<'a>(_azure_data: &Vec<MicrosoftCollection>) -> Graph<Node, Edge> {
     todo!()
 }
 

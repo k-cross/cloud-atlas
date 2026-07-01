@@ -26,6 +26,9 @@ mod tests {
 
     #[test]
     fn amazon_instance_graph() {
+        use petgraph::dot::Dot;
+        use std::fs;
+
         let s = Settings {
             regions: vec!["us-east-1".to_owned()],
             all: false,
@@ -33,9 +36,12 @@ mod tests {
             exclude_by_default: false,
         };
         let provider = make_aws_provider();
-        dbg!(&provider);
         let g = projector::build(&provider, &s);
-        dbg!(g);
+        
+        let s = format!("{}", Dot::with_config(&g, &[]));
+        fs::write("mock_atlas.dot", s).unwrap();
+        
+        println!("Mock DOT file generated at mock_atlas.dot");
     }
 }
 
