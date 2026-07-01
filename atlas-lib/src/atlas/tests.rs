@@ -37,10 +37,10 @@ mod tests {
         };
         let provider = make_aws_provider();
         let g = projector::build(&provider, &s);
-        
+
         let s = format!("{}", Dot::with_config(&g, &[]));
         fs::write("mock_atlas.dot", s).unwrap();
-        
+
         println!("Mock DOT file generated at mock_atlas.dot");
     }
 }

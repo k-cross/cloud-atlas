@@ -1,49 +1,52 @@
 use std::fmt;
 
+/// The cloud provider this resource belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Node {
-    Region { name: String },
-    Vpc { id: String },
-    Subnet { id: String },
-    Instance { id: String },
-    IpAddress { ip: String },
-    Az { name: String },
-    Tag { key: String, value: String },
-    Generic { id: String },
+pub enum Provider {
+    Aws,
+    Gcp,
+    Azure,
+    Hetzner,
+    DigitalOcean,
+    MsGraph,
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// A node in the property graph
+/// - `name`: the resource type (e.g., "AWS::EC2::Instance", "compute.instances")
+/// - `category`: the service group (e.g., "AWS::EC2", "compute")
+/// - `id`: the unique resource identifier (e.g., "i-12345", "vpc-abc")
+/// - `provider`: which cloud this came from
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Node {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub provider: Provider,
 }
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Node::Region { name } => write!(f, "Region({})", name),
-            Node::Vpc { id } => write!(f, "Vpc({})", id),
-            Node::Subnet { id } => write!(f, "Subnet({})", id),
-            Node::Instance { id } => write!(f, "Instance({})", id),
-            Node::IpAddress { ip } => write!(f, "IpAddress({})", ip),
-            Node::Az { name } => write!(f, "Az({})", name),
-            Node::Tag { key, value } => write!(f, "Tag({}={})", key, value),
-            Node::Generic { id } => write!(f, "{}", id),
-        }
+        write!(f, "{}({})", self.name, self.id)
     }
 }
 
+/// Edge types for the topology graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Edge {
-    Contains,
-    AttachedTo,
-    HasIp,
-    HasTag,
-    Generic,
+    Contains,   // Hierarchical containment
+    ConnectsTo, // Routing/Traffic flow
+    DependsOn,  // Logical dependency
+    Manages,    // Management relationship
 }
 
 impl fmt::Display for Edge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Edge::Contains => write!(f, "Contains"),
-            Edge::AttachedTo => write!(f, "AttachedTo"),
-            Edge::HasIp => write!(f, "HasIp"),
-            Edge::HasTag => write!(f, "HasTag"),
-            Edge::Generic => write!(f, ""),
-        }
+        write!(f, "{:?}", self)
     }
 }
