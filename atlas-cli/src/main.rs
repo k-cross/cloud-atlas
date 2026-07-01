@@ -22,6 +22,10 @@ pub struct Opt {
     /// Whether to exclude non-explicitly defined values by default
     #[clap(short, long, hide(true))]
     exclude: bool,
+
+    /// Run as a long-running daemon that updates continuously
+    #[clap(short, long)]
+    daemon: bool,
 }
 
 #[tokio::main]
@@ -39,10 +43,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         exclude_by_default: opts.exclude,
     };
 
-    let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
-    let g = projector::build(&aws_provider, &settings);
-    let s = format!("{}", Dot::with_config(&g, &[]));
-    fs::write("atlas.dot", s)?;
+    if opts.daemon {
+        println!("Starting in daemon mode. Polling for changes every 60 seconds...");
+        loop {
+            // As per requirements: only fetch AWS if regions are specified (not empty).
+            // When GCP/Azure are added, we would check for their respective flags here.
+            if !settings.regions.is_empty() {
+                let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
+                let g = projector::build(&aws_provider, &settings);
+                let s = format!("{}", Dot::with_config(&g, &[]));
+                fs::write("atlas.dot", s)?;
+                println!("Graph updated successfully at atlas.dot");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    } else {
+        if !settings.regions.is_empty() {
+            let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
+            let g = projector::build(&aws_provider, &settings);
+            let s = format!("{}", Dot::with_config(&g, &[]));
+            fs::write("atlas.dot", s)?;
+        }
+    }
 
     Ok(())
 }

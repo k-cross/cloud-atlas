@@ -11,15 +11,24 @@ pub mod collector {
     ) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Error> {
         let mut r_map = HashMap::new();
 
-        for value in ResourceType::values() {
+        use futures::stream::{self, StreamExt};
+
+        let requests = stream::iter(ResourceType::values()).map(|value| {
             let parsed = ResourceType::from(*value);
+            async move {
+                let resp = client
+                    .list_discovered_resources()
+                    .resource_type(parsed)
+                    .send()
+                    .await;
+                (value, resp)
+            }
+        });
 
-            let resp = client
-                .list_discovered_resources()
-                .resource_type(parsed)
-                .send()
-                .await?;
+        let mut results = requests.buffer_unordered(10);
 
+        while let Some((value, resp_result)) = results.next().await {
+            let resp = resp_result?;
             let resources = resp.resource_identifiers();
 
             // grab exactly 1 of each type for now to discover more info about its structure

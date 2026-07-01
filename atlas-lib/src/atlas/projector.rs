@@ -212,6 +212,145 @@ pub fn aws_projector<'a>(
                     dbg!(&buses);
                 }
             }
+            AmazonCollection::AmazonLoadBalancers {
+                load_balancers,
+                target_groups,
+                listeners,
+                target_health,
+            } => {
+                for lb in load_balancers {
+                    if let Some(arn) = lb.load_balancer_arn() {
+                        let lb_node = Node {
+                            id: arn.to_string(),
+                            name: "AWS::ElasticLoadBalancingV2::LoadBalancer".to_string(),
+                            category: "AWS::ElasticLoadBalancingV2".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let lb_idx = get_or_add_node(&mut graph, lb_node);
+
+                        if let Some(vpc_id) = lb.vpc_id() {
+                            let vpc_node = Node {
+                                id: vpc_id.to_string(),
+                                name: "AWS::EC2::VPC".to_string(),
+                                category: "AWS::EC2".to_string(),
+                                provider: AtlasProvider::Aws,
+                            };
+                            let v_idx = get_or_add_node(&mut graph, vpc_node);
+                            graph.add_edge(v_idx, lb_idx, Edge::Contains);
+                        } else {
+                            graph.add_edge(region_idx, lb_idx, Edge::DependsOn);
+                        }
+                    }
+                }
+
+                for tg in target_groups {
+                    if let Some(arn) = tg.target_group_arn() {
+                        let tg_node = Node {
+                            id: arn.to_string(),
+                            name: "AWS::ElasticLoadBalancingV2::TargetGroup".to_string(),
+                            category: "AWS::ElasticLoadBalancingV2".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let tg_idx = get_or_add_node(&mut graph, tg_node);
+
+                        if let Some(vpc_id) = tg.vpc_id() {
+                            let vpc_node = Node {
+                                id: vpc_id.to_string(),
+                                name: "AWS::EC2::VPC".to_string(),
+                                category: "AWS::EC2".to_string(),
+                                provider: AtlasProvider::Aws,
+                            };
+                            let v_idx = get_or_add_node(&mut graph, vpc_node);
+                            graph.add_edge(v_idx, tg_idx, Edge::Contains);
+                        }
+
+                        if let Some(health_descriptions) = target_health.get(arn) {
+                            for target_id in health_descriptions.iter().filter_map(|h| h.target()).filter_map(|t| t.id()) {
+                                let inst_node = Node {
+                                    id: target_id.to_string(),
+                                    name: "AWS::EC2::Instance".to_string(),
+                                    category: "AWS::EC2".to_string(),
+                                    provider: AtlasProvider::Aws,
+                                };
+                                let i_idx = get_or_add_node(&mut graph, inst_node);
+                                graph.add_edge(tg_idx, i_idx, Edge::ConnectsTo);
+                            }
+                        }
+                    }
+                }
+
+                for listener in listeners {
+                    if let Some(lb_arn) = listener.load_balancer_arn() {
+                        for tg_arn in listener.default_actions().iter().filter_map(|a| a.target_group_arn()) {
+                            let lb_node = Node {
+                                id: lb_arn.to_string(),
+                                name: "AWS::ElasticLoadBalancingV2::LoadBalancer".to_string(),
+                                category: "AWS::ElasticLoadBalancingV2".to_string(),
+                                provider: AtlasProvider::Aws,
+                            };
+                            let tg_node = Node {
+                                id: tg_arn.to_string(),
+                                name: "AWS::ElasticLoadBalancingV2::TargetGroup".to_string(),
+                                category: "AWS::ElasticLoadBalancingV2".to_string(),
+                                provider: AtlasProvider::Aws,
+                            };
+                            let lb_idx = get_or_add_node(&mut graph, lb_node);
+                            let tg_idx = get_or_add_node(&mut graph, tg_node);
+                            graph.add_edge(lb_idx, tg_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+            }
+            AmazonCollection::AmazonRoute53 {
+                hosted_zones,
+                record_sets,
+            } => {
+                let global_node = Node {
+                    id: "global".to_string(),
+                    name: "AWS::Region".to_string(),
+                    category: "AWS".to_string(),
+                    provider: AtlasProvider::Aws,
+                };
+                let g_idx = get_or_add_node(&mut graph, global_node);
+
+                for hz in hosted_zones {
+                    let id = hz.id();
+                    let hz_node = Node {
+                        id: id.to_string(),
+                        name: "AWS::Route53::HostedZone".to_string(),
+                        category: "AWS::Route53".to_string(),
+                        provider: AtlasProvider::Aws,
+                    };
+                    let hz_idx = get_or_add_node(&mut graph, hz_node);
+                    graph.add_edge(g_idx, hz_idx, Edge::Contains);
+                }
+
+                for rs in record_sets {
+                    let name = rs.name();
+                    let rs_node = Node {
+                        id: name.to_string(),
+                        name: "AWS::Route53::RecordSet".to_string(),
+                        category: "AWS::Route53".to_string(),
+                        provider: AtlasProvider::Aws,
+                    };
+                    let rs_idx = get_or_add_node(&mut graph, rs_node);
+
+                    graph.add_edge(g_idx, rs_idx, Edge::Contains);
+
+                    let records = rs.resource_records();
+                    for r in records {
+                        let val = r.value();
+                        let ip_node = Node {
+                            id: val.to_string(),
+                            name: "Generic::IpAddress".to_string(),
+                            category: "Generic".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let ip_idx = get_or_add_node(&mut graph, ip_node);
+                        graph.add_edge(rs_idx, ip_idx, Edge::ConnectsTo);
+                    }
+                }
+            }
         }
     }
 

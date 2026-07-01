@@ -18,10 +18,84 @@ mod tests {
             .set_subnet_id(Some("subnet-dac7a6f7".to_owned()))
             .build();
 
-        Provider::AWS(vec![(
-            "us-east-1".to_owned(),
-            AmazonCollection::AmazonInstances(vec![i1, i2]),
-        )])
+        let lb = aws_sdk_elasticloadbalancingv2::types::LoadBalancer::builder()
+            .load_balancer_arn(
+                "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-lb/50dc",
+            )
+            .vpc_id("vpc-f98d2f9f")
+            .build();
+
+        let tg = aws_sdk_elasticloadbalancingv2::types::TargetGroup::builder()
+            .target_group_arn("arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/my-tg/73e2")
+            .vpc_id("vpc-f98d2f9f")
+            .build();
+
+        let action = aws_sdk_elasticloadbalancingv2::types::Action::builder()
+            .target_group_arn("arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/my-tg/73e2")
+            .build();
+
+        let listener = aws_sdk_elasticloadbalancingv2::types::Listener::builder()
+            .load_balancer_arn(
+                "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-lb/50dc",
+            )
+            .default_actions(action)
+            .build();
+
+        let target = aws_sdk_elasticloadbalancingv2::types::TargetDescription::builder()
+            .id("i-01ee77706a905ce9627")
+            .build();
+
+        let health = aws_sdk_elasticloadbalancingv2::types::TargetHealthDescription::builder()
+            .target(target)
+            .build();
+
+        let mut health_map = std::collections::HashMap::new();
+        health_map.insert(
+            "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/my-tg/73e2".to_owned(),
+            vec![health],
+        );
+
+        let hosted_zone = aws_sdk_route53::types::HostedZone::builder()
+            .id("/hostedzone/Z123456789")
+            .name("example.com.")
+            .caller_reference("test")
+            .build()
+            .unwrap();
+
+        let record_1 = aws_sdk_route53::types::ResourceRecord::builder()
+            .value("10.0.0.1")
+            .build()
+            .unwrap();
+
+        let record_set = aws_sdk_route53::types::ResourceRecordSet::builder()
+            .name("www.example.com.")
+            .r#type(aws_sdk_route53::types::RrType::A)
+            .resource_records(record_1)
+            .build()
+            .unwrap();
+
+        Provider::AWS(vec![
+            (
+                "us-east-1".to_owned(),
+                AmazonCollection::AmazonInstances(vec![i1, i2]),
+            ),
+            (
+                "us-east-1".to_owned(),
+                AmazonCollection::AmazonLoadBalancers {
+                    load_balancers: vec![lb],
+                    target_groups: vec![tg],
+                    listeners: vec![listener],
+                    target_health: health_map,
+                },
+            ),
+            (
+                "us-east-1".to_owned(),
+                AmazonCollection::AmazonRoute53 {
+                    hosted_zones: vec![hosted_zone],
+                    record_sets: vec![record_set],
+                },
+            ),
+        ])
     }
 
     #[test]

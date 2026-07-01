@@ -1,6 +1,10 @@
 use aws_sdk_config::types::ResourceIdentifier as AWSResource;
 use aws_sdk_ec2::types::Instance as AWSInstance;
 use aws_sdk_ecs::types::Cluster as AWSCluster;
+use aws_sdk_elasticloadbalancingv2::types::{
+    Listener as AWSListener, LoadBalancer as AWSLoadBalancer, TargetGroup as AWSTargetGroup,
+    TargetHealthDescription as AWSTargetHealthDescription,
+};
 use aws_sdk_eventbridge::types::EventBus as AWSEventbridge;
 use aws_sdk_lambda::types::FunctionConfiguration as AWSLambda;
 use std::collections::HashMap;
@@ -25,6 +29,16 @@ pub enum AmazonCollection {
     AmazonLambdas(Vec<AWSLambda>),
     AmazonEventbridge(Vec<AWSEventbridge>),
     AmazonResources(HashMap<String, Vec<AWSResource>>),
+    AmazonLoadBalancers {
+        load_balancers: Vec<AWSLoadBalancer>,
+        target_groups: Vec<AWSTargetGroup>,
+        listeners: Vec<AWSListener>,
+        target_health: HashMap<String, Vec<AWSTargetHealthDescription>>,
+    },
+    AmazonRoute53 {
+        hosted_zones: Vec<aws_sdk_route53::types::HostedZone>,
+        record_sets: Vec<aws_sdk_route53::types::ResourceRecordSet>,
+    },
 }
 
 #[derive(Debug)]
