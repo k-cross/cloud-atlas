@@ -1,7 +1,7 @@
 [package]
 name = "atlas-lib"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 repository = "https://github.com/k-cross/cloud-atlas"
 documentation = "https://github.com/k-cross/cloud-atlas"
 keywords = ["AWS", "cloud", "graph", "infrastructure"]

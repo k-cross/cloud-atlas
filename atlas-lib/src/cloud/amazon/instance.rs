@@ -2,7 +2,7 @@ pub mod collector {
     use crate::cloud::definition::AmazonCollection;
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_ec2::types::Filter;
-    use aws_sdk_ec2::{config::Region, Client, Error};
+    use aws_sdk_ec2::{Client, Error, config::Region};
 
     async fn match_instances(client: &Client) -> Result<AmazonCollection, Error> {
         // ["running", "pending", "shutting-down", "terminated", "stopped", "stopping"] are all the
@@ -28,7 +28,10 @@ pub mod collector {
         let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(region_provider)
+            .load()
+            .await;
         let client = Client::new(&shared_config);
 
         match match_instances(&client).await {

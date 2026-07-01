@@ -2,7 +2,7 @@ pub mod collector {
     use crate::cloud::definition::AmazonCollection;
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_config::types::{ResourceIdentifier, ResourceType};
-    use aws_sdk_config::{config::Region, Client, Error};
+    use aws_sdk_config::{Client, Error, config::Region};
     use std::collections::HashMap;
 
     // Lists resources
@@ -47,7 +47,10 @@ pub mod collector {
             println!();
         }
 
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(region_provider)
+            .load()
+            .await;
         let client = Client::new(&shared_config);
 
         match scan_resources(&client).await {

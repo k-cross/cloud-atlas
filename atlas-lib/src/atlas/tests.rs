@@ -1,7 +1,7 @@
 mod tests {
+    use crate::Settings;
     use crate::atlas::projector;
     use crate::cloud::definition::{AmazonCollection, Provider};
-    use crate::Settings;
     use aws_sdk_ec2::types::builders::InstanceBuilder;
 
     fn make_aws_provider() -> Provider {

@@ -2,7 +2,7 @@ pub mod collector {
     use crate::cloud::definition::AmazonCollection;
     use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_eventbridge::types::EventBus;
-    use aws_sdk_eventbridge::{config::Region, Client, Error};
+    use aws_sdk_eventbridge::{Client, Error, config::Region};
 
     async fn get_event_info(client: &Client) -> Result<Vec<EventBus>, Error> {
         let resp = client.list_event_buses().send().await?;
@@ -20,7 +20,10 @@ pub mod collector {
         let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
             .or_default_provider()
             .or_else(Region::new("us-west-2"));
-        let shared_config = aws_config::from_env().region(region_provider).load().await;
+        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(region_provider)
+            .load()
+            .await;
         let client = Client::new(&shared_config);
 
         match get_event_info(&client).await {

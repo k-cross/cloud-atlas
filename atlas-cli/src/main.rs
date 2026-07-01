@@ -1,8 +1,8 @@
+use atlas_lib::atlas::projector;
+use atlas_lib::cloud::amazon::provider;
 use clap::Parser;
 use petgraph::dot::{Config, Dot};
 use std::fs;
-use atlas_lib::atlas::projector;
-use atlas_lib::cloud::amazon::provider;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]

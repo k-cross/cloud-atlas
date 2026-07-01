@@ -1,5 +1,5 @@
-use crate::cloud::definition::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
 use crate::Settings;
+use crate::cloud::definition::{AmazonCollection, GoogleCollection, MicrosoftCollection, Provider};
 use petgraph::graphmap::DiGraphMap;
 
 pub fn build<'b>(data: &'b Provider, opts: &'b Settings) -> DiGraphMap<&'b str, u8> {
