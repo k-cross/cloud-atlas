@@ -31,7 +31,15 @@ impl GraphBuilder {
         }
     }
 
+    /// Add an edge unless an identical one already connects the two nodes,
+    /// keeping the exported .dot output free of duplicates.
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, edge: Edge) {
-        self.graph.add_edge(a, b, edge);
+        let exists = self
+            .graph
+            .edges_connecting(a, b)
+            .any(|e| e.weight() == &edge);
+        if !exists {
+            self.graph.add_edge(a, b, edge);
+        }
     }
 }

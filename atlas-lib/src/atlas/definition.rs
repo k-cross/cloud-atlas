@@ -1,23 +1,5 @@
 use std::fmt;
 
-/// The cloud provider this resource belongs to.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Provider {
-    Aws,
-    Gcp,
-    Azure,
-    Cloudflare,
-    Hetzner,
-    DigitalOcean,
-    MsGraph,
-}
-
-impl fmt::Display for Provider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
 /// A node in the property graph, representing a semantic cloud resource.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
@@ -27,7 +9,6 @@ pub enum Node {
 
     // AWS
     AwsRegion(std::sync::Arc<str>),
-    AwsGlobal(std::sync::Arc<str>),
     AwsTag {
         key: std::sync::Arc<str>,
         value: std::sync::Arc<str>,
@@ -38,14 +19,16 @@ pub enum Node {
     AwsEc2AvailabilityZone(std::sync::Arc<str>),
     AwsEc2SecurityGroup(std::sync::Arc<str>),
     AwsEc2Eni(std::sync::Arc<str>), // New for pivot
+    // L3 routing / egress plane
+    AwsEc2RouteTable(std::sync::Arc<str>),
+    AwsEc2InternetGateway(std::sync::Arc<str>),
+    AwsEc2NatGateway(std::sync::Arc<str>),
+    AwsEc2Eip(std::sync::Arc<str>),
     AwsEcsCluster(std::sync::Arc<str>),
     AwsLambdaFunction(std::sync::Arc<str>),
     AwsIamRole(std::sync::Arc<str>),
-    AwsEventbridgeBus(std::sync::Arc<str>),
     AwsElbLoadBalancer(std::sync::Arc<str>),
     AwsElbTargetGroup(std::sync::Arc<str>),
-    AwsElbListener(std::sync::Arc<str>),
-    AwsElbTargetHealth(std::sync::Arc<str>),
     AwsRoute53HostedZone(std::sync::Arc<str>),
     AwsRoute53RecordSet(std::sync::Arc<str>),
     AwsEksCluster(std::sync::Arc<str>),
@@ -81,6 +64,7 @@ pub enum Node {
     AzureVirtualMachine(std::sync::Arc<str>),
     AzureVirtualNetwork(std::sync::Arc<str>),
     AzureSubnet(std::sync::Arc<str>),
+    AzureNetworkInterface(std::sync::Arc<str>),
     AzureNetworkSecurityGroup(std::sync::Arc<str>),
     AzurePublicIpAddress(std::sync::Arc<str>),
     AzureStorageAccount(std::sync::Arc<str>),
@@ -117,7 +101,6 @@ impl fmt::Display for Node {
 
             // AWS
             Node::AwsRegion(id) => write!(f, "AWS::Region({})", id),
-            Node::AwsGlobal(id) => write!(f, "AWS::Global({})", id),
             Node::AwsTag { key, value } => write!(f, "AWS::Tag({}={})", key, value),
             Node::AwsEc2Instance(id) => write!(f, "AWS::Ec2Instance({})", id),
             Node::AwsEc2Vpc(id) => write!(f, "AWS::EC2::VPC({})", id),
@@ -125,14 +108,15 @@ impl fmt::Display for Node {
             Node::AwsEc2AvailabilityZone(id) => write!(f, "AWS::EC2::AvailabilityZone({})", id),
             Node::AwsEc2SecurityGroup(id) => write!(f, "AWS::Ec2SecurityGroup({})", id),
             Node::AwsEc2Eni(id) => write!(f, "AWS::Ec2Eni({}-eni)", id), // preserve the -eni suffix for visual display without allocation
+            Node::AwsEc2RouteTable(id) => write!(f, "AWS::EC2::RouteTable({})", id),
+            Node::AwsEc2InternetGateway(id) => write!(f, "AWS::EC2::InternetGateway({})", id),
+            Node::AwsEc2NatGateway(id) => write!(f, "AWS::EC2::NatGateway({})", id),
+            Node::AwsEc2Eip(id) => write!(f, "AWS::EC2::Eip({})", id),
             Node::AwsEcsCluster(id) => write!(f, "AWS::EcsCluster({})", id),
             Node::AwsLambdaFunction(id) => write!(f, "AWS::Lambda::Function({})", id),
             Node::AwsIamRole(id) => write!(f, "AWS::IAM::Role({})", id),
-            Node::AwsEventbridgeBus(id) => write!(f, "AWS::Eventbridge::Bus({})", id),
             Node::AwsElbLoadBalancer(id) => write!(f, "AWS::ELB::LoadBalancer({})", id),
             Node::AwsElbTargetGroup(id) => write!(f, "AWS::ELB::TargetGroup({})", id),
-            Node::AwsElbListener(id) => write!(f, "AWS::ELB::Listener({})", id),
-            Node::AwsElbTargetHealth(id) => write!(f, "AWS::ELB::TargetHealth({})", id),
             Node::AwsRoute53HostedZone(id) => write!(f, "AWS::Route53::HostedZone({})", id),
             Node::AwsRoute53RecordSet(id) => write!(f, "AWS::Route53::RecordSet({})", id),
             Node::AwsEksCluster(id) => write!(f, "AWS::EKS::Cluster({})", id),
@@ -167,6 +151,9 @@ impl fmt::Display for Node {
             Node::AzureVirtualMachine(id) => write!(f, "Azure::Compute::VirtualMachine({})", id),
             Node::AzureVirtualNetwork(id) => write!(f, "Azure::Network::VirtualNetwork({})", id),
             Node::AzureSubnet(id) => write!(f, "Azure::Network::Subnet({})", id),
+            Node::AzureNetworkInterface(id) => {
+                write!(f, "Azure::Network::NetworkInterface({})", id)
+            }
             Node::AzureNetworkSecurityGroup(id) => {
                 write!(f, "Azure::Network::NetworkSecurityGroup({})", id)
             }
@@ -205,7 +192,6 @@ pub enum Edge {
     Contains,   // Hierarchical containment (e.g. VPC -> Subnet)
     ConnectsTo, // Routing/Traffic flow (e.g. Subnet -> ENI)
     DependsOn,  // Logical dependency
-    Manages,    // Management relationship
     AttachedTo, // Hardware/Logical attachment (e.g. ENI -> Subnet)
     HasIp,      // Semantic IP relationship (e.g. Instance -> HasIp)
     RoutesTo,   // Traffic routing
@@ -217,3 +203,104 @@ impl fmt::Display for Edge {
         write!(f, "{:?}", self)
     }
 }
+
+/// Generates `ALL_KINDS` and an exhaustive `kind()` from a single variant
+/// list. The `kind()` match is exhaustive, so adding an enum variant without
+/// listing it here is a compile error — and once listed, the fixture
+/// exhaustiveness tests require it to actually appear in the graph.
+macro_rules! kinds {
+    ($ty:ident, $($variant:ident),* $(,)?) => {
+        impl $ty {
+            pub const ALL_KINDS: &'static [&'static str] = &[$(stringify!($variant)),*];
+
+            pub fn kind(&self) -> &'static str {
+                match self {
+                    $($ty::$variant { .. } => stringify!($variant)),*
+                }
+            }
+        }
+    };
+}
+
+kinds!(
+    Node,
+    // Generic
+    GenericIpAddress,
+    GenericHostname,
+    // AWS
+    AwsRegion,
+    AwsTag,
+    AwsEc2Instance,
+    AwsEc2Vpc,
+    AwsEc2Subnet,
+    AwsEc2AvailabilityZone,
+    AwsEc2SecurityGroup,
+    AwsEc2Eni,
+    AwsEc2RouteTable,
+    AwsEc2InternetGateway,
+    AwsEc2NatGateway,
+    AwsEc2Eip,
+    AwsEcsCluster,
+    AwsLambdaFunction,
+    AwsIamRole,
+    AwsElbLoadBalancer,
+    AwsElbTargetGroup,
+    AwsRoute53HostedZone,
+    AwsRoute53RecordSet,
+    AwsEksCluster,
+    AwsApiGatewayRestApi,
+    AwsRdsDbInstance,
+    AwsDynamoDbTable,
+    AwsSqsQueue,
+    AwsSnsTopic,
+    AwsCloudFrontDistribution,
+    AwsConfigResource,
+    // GCP
+    GcpProject,
+    GcpComputeInstance,
+    GcpComputeNetwork,
+    GcpComputeSubnetwork,
+    GcpComputeFirewall,
+    GcpComputeForwardingRule,
+    GcpComputeZone,
+    GcpSqlInstance,
+    GcpDnsManagedZone,
+    GcpGkeCluster,
+    GcpCloudFunction,
+    GcpStorageBucket,
+    GcpPubSubTopic,
+    GcpPubSubSubscription,
+    GcpCloudRunService,
+    // Azure
+    AzureVirtualMachine,
+    AzureVirtualNetwork,
+    AzureSubnet,
+    AzureNetworkInterface,
+    AzureNetworkSecurityGroup,
+    AzurePublicIpAddress,
+    AzureStorageAccount,
+    AzureManagedCluster,
+    AzureSqlServer,
+    AzureAppService,
+    AzureFunctionApp,
+    AzureApiManagement,
+    AzureCosmosDb,
+    AzureServiceBus,
+    AzureEventGridTopic,
+    AzureDnsZone,
+    AzureCdnProfile,
+    AzureServiceTag,
+    // Cloudflare
+    CloudflareZone,
+    CloudflareDnsRecord,
+    CloudflareWorker,
+    CloudflareDurableObject,
+    CloudflareKvNamespace,
+    CloudflareR2Bucket,
+    CloudflareD1Database,
+    ExternalService,
+);
+
+kinds!(
+    Edge, Contains, ConnectsTo, DependsOn, AttachedTo, HasIp, RoutesTo, ResolvesTo,
+);

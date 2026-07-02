@@ -3,19 +3,43 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::GoogleCollection;
 
+/// Project resources that only contribute a standalone node keyed by one
+/// optional identifier field.
+macro_rules! project_leaf {
+    ($builder:expr, $items:expr, $field:ident, $variant:path) => {
+        for item in $items {
+            if let Some(id) = &item.$field {
+                $builder.get_or_add_node($variant(id.as_str().into()));
+            }
+        }
+    };
+}
+
 pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) {
     for x in gcp_data {
         match x {
             GoogleCollection::GoogleInstances(instances) => {
                 for inst in instances {
+                    // Extract project and zone from the self_link e.g., https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance
                     let mut project_idx = None;
-                    // Attempt to extract project from the self_link e.g., https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance
-                    if let Some(self_link) = &inst.self_link
-                        && let Some(project_str) = self_link.split("/projects/").nth(1)
-                        && let Some(project_id) = project_str.split('/').next()
-                    {
-                        let project_node = Node::GcpProject(project_id.into());
-                        project_idx = Some(builder.get_or_add_node(project_node));
+                    let mut zone_idx = None;
+                    if let Some(self_link) = &inst.self_link {
+                        if let Some(project_id) = self_link
+                            .split("/projects/")
+                            .nth(1)
+                            .and_then(|rest| rest.split('/').next())
+                        {
+                            let project_node = Node::GcpProject(project_id.into());
+                            project_idx = Some(builder.get_or_add_node(project_node));
+                        }
+                        if let Some(zone) = self_link
+                            .split("/zones/")
+                            .nth(1)
+                            .and_then(|rest| rest.split('/').next())
+                        {
+                            let zone_node = Node::GcpComputeZone(zone.into());
+                            zone_idx = Some(builder.get_or_add_node(zone_node));
+                        }
                     }
 
                     if let Some(id) = &inst.id {
@@ -23,6 +47,9 @@ pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) 
                         let idx = builder.get_or_add_node(node);
                         if let Some(p_idx) = project_idx {
                             builder.add_edge(p_idx, idx, Edge::DependsOn);
+                        }
+                        if let Some(z_idx) = zone_idx {
+                            builder.add_edge(z_idx, idx, Edge::Contains);
                         }
 
                         if let Some(network_interfaces) = &inst.network_interfaces {
@@ -83,12 +110,7 @@ pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) 
                 }
             }
             GoogleCollection::GoogleDns(zones) => {
-                for zone in zones {
-                    if let Some(name) = &zone.name {
-                        let node = Node::GcpDnsManagedZone(name.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, zones, name, Node::GcpDnsManagedZone)
             }
             GoogleCollection::GoogleGke(clusters) => {
                 for cluster in clusters {
@@ -105,28 +127,13 @@ pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) 
                 }
             }
             GoogleCollection::GoogleFunctions(functions) => {
-                for func in functions {
-                    if let Some(name) = &func.name {
-                        let node = Node::GcpCloudFunction(name.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, functions, name, Node::GcpCloudFunction)
             }
             GoogleCollection::GoogleStorageBuckets(buckets) => {
-                for bucket in buckets {
-                    if let Some(id) = &bucket.id {
-                        let node = Node::GcpStorageBucket(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, buckets, id, Node::GcpStorageBucket)
             }
             GoogleCollection::GooglePubSubTopics(topics) => {
-                for topic in topics {
-                    if let Some(name) = &topic.name {
-                        let node = Node::GcpPubSubTopic(name.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, topics, name, Node::GcpPubSubTopic)
             }
             GoogleCollection::GooglePubSubSubscriptions(subscriptions) => {
                 for sub in subscriptions {
@@ -160,17 +167,12 @@ pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) 
                 }
             }
             GoogleCollection::GoogleNetworks(networks) => {
-                for network in networks {
-                    if let Some(name) = &network.self_link {
-                        let node = Node::GcpComputeNetwork(name.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, networks, self_link, Node::GcpComputeNetwork)
             }
             GoogleCollection::GoogleSubnetworks(subnetworks) => {
                 for subnetwork in subnetworks {
-                    if let Some(name) = &subnetwork.self_link {
-                        let node = Node::GcpComputeSubnetwork(name.as_str().into());
+                    if let Some(self_link) = &subnetwork.self_link {
+                        let node = Node::GcpComputeSubnetwork(self_link.as_str().into());
                         let idx = builder.get_or_add_node(node);
 
                         if let Some(network) = &subnetwork.network {

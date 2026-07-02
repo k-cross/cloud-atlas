@@ -23,14 +23,7 @@ impl super::client::GoogleApiClient {
             "https://run.googleapis.com/v2/projects/{}/locations/-/services",
             project_id
         );
-        let resp = self.client.get(&url).send().await?;
-
-        if resp.status().is_success() {
-            let list: ServiceList = resp.json().await?;
-            Ok(list.services.unwrap_or_default())
-        } else {
-            let error_text = resp.text().await?;
-            Err(format!("Cloud Run API Error: {}", error_text).into())
-        }
+        self.paginated_list(&url, "cloud run", |r: ServiceList| r.services)
+            .await
     }
 }

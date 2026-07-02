@@ -155,6 +155,7 @@ dependencies = [
  "aws-sdk-route53",
  "aws-sdk-sns",
  "aws-sdk-sqs",
+ "aws-smithy-types",
  "aws-types",
  "azure_core",
  "azure_identity",

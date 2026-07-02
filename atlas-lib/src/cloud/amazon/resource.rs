@@ -1,8 +1,7 @@
 pub mod collector {
     use crate::cloud::definition::AmazonCollection;
-    use aws_config::meta::region::RegionProviderChain;
     use aws_sdk_config::types::{ResourceIdentifier, ResourceType};
-    use aws_sdk_config::{Client, Error, config::Region};
+    use aws_sdk_config::{Client, Error};
     use std::collections::HashMap;
 
     // Lists resources
@@ -31,7 +30,6 @@ pub mod collector {
             let resp = resp_result?;
             let resources = resp.resource_identifiers();
 
-            // grab exactly 1 of each type for now to discover more info about its structure
             if !resources.is_empty() {
                 r_map.insert(value.to_string(), resources.to_owned());
             }
@@ -42,26 +40,13 @@ pub mod collector {
 
     pub async fn runner(
         verbose: bool,
-        region: &str,
+        config: &aws_config::SdkConfig,
     ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
-        let region_provider = RegionProviderChain::first_try(Region::new(region.to_owned()))
-            .or_default_provider()
-            .or_else(Region::new("us-west-2"));
-
-        if verbose {
-            println!(
-                "Region: {}",
-                region_provider.region().await.unwrap().as_ref()
-            );
-            println!();
+        if verbose && let Some(region) = config.region() {
+            println!("Region: {}\n", region);
         }
 
-        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(region_provider)
-            .load()
-            .await;
-        let client = Client::new(&shared_config);
-
+        let client = Client::new(config);
         match scan_resources(&client).await {
             Ok(res) => Ok(AmazonCollection::AmazonResources(res)),
             Err(e) => Err(e.into()),

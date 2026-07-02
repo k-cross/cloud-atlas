@@ -48,6 +48,13 @@ pub enum AmazonCollection {
     AmazonSns(Vec<aws_sdk_sns::types::Topic>),
     AmazonCloudFront(Vec<aws_sdk_cloudfront::types::DistributionSummary>),
     AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),
+    // L3 routing / egress plane: how a subnet actually reaches the internet.
+    AmazonNetworking {
+        route_tables: Vec<aws_sdk_ec2::types::RouteTable>,
+        internet_gateways: Vec<aws_sdk_ec2::types::InternetGateway>,
+        nat_gateways: Vec<aws_sdk_ec2::types::NatGateway>,
+        addresses: Vec<aws_sdk_ec2::types::Address>, // Elastic IPs
+    },
 }
 
 #[derive(Debug)]

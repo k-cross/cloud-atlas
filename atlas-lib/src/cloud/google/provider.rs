@@ -1,9 +1,7 @@
 use crate::Settings;
 use crate::api::google::client::GoogleApiClient;
-use crate::cloud::definition::Provider;
-use crate::cloud::google::{
-    compute_network, dns, firewall, functions, gke, instance, pubsub, run, sql, storage,
-};
+use crate::api::google::{compute, compute_network, dns, functions, gke, sql};
+use crate::cloud::definition::{GoogleCollection, Provider};
 use yup_oauth2::ApplicationSecret;
 
 pub async fn build_gcp(
@@ -41,62 +39,56 @@ pub async fn build_gcp(
                     r_clusters,
                     r_funcs,
                     r_buckets,
-                    r_pubsub,
+                    r_topics,
+                    r_subs,
                     r_runs,
-                    r_network,
+                    r_networks,
+                    r_subnets,
+                    r_fwrules,
                 ) = tokio::join!(
-                    instance::collector::runner(&p, &client_ref),
-                    firewall::collector::runner(&p, &client_ref),
-                    sql::collector::runner(&p, &client_ref),
-                    dns::collector::runner(&p, &client_ref),
-                    gke::collector::runner(&p, &client_ref),
-                    functions::collector::runner(&p, &client_ref),
-                    storage::collector::runner(&p, &client_ref),
-                    pubsub::collector::runner(&p, &client_ref),
-                    run::collector::runner(&p, &client_ref),
-                    compute_network::collector::runner(&p, &client_ref),
+                    compute::list_instances(&client_ref, &p),
+                    compute::list_firewalls(&client_ref, &p),
+                    sql::list_instances(&client_ref, &p),
+                    dns::list_managed_zones(&client_ref, &p),
+                    gke::list_clusters(&client_ref, &p),
+                    functions::list_functions(&client_ref, &p),
+                    client_ref.list_buckets(&p),
+                    client_ref.list_topics(&p),
+                    client_ref.list_subscriptions(&p),
+                    client_ref.list_run_services(&p),
+                    compute_network::list_networks(&client_ref, &p),
+                    compute_network::list_subnetworks(&client_ref, &p),
+                    compute_network::list_forwarding_rules(&client_ref, &p),
                 );
 
                 let mut local_services = Vec::new();
 
-                let mut add_if_ok = |res: Result<
-                    crate::cloud::definition::GoogleCollection,
-                    Box<dyn std::error::Error>,
-                >| {
-                    if let Ok(collection) = res {
-                        local_services.push(collection);
-                    } else if let Err(e) = res {
-                        eprintln!("Error fetching GCP resource: {:?}", e);
-                    }
-                };
-
-                add_if_ok(r_instances);
-                add_if_ok(r_firewalls);
-                add_if_ok(r_sqls);
-                add_if_ok(r_zones);
-                add_if_ok(r_clusters);
-                add_if_ok(r_funcs);
-                add_if_ok(r_buckets);
-                add_if_ok(r_runs);
-
-                if let Ok((topics, subscriptions)) = r_pubsub {
-                    local_services.push(topics);
-                    local_services.push(subscriptions);
-                } else if let Err(e) = r_pubsub {
-                    eprintln!("Error fetching GCP PubSub resources: {:?}", e);
+                macro_rules! add_if_ok {
+                    ($res:expr, $variant:path) => {
+                        match $res {
+                            Ok(items) => local_services.push($variant(items)),
+                            Err(e) => {
+                                eprintln!("Error fetching GCP resource in project {}: {:?}", p, e)
+                            }
+                        }
+                    };
                 }
 
-                if let Ok((networks, subnets, fwrules)) = r_network {
-                    local_services.push(networks);
-                    local_services.push(subnets);
-                    local_services.push(fwrules);
-                } else if let Err(e) = r_network {
-                    eprintln!("Error fetching GCP Network resources: {:?}", e);
-                }
+                add_if_ok!(r_instances, GoogleCollection::GoogleInstances);
+                add_if_ok!(r_firewalls, GoogleCollection::GoogleFirewalls);
+                add_if_ok!(r_sqls, GoogleCollection::GoogleSql);
+                add_if_ok!(r_zones, GoogleCollection::GoogleDns);
+                add_if_ok!(r_clusters, GoogleCollection::GoogleGke);
+                add_if_ok!(r_funcs, GoogleCollection::GoogleFunctions);
+                add_if_ok!(r_buckets, GoogleCollection::GoogleStorageBuckets);
+                add_if_ok!(r_topics, GoogleCollection::GooglePubSubTopics);
+                add_if_ok!(r_subs, GoogleCollection::GooglePubSubSubscriptions);
+                add_if_ok!(r_runs, GoogleCollection::GoogleRunServices);
+                add_if_ok!(r_networks, GoogleCollection::GoogleNetworks);
+                add_if_ok!(r_subnets, GoogleCollection::GoogleSubnetworks);
+                add_if_ok!(r_fwrules, GoogleCollection::GoogleForwardingRules);
 
-                Ok::<Vec<crate::cloud::definition::GoogleCollection>, Box<dyn std::error::Error>>(
-                    local_services,
-                )
+                Ok::<Vec<GoogleCollection>, Box<dyn std::error::Error>>(local_services)
             });
         }
     }

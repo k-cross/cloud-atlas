@@ -5,13 +5,12 @@ use crate::cloud::definition::{MicrosoftCollection, Provider};
 
 pub async fn build_azure(
     _verbose: bool,
-    _opts: &Settings,
+    opts: &Settings,
 ) -> Result<Provider, Box<dyn std::error::Error>> {
     let client = AzureApiClient::new().await?;
 
-    let subscriptions = vec![]; // We can fetch subscriptions or the user can provide them.
-    // Wait, ARG can query all subscriptions the user has access to if we pass an empty array or omit it.
-    // Let's pass an empty array to ARG to query across the entire tenant.
+    // An empty subscription list makes ARG query the entire tenant.
+    let subscriptions = opts.azure_subscriptions.clone().unwrap_or_default();
 
     let query = r#"
         Resources

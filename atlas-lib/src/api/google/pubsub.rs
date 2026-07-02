@@ -34,15 +34,8 @@ impl super::client::GoogleApiClient {
             "https://pubsub.googleapis.com/v1/projects/{}/topics",
             project_id
         );
-        let resp = self.client.get(&url).send().await?;
-
-        if resp.status().is_success() {
-            let list: TopicList = resp.json().await?;
-            Ok(list.topics.unwrap_or_default())
-        } else {
-            let error_text = resp.text().await?;
-            Err(format!("PubSub Topics API Error: {}", error_text).into())
-        }
+        self.paginated_list(&url, "pubsub topics", |r: TopicList| r.topics)
+            .await
     }
 
     pub async fn list_subscriptions(
@@ -53,14 +46,9 @@ impl super::client::GoogleApiClient {
             "https://pubsub.googleapis.com/v1/projects/{}/subscriptions",
             project_id
         );
-        let resp = self.client.get(&url).send().await?;
-
-        if resp.status().is_success() {
-            let list: SubscriptionList = resp.json().await?;
-            Ok(list.subscriptions.unwrap_or_default())
-        } else {
-            let error_text = resp.text().await?;
-            Err(format!("PubSub Subscriptions API Error: {}", error_text).into())
-        }
+        self.paginated_list(&url, "pubsub subscriptions", |r: SubscriptionList| {
+            r.subscriptions
+        })
+        .await
     }
 }

@@ -24,14 +24,7 @@ impl super::client::GoogleApiClient {
             "https://storage.googleapis.com/storage/v1/b?project={}",
             project_id
         );
-        let resp = self.client.get(&url).send().await?;
-
-        if resp.status().is_success() {
-            let list: BucketList = resp.json().await?;
-            Ok(list.items.unwrap_or_default())
-        } else {
-            let error_text = resp.text().await?;
-            Err(format!("GCS API Error: {}", error_text).into())
-        }
+        self.paginated_list(&url, "gcs", |r: BucketList| r.items)
+            .await
     }
 }

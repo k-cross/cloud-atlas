@@ -42,3 +42,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
 uuid = { version = "1.2", features = ["v4"] }
 yup-oauth2 = "11"
+aws-smithy-types = "1.0"

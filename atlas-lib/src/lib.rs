@@ -1,8 +1,9 @@
 pub mod api;
 pub mod atlas;
 pub mod cloud;
+pub mod fixtures;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Settings {
     /// The AWS Region.
     pub regions: Vec<String>,

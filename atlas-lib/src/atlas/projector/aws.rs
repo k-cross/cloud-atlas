@@ -41,7 +41,7 @@ pub fn aws_projector(
                         inst_idx = Some(idx);
 
                         if let Some(subnet_idx) = subnet_idx {
-                            let eni_node = Node::AwsEc2Eni(instance_id.clone().into());
+                            let eni_node = Node::AwsEc2Eni(instance_id.as_str().into());
                             let eni_idx = builder.get_or_add_node(eni_node);
 
                             // Instance -> HasIp -> ENI
@@ -110,9 +110,9 @@ pub fn aws_projector(
                                 if use_global(res_name.as_str()) {
                                     let global_node = Node::AwsRegion("global".into());
                                     let g_idx = builder.get_or_add_node(global_node);
-                                    builder.add_edge(g_idx, idx, Edge::DependsOn);
+                                    builder.add_edge(g_idx, idx, Edge::Contains);
                                 } else {
-                                    builder.add_edge(region_idx, idx, Edge::DependsOn);
+                                    builder.add_edge(region_idx, idx, Edge::Contains);
                                 }
                             }
                         }
@@ -124,7 +124,7 @@ pub fn aws_projector(
                     if let Some(arn) = cluster.cluster_arn() {
                         let node = Node::AwsEcsCluster(arn.into());
                         let idx = builder.get_or_add_node(node);
-                        builder.add_edge(region_idx, idx, Edge::DependsOn);
+                        builder.add_edge(region_idx, idx, Edge::Contains);
                     }
                 }
             }
@@ -133,7 +133,7 @@ pub fn aws_projector(
                     if let Some(name) = lambda.function_name() {
                         let node = Node::AwsLambdaFunction(name.into());
                         let idx = builder.get_or_add_node(node);
-                        builder.add_edge(region_idx, idx, Edge::DependsOn);
+                        builder.add_edge(region_idx, idx, Edge::Contains);
 
                         if let Some(role) = lambda.role() {
                             let role_node = Node::AwsIamRole(role.into());
@@ -176,7 +176,7 @@ pub fn aws_projector(
                             let v_idx = builder.get_or_add_node(vpc_node);
                             builder.add_edge(v_idx, lb_idx, Edge::Contains);
                         } else {
-                            builder.add_edge(region_idx, lb_idx, Edge::DependsOn);
+                            builder.add_edge(region_idx, lb_idx, Edge::Contains);
                         }
                     }
                 }
@@ -271,7 +271,7 @@ pub fn aws_projector(
                                 let vpc_idx = builder.get_or_add_node(vpc_node);
                                 builder.add_edge(vpc_idx, idx, Edge::Contains);
                             } else {
-                                builder.add_edge(region_idx, idx, Edge::DependsOn);
+                                builder.add_edge(region_idx, idx, Edge::Contains);
                             }
 
                             for sg_id in vpc_config.security_group_ids() {
@@ -280,7 +280,7 @@ pub fn aws_projector(
                                 builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
                             }
                         } else {
-                            builder.add_edge(region_idx, idx, Edge::DependsOn);
+                            builder.add_edge(region_idx, idx, Edge::Contains);
                         }
                     }
                 }
@@ -290,7 +290,7 @@ pub fn aws_projector(
                     if let Some(id) = api.id() {
                         let node = Node::AwsApiGatewayRestApi(id.into());
                         let idx = builder.get_or_add_node(node);
-                        builder.add_edge(region_idx, idx, Edge::DependsOn);
+                        builder.add_edge(region_idx, idx, Edge::Contains);
                     }
                 }
             }
@@ -306,10 +306,10 @@ pub fn aws_projector(
                                 let vpc_idx = builder.get_or_add_node(vpc_node);
                                 builder.add_edge(vpc_idx, idx, Edge::Contains);
                             } else {
-                                builder.add_edge(region_idx, idx, Edge::DependsOn);
+                                builder.add_edge(region_idx, idx, Edge::Contains);
                             }
                         } else {
-                            builder.add_edge(region_idx, idx, Edge::DependsOn);
+                            builder.add_edge(region_idx, idx, Edge::Contains);
                         }
 
                         for sg in db.vpc_security_groups() {
@@ -326,14 +326,14 @@ pub fn aws_projector(
                 for t in tables {
                     let node = Node::AwsDynamoDbTable(t.as_str().into());
                     let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::DependsOn);
+                    builder.add_edge(region_idx, idx, Edge::Contains);
                 }
             }
             AmazonCollection::AmazonSqs(queues) => {
                 for q in queues {
                     let node = Node::AwsSqsQueue(q.as_str().into());
                     let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::DependsOn);
+                    builder.add_edge(region_idx, idx, Edge::Contains);
                 }
             }
             AmazonCollection::AmazonSns(topics) => {
@@ -341,7 +341,7 @@ pub fn aws_projector(
                     if let Some(arn) = t.topic_arn() {
                         let node = Node::AwsSnsTopic(arn.into());
                         let idx = builder.get_or_add_node(node);
-                        builder.add_edge(region_idx, idx, Edge::DependsOn);
+                        builder.add_edge(region_idx, idx, Edge::Contains);
                     }
                 }
             }
@@ -356,12 +356,105 @@ pub fn aws_projector(
                     builder.add_edge(g_idx, idx, Edge::Contains);
                 }
             }
+            AmazonCollection::AmazonNetworking {
+                route_tables,
+                internet_gateways,
+                nat_gateways,
+                addresses,
+            } => {
+                // Elastic IPs: a managed public IP, stitched to the generic IP
+                // space so egress can be followed across clouds.
+                for addr in addresses {
+                    // Prefer the stable allocation id; fall back to the public IP.
+                    if let Some(alloc) = addr.allocation_id().or_else(|| addr.public_ip()) {
+                        let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
+                        if let Some(public_ip) = addr.public_ip() {
+                            let ip_idx =
+                                builder.get_or_add_node(Node::GenericIpAddress(public_ip.into()));
+                            builder.add_edge(eip_idx, ip_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+
+                // Internet gateways: the public egress door, attached to a VPC.
+                for igw in internet_gateways {
+                    if let Some(igw_id) = igw.internet_gateway_id() {
+                        let igw_idx =
+                            builder.get_or_add_node(Node::AwsEc2InternetGateway(igw_id.into()));
+                        for att in igw.attachments() {
+                            if let Some(vpc_id) = att.vpc_id() {
+                                let vpc_idx =
+                                    builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into()));
+                                builder.add_edge(igw_idx, vpc_idx, Edge::AttachedTo);
+                            }
+                        }
+                    }
+                }
+
+                // NAT gateways: private-subnet egress, living in a subnet and
+                // holding an Elastic IP.
+                for nat in nat_gateways {
+                    if let Some(nat_id) = nat.nat_gateway_id() {
+                        let nat_idx =
+                            builder.get_or_add_node(Node::AwsEc2NatGateway(nat_id.into()));
+                        if let Some(subnet_id) = nat.subnet_id() {
+                            let subnet_idx =
+                                builder.get_or_add_node(Node::AwsEc2Subnet(subnet_id.into()));
+                            builder.add_edge(nat_idx, subnet_idx, Edge::AttachedTo);
+                        }
+                        for nat_addr in nat.nat_gateway_addresses() {
+                            if let Some(alloc) =
+                                nat_addr.allocation_id().or_else(|| nat_addr.public_ip())
+                            {
+                                let eip_idx =
+                                    builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
+                                builder.add_edge(nat_idx, eip_idx, Edge::HasIp);
+                            }
+                        }
+                    }
+                }
+
+                // Route tables tie it together: a subnet is associated with a
+                // route table, whose routes point at an IGW or NAT gateway.
+                for rt in route_tables {
+                    if let Some(rt_id) = rt.route_table_id() {
+                        let rt_idx = builder.get_or_add_node(Node::AwsEc2RouteTable(rt_id.into()));
+
+                        if let Some(vpc_id) = rt.vpc_id() {
+                            let vpc_idx = builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into()));
+                            builder.add_edge(vpc_idx, rt_idx, Edge::Contains);
+                        }
+
+                        for assoc in rt.associations() {
+                            if let Some(subnet_id) = assoc.subnet_id() {
+                                let subnet_idx =
+                                    builder.get_or_add_node(Node::AwsEc2Subnet(subnet_id.into()));
+                                builder.add_edge(subnet_idx, rt_idx, Edge::AttachedTo);
+                            }
+                        }
+
+                        for route in rt.routes() {
+                            if let Some(nat_id) = route.nat_gateway_id() {
+                                let nat_idx =
+                                    builder.get_or_add_node(Node::AwsEc2NatGateway(nat_id.into()));
+                                builder.add_edge(rt_idx, nat_idx, Edge::RoutesTo);
+                            } else if let Some(gw_id) = route.gateway_id()
+                                && gw_id.starts_with("igw-")
+                            {
+                                let igw_idx = builder
+                                    .get_or_add_node(Node::AwsEc2InternetGateway(gw_id.into()));
+                                builder.add_edge(rt_idx, igw_idx, Edge::RoutesTo);
+                            }
+                        }
+                    }
+                }
+            }
             AmazonCollection::AmazonSecurityGroups(groups) => {
                 for sg in groups {
                     if let Some(id) = sg.group_id() {
                         let node = Node::AwsEc2SecurityGroup(id.into());
                         let idx = builder.get_or_add_node(node);
-                        builder.add_edge(region_idx, idx, Edge::DependsOn);
+                        builder.add_edge(region_idx, idx, Edge::Contains);
 
                         for perm in sg.ip_permissions() {
                             for pair in perm.user_id_group_pairs() {
@@ -412,12 +505,16 @@ fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
         "AWS::EC2::NetworkAcl" => false,
         "AWS::EC2::EIP" => false,
         "AWS::EC2::NetworkInterface" => false,
+        // Routing plane is now modeled structurally via AmazonNetworking, so
+        // skip the edge-less AWS Config catch-all representation.
+        "AWS::EC2::NatGateway" => false,
         "AWS::SNS::Topic" => false,
         // true assoc.
         "AWS::RDS::DBCluster" => true,
         "AWS::S3::Bucket" => true,
         "AWS::SQS::Queue" => true,
-        "AWS::EC2::RouteTable" => true,
+        // Modeled structurally via AmazonNetworking (route tables + gateways).
+        "AWS::EC2::RouteTable" => false,
         "AWS::EC2::VPC" => true,
         "AWS::EC2::Instance" => true,
         "AWS::ElasticLoadBalancing::LoadBalancer" => true,
@@ -425,12 +522,12 @@ fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
         "AWS::Redshift::ClusterSubnetGroup" => true,
         "AWS::RDS::DBSubnetGroup" => true,
         "AWS::EC2::Subnet" => true,
-        "AWS::EC2::InternetGateway" => true,
+        // Modeled structurally via AmazonNetworking.
+        "AWS::EC2::InternetGateway" => false,
         "AWS::ECS::Cluster" => true,
         "AWS::Lambda::Function" => true,
         "AWS::RDS::DBInstance" => true,
         "AWS::EKS::Cluster" => true,
-        // listeners are probably too granular
         "AWS::ElasticLoadBalancingV2::Listener" => true,
         // TODO: below are unclear if actually wanted/needed
         "AWS::Route53Resolver::ResolverRuleAssociation" => true,
@@ -438,7 +535,7 @@ fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
         "AWS::Route53Resolver::ResolverRule" => true,
         "AWS::DynamoDB::Table" => true,
         // exclude by default
-        _ => !exclude_by_default.to_owned(),
+        _ => !exclude_by_default,
     }
 }
 

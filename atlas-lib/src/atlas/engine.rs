@@ -76,11 +76,7 @@ impl AtlasEngine {
             projector::build(&mut self.builder, &azure_provider, &self.settings);
         }
         if let Some(cloudflare_provider) = cloudflare_opt {
-            projector::build(
-                &mut self.builder,
-                &crate::cloud::definition::Provider::Cloudflare(cloudflare_provider),
-                &self.settings,
-            );
+            projector::build(&mut self.builder, &cloudflare_provider, &self.settings);
         }
 
         self.export_graph().await?;

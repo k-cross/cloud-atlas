@@ -3,6 +3,18 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::MicrosoftCollection;
 
+/// Project resources that only contribute a standalone node keyed by one
+/// optional identifier field.
+macro_rules! project_leaf {
+    ($builder:expr, $items:expr, $field:ident, $variant:path) => {
+        for item in $items {
+            if let Some(id) = &item.$field {
+                $builder.get_or_add_node($variant(id.as_str().into()));
+            }
+        }
+    };
+}
+
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
     for x in azure_data {
         match x {
@@ -13,7 +25,7 @@ pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollec
                         let idx = builder.get_or_add_node(node);
 
                         for nic_id in &vm.network_interfaces {
-                            let nic_node = Node::AzureNetworkSecurityGroup(nic_id.as_str().into());
+                            let nic_node = Node::AzureNetworkInterface(nic_id.as_str().into());
                             let nic_idx = builder.get_or_add_node(nic_node);
                             builder.add_edge(idx, nic_idx, Edge::ConnectsTo);
                         }
@@ -108,28 +120,13 @@ pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollec
                 }
             }
             MicrosoftCollection::AzureStorageAccounts(accounts) => {
-                for account in accounts {
-                    if let Some(id) = &account.id {
-                        let node = Node::AzureStorageAccount(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, accounts, id, Node::AzureStorageAccount)
             }
             MicrosoftCollection::AzureManagedClusters(clusters) => {
-                for cluster in clusters {
-                    if let Some(id) = &cluster.id {
-                        let node = Node::AzureManagedCluster(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, clusters, id, Node::AzureManagedCluster)
             }
             MicrosoftCollection::AzureSqlServers(servers) => {
-                for server in servers {
-                    if let Some(id) = &server.id {
-                        let node = Node::AzureSqlServer(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, servers, id, Node::AzureSqlServer)
             }
             MicrosoftCollection::AzureAppServices(apps) => {
                 for app in apps {
@@ -148,60 +145,25 @@ pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollec
                 }
             }
             MicrosoftCollection::AzureFunctionApps(funcs) => {
-                for func in funcs {
-                    if let Some(id) = &func.id {
-                        let node = Node::AzureFunctionApp(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, funcs, id, Node::AzureFunctionApp)
             }
             MicrosoftCollection::AzureApiManagement(apims) => {
-                for apim in apims {
-                    if let Some(id) = &apim.id {
-                        let node = Node::AzureApiManagement(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, apims, id, Node::AzureApiManagement)
             }
             MicrosoftCollection::AzureCosmosDbs(cosmos) => {
-                for db in cosmos {
-                    if let Some(id) = &db.id {
-                        let node = Node::AzureCosmosDb(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, cosmos, id, Node::AzureCosmosDb)
             }
             MicrosoftCollection::AzureServiceBuses(sbuses) => {
-                for bus in sbuses {
-                    if let Some(id) = &bus.id {
-                        let node = Node::AzureServiceBus(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, sbuses, id, Node::AzureServiceBus)
             }
             MicrosoftCollection::AzureEventGridTopics(egrids) => {
-                for topic in egrids {
-                    if let Some(id) = &topic.id {
-                        let node = Node::AzureEventGridTopic(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, egrids, id, Node::AzureEventGridTopic)
             }
             MicrosoftCollection::AzureDnsZones(dns) => {
-                for zone in dns {
-                    if let Some(id) = &zone.id {
-                        let node = Node::AzureDnsZone(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, dns, id, Node::AzureDnsZone)
             }
             MicrosoftCollection::AzureCdnProfiles(cdns) => {
-                for cdn in cdns {
-                    if let Some(id) = &cdn.id {
-                        let node = Node::AzureCdnProfile(id.as_str().into());
-                        builder.get_or_add_node(node);
-                    }
-                }
+                project_leaf!(builder, cdns, id, Node::AzureCdnProfile)
             }
         }
     }

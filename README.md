@@ -8,7 +8,7 @@ It builds from existing cloud configurations as they exist in reality, not an id
 ## Architecture
 
 Cloud Atlas builds a **Strongly Typed Semantic Graph**:
-- **Nodes**: Modeled as specific Enum variants for over 40 cloud resources (e.g., `Node::AwsEc2Instance`, `Node::AzureVirtualNetwork`), wrapping zero-copy `Arc<str>` types for high-performance memory efficiency.
+- **Nodes**: Modeled as specific Enum variants for nearly 70 cloud resources (e.g., `Node::AwsEc2Instance`, `Node::AzureVirtualNetwork`), wrapping zero-copy `Arc<str>` types for high-performance memory efficiency.
 - **Edges**: Relationships go beyond simple containment, leveraging strict semantic edges like `AttachedTo`, `HasIp`, and `RoutesTo` to deeply mimic network topology. 
 - **Graph Storage**: The graph is stored entirely in memory using `petgraph`, enabling extremely fast deduplication and continuous traversal.
 - **Core Orchestration**: Driven by the `AtlasEngine`, which handles concurrent fetching, graceful error handling, and long-living graph state management for continuous daemon loops.
@@ -48,7 +48,7 @@ GCP resources are supported using lightweight custom REST clients for performanc
 
 ## Cloudflare Notes
 
-Cloudflare resources are supported using the `CLOUDFLARE_API_TOKEN` environment variable for authentication. Use the `--cloudflare` flag to include Cloudflare resources in the final graph output. Supported services include Zones, DNS Records, and Workers.
+Cloudflare resources are supported using the `CLOUDFLARE_API_TOKEN` environment variable for authentication. Use the `--cloudflare` flag to include Cloudflare resources in the final graph output. Supported services include Zones, DNS Records, Workers, Durable Objects, KV Namespaces, R2 Buckets, and D1 Databases.
 
 ## Azure Notes
 
@@ -86,4 +86,7 @@ cargo run -- --regions us-east-1 --azure-subscriptions my-subscription-1 my-subs
 
 # Run as a continuously updating daemon (polls every 60s)
 cargo run -- --daemon
+
+# Include all default mappings and enable verbose output
+cargo run -- --all --verbose
 ```
