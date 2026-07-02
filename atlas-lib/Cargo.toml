@@ -28,7 +28,11 @@ aws-sdk-sns = "1.0"
 aws-sdk-sqs = "1.0"
 aws-types = "1.0"
 futures = "0.3"
+google-compute1 = "6.0.0"
+hyper-rustls = "0.27"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 petgraph = "0.7"
 tokio = { version = "1.21", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.2", features = ["v4"] }
+yup-oauth2 = "11"

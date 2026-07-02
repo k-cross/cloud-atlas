@@ -1,0 +1,7 @@
+digraph {
+    0 [ label = "GCP::Project(my-gcp-project)" ]
+    1 [ label = "GCP::Compute::Instance(12345)" ]
+    2 [ label = "GCP::Compute::Instance(67890)" ]
+    0 -> 1 [ label = "DependsOn" ]
+    0 -> 2 [ label = "DependsOn" ]
+}

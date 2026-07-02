@@ -51,7 +51,7 @@ pub enum AmazonCollection {
 
 #[derive(Debug)]
 pub enum GoogleCollection {
-    GoogleInstances,
+    GoogleInstances(Vec<google_compute1::api::Instance>),
 }
 
 #[derive(Debug)]

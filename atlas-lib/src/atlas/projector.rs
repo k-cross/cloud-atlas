@@ -580,8 +580,72 @@ pub fn aws_projector<'a>(
     graph
 }
 
-pub fn gcp_projector(_gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
-    todo!()
+pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
+    let mut graph: Graph<Node, Edge> = Graph::new();
+    let mut node_map: HashMap<Node, NodeIndex> = HashMap::new();
+
+    let mut get_or_add_node = |graph: &mut Graph<Node, Edge>, node: Node| -> NodeIndex {
+        if let Some(&idx) = node_map.get(&node) {
+            idx
+        } else {
+            let idx = graph.add_node(node.clone());
+            node_map.insert(node, idx);
+            idx
+        }
+    };
+
+    for x in gcp_data {
+        match x {
+            GoogleCollection::GoogleInstances(instances) => {
+                for inst in instances {
+                    let mut project_idx = None;
+                    // Attempt to extract project from the self_link e.g., https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance
+                    if let Some(self_link) = &inst.self_link
+                        && let Some(project_str) = self_link.split("/projects/").nth(1)
+                        && let Some(project_id) = project_str.split('/').next()
+                    {
+                        let project_node = Node {
+                            id: project_id.to_string(),
+                            name: "GCP::Project".to_string(),
+                            category: "GCP".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        project_idx = Some(get_or_add_node(&mut graph, project_node));
+                    }
+
+                    if let Some(id) = &inst.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "GCP::Compute::Instance".to_string(),
+                            category: "GCP::Compute".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+                        if let Some(p_idx) = project_idx {
+                            graph.add_edge(p_idx, idx, Edge::DependsOn);
+                        }
+
+                        if let Some(network_interfaces) = &inst.network_interfaces {
+                            for net in network_interfaces {
+                                if let Some(network) = &net.network {
+                                    let net_node = Node {
+                                        id: network.to_string(),
+                                        name: "GCP::Compute::Network".to_string(),
+                                        category: "GCP::Compute".to_string(),
+                                        provider: AtlasProvider::Gcp,
+                                    };
+                                    let n_idx = get_or_add_node(&mut graph, net_node);
+                                    graph.add_edge(n_idx, idx, Edge::Contains);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    graph
 }
 
 pub fn azure_projector(_azure_data: &[MicrosoftCollection]) -> Graph<Node, Edge> {

@@ -11,6 +11,10 @@ pub struct Opt {
     #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"])]
     regions: Vec<String>,
 
+    /// The GCP Projects.
+    #[clap(long, value_parser, num_args = 1..)]
+    gcp_projects: Option<Vec<String>>,
+
     /// Include all mappings by default
     #[clap(short, long)]
     all: bool,
@@ -38,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let settings = atlas_lib::Settings {
         regions: opts.regions,
+        gcp_projects: opts.gcp_projects,
         all: opts.all,
         verbose: opts.verbose,
         exclude_by_default: opts.exclude,
@@ -48,22 +53,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             // As per requirements: only fetch AWS if regions are specified (not empty).
             // When GCP/Azure are added, we would check for their respective flags here.
+            let mut graph = petgraph::graph::Graph::new();
+
             if !settings.regions.is_empty() {
                 let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
                 let g = projector::build(&aws_provider, &settings);
-                let s = format!("{}", Dot::with_config(&g, &[]));
-                fs::write("atlas.dot", s)?;
-                println!("Graph updated successfully at atlas.dot");
+                // We'd ideally merge this if there are multiple providers
+                graph = g;
             }
+
+            if let Some(projects) = &settings.gcp_projects
+                && !projects.is_empty()
+            {
+                let gcp_provider =
+                    atlas_lib::cloud::google::provider::build_gcp(settings.verbose, &settings)
+                        .await?;
+                let g = projector::build(&gcp_provider, &settings);
+                // Just replace graph for now if AWS isn't merged
+                graph = g;
+            }
+
+            let s = format!("{}", Dot::with_config(&graph, &[]));
+            fs::write("atlas.dot", s)?;
+            println!("Graph updated successfully at atlas.dot");
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     } else {
+        let mut graph = petgraph::graph::Graph::new();
+
         if !settings.regions.is_empty() {
             let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
             let g = projector::build(&aws_provider, &settings);
-            let s = format!("{}", Dot::with_config(&g, &[]));
-            fs::write("atlas.dot", s)?;
+            graph = g;
         }
+
+        if let Some(projects) = &settings.gcp_projects
+            && !projects.is_empty()
+        {
+            let gcp_provider =
+                atlas_lib::cloud::google::provider::build_gcp(settings.verbose, &settings).await?;
+            let g = projector::build(&gcp_provider, &settings);
+            graph = g;
+        }
+
+        let s = format!("{}", Dot::with_config(&graph, &[]));
+        fs::write("atlas.dot", s)?;
     }
 
     Ok(())

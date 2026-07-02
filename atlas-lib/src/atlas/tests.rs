@@ -105,6 +105,7 @@ mod tests {
 
         let s = Settings {
             regions: vec!["us-east-1".to_owned()],
+            gcp_projects: None,
             all: false,
             verbose: false,
             exclude_by_default: false,
@@ -116,6 +117,43 @@ mod tests {
         fs::write("mock_atlas.dot", s).unwrap();
 
         println!("Mock DOT file generated at mock_atlas.dot");
+    }
+    fn make_gcp_provider() -> Provider {
+        use crate::cloud::definition::GoogleCollection;
+        use google_compute1::api::Instance;
+
+        let mut i1 = Instance::default();
+        i1.id = Some(12345u64);
+        i1.name = Some("my-gcp-instance".to_owned());
+        i1.self_link = Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance".to_owned());
+
+        let mut i2 = Instance::default();
+        i2.id = Some(67890u64);
+        i2.name = Some("my-gcp-instance-2".to_owned());
+        i2.self_link = Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance-2".to_owned());
+
+        Provider::GCP(vec![GoogleCollection::GoogleInstances(vec![i1, i2])])
+    }
+
+    #[test]
+    fn gcp_instance_graph() {
+        use petgraph::dot::Dot;
+        use std::fs;
+
+        let s = Settings {
+            regions: vec![],
+            gcp_projects: Some(vec!["my-gcp-project".to_owned()]),
+            all: false,
+            verbose: false,
+            exclude_by_default: false,
+        };
+        let provider = make_gcp_provider();
+        let g = projector::build(&provider, &s);
+
+        let s = format!("{}", Dot::with_config(&g, &[]));
+        assert!(s.contains("GCP::Compute::Instance"));
+        assert!(s.contains("my-gcp-project"));
+        fs::write("mock_atlas_gcp.dot", s).unwrap();
     }
 }
 

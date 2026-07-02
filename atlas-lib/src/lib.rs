@@ -6,6 +6,9 @@ pub struct Settings {
     /// The AWS Region.
     pub regions: Vec<String>,
 
+    /// The GCP projects.
+    pub gcp_projects: Option<Vec<String>>,
+
     /// Include all mappings by default
     pub all: bool,
 
