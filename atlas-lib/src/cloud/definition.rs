@@ -68,5 +68,13 @@ pub enum GoogleCollection {
 
 #[derive(Debug)]
 pub enum MicrosoftCollection {
-    MicrosoftInstances,
+    AzureVirtualMachines(Vec<crate::api::azure::models::VirtualMachine>),
+    AzureVirtualNetworks(Vec<crate::api::azure::models::VirtualNetwork>),
+    AzureSubnets(Vec<crate::api::azure::models::Subnet>),
+    AzureNetworkSecurityGroups(Vec<crate::api::azure::models::NetworkSecurityGroup>),
+    AzurePublicIpAddresses(Vec<crate::api::azure::models::PublicIpAddress>),
+    AzureStorageAccounts(Vec<crate::api::azure::models::StorageAccount>),
+    AzureManagedClusters(Vec<crate::api::azure::models::ManagedCluster>),
+    AzureSqlServers(Vec<crate::api::azure::models::SqlServer>),
+    AzureAppServices(Vec<crate::api::azure::models::AppService>),
 }

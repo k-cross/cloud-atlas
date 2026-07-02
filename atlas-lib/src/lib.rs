@@ -10,6 +10,9 @@ pub struct Settings {
     /// The GCP projects.
     pub gcp_projects: Option<Vec<String>>,
 
+    /// The Azure subscriptions.
+    pub azure_subscriptions: Option<Vec<String>>,
+
     /// Include all mappings by default
     pub all: bool,
 

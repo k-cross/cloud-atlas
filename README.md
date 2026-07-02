@@ -14,13 +14,14 @@ It builds from existing cloud configurations as they exist in reality, not an id
 - [ ] Work across GCP, AWS, and Azure
     - [x] AWS
     - [x] GCP
+    - [x] Azure
 - [ ] Extendable for on-prem use-cases
 
 ### Status
 
 The best tool I know of for exploring the dot file so far has been [gephi](https://gephi.org/).
 Current work is being done to build better relationships in the graph output.
-The graph can now fetch resources concurrently across multiple AWS regions and GCP projects, merging them into a single comprehensive in-memory model.
+The graph can now fetch resources concurrently across multiple AWS regions, GCP projects, and Azure subscriptions, merging them into a single comprehensive in-memory model.
 
 ## AWS Notes
 
@@ -34,7 +35,11 @@ Route53 Hosted Zones and Record Sets are mapped globally. Record Sets project `C
 
 ## GCP Notes
 
-GCP resources are supported using lightweight custom REST clients for performance and reduced binary bloat. Authenticate locally and use the `--gcp-projects` flag to include GCP resources in the final graph output. Supported services include Compute Instances, Firewalls, Cloud SQL, Cloud DNS, GKE, and Cloud Functions.
+GCP resources are supported using lightweight custom REST clients for performance and reduced binary bloat. Authenticate locally and use the `--gcp-projects` flag to include GCP resources in the final graph output. Supported services include Compute Instances, Firewalls, Cloud SQL, Cloud DNS, GKE, Cloud Functions, and Network topologies.
+
+## Azure Notes
+
+Azure resources are supported using Azure Resource Graph (ARG) for blazing fast, cross-subscription resource fetching. Authenticate locally with `az login` and use the `--azure-subscriptions` flag to include Azure resources in the final graph output. Supported services include Virtual Machines, Virtual Networks, Network Security Groups, Storage, AKS, App Services, and SQL Servers.
 
 ## Build Instructions
 
@@ -55,6 +60,9 @@ cargo run -- --regions us-east-1 us-west-2
 
 # Include GCP projects in the snapshot
 cargo run -- --regions us-east-1 --gcp-projects my-gcp-project-1 my-gcp-project-2
+
+# Include Azure subscriptions in the snapshot
+cargo run -- --regions us-east-1 --azure-subscriptions my-subscription-1 my-subscription-2
 
 # Run as a continuously updating daemon (polls every 60s)
 cargo run -- --daemon

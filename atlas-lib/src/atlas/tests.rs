@@ -1,6 +1,7 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use crate::Settings;
+    use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector;
     use crate::cloud::definition::{AmazonCollection, Provider};
     use aws_sdk_ec2::types::builders::InstanceBuilder;
@@ -107,14 +108,16 @@ mod tests {
         let s = Settings {
             regions: vec!["us-east-1".to_owned()],
             gcp_projects: None,
+            azure_subscriptions: None,
             all: false,
             verbose: false,
             exclude_by_default: false,
         };
         let provider = make_aws_provider();
-        let g = projector::build(&provider, &s);
+        let mut builder = GraphBuilder::new();
+        projector::build(&mut builder, &provider, &s);
 
-        let s = format!("{}", Dot::with_config(&g, &[]));
+        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
         fs::write("mock_atlas.dot", s).unwrap();
 
         println!("Mock DOT file generated at mock_atlas.dot");
@@ -243,14 +246,16 @@ mod tests {
         let s = Settings {
             regions: vec![],
             gcp_projects: Some(vec!["my-gcp-project".to_owned()]),
+            azure_subscriptions: None,
             all: false,
             verbose: false,
             exclude_by_default: false,
         };
         let provider = make_gcp_provider();
-        let g = projector::build(&provider, &s);
+        let mut builder = GraphBuilder::new();
+        projector::build(&mut builder, &provider, &s);
 
-        let s = format!("{}", Dot::with_config(&g, &[]));
+        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
         assert!(s.contains("GCP::Compute::Instance"));
         assert!(s.contains("GCP::Compute::Firewall"));
         assert!(s.contains("GCP::CloudSQL::Instance"));
@@ -266,6 +271,69 @@ mod tests {
         assert!(s.contains("GCP::Compute::ForwardingRule"));
         assert!(s.contains("my-gcp-project"));
         fs::write("mock_atlas_gcp.dot", s).unwrap();
+    }
+    fn make_azure_provider() -> Provider {
+        use crate::api::azure::models::*;
+        use crate::cloud::definition::MicrosoftCollection;
+
+        let vm = VirtualMachine {
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1".to_string()),
+            name: Some("vm1".to_string()),
+            location: Some("eastus".to_string()),
+            network_interfaces: vec!["/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkInterfaces/nic1".to_string()],
+        };
+
+        let vnet = VirtualNetwork {
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".to_string()),
+            name: Some("vnet1".to_string()),
+            location: Some("eastus".to_string()),
+            subnets: vec!["/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default".to_string()],
+        };
+
+        let subnet = Subnet {
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default".to_string()),
+            name: Some("default".to_string()),
+            vnet_id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".to_string()),
+            network_security_group_id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".to_string()),
+        };
+
+        let nsg = NetworkSecurityGroup {
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".to_string()),
+            name: Some("nsg1".to_string()),
+            location: Some("eastus".to_string()),
+        };
+
+        Provider::Azure(vec![
+            MicrosoftCollection::AzureVirtualMachines(vec![vm]),
+            MicrosoftCollection::AzureVirtualNetworks(vec![vnet]),
+            MicrosoftCollection::AzureSubnets(vec![subnet]),
+            MicrosoftCollection::AzureNetworkSecurityGroups(vec![nsg]),
+        ])
+    }
+
+    #[test]
+    fn azure_instance_graph() {
+        use petgraph::dot::Dot;
+        use std::fs;
+
+        let s = Settings {
+            regions: vec![],
+            gcp_projects: None,
+            azure_subscriptions: Some(vec!["sub1".to_owned()]),
+            all: false,
+            verbose: false,
+            exclude_by_default: false,
+        };
+        let provider = make_azure_provider();
+        let mut builder = GraphBuilder::new();
+        projector::build(&mut builder, &provider, &s);
+
+        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
+        assert!(s.contains("Azure::Compute::VirtualMachine"));
+        assert!(s.contains("Azure::Network::VirtualNetwork"));
+        assert!(s.contains("Azure::Network::Subnet"));
+        assert!(s.contains("Azure::Network::NetworkSecurityGroup"));
+        fs::write("mock_atlas_azure.dot", s).unwrap();
     }
 }
 

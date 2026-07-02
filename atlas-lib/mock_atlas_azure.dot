@@ -1,0 +1,11 @@
+digraph {
+    0 [ label = "Azure::Compute::VirtualMachine(/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1)" ]
+    1 [ label = "Azure::Network::NetworkInterface(/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkInterfaces/nic1)" ]
+    2 [ label = "Azure::Network::VirtualNetwork(/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1)" ]
+    3 [ label = "Azure::Network::Subnet(/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default)" ]
+    4 [ label = "Azure::Network::NetworkSecurityGroup(/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1)" ]
+    0 -> 1 [ label = "ConnectsTo" ]
+    2 -> 3 [ label = "Contains" ]
+    2 -> 3 [ label = "Contains" ]
+    3 -> 4 [ label = "ConnectsTo" ]
+}

@@ -1,3 +1,4 @@
+use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::projector;
 use atlas_lib::cloud::amazon::provider;
 use clap::Parser;
@@ -14,6 +15,10 @@ pub struct Opt {
     /// The GCP Projects.
     #[clap(long, value_parser, num_args = 1..)]
     gcp_projects: Option<Vec<String>>,
+
+    /// The Azure Subscriptions.
+    #[clap(long, value_parser, num_args = 1..)]
+    azure_subscriptions: Option<Vec<String>>,
 
     /// Include all mappings by default
     #[clap(short, long)]
@@ -43,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = atlas_lib::Settings {
         regions: opts.regions,
         gcp_projects: opts.gcp_projects,
+        azure_subscriptions: opts.azure_subscriptions,
         all: opts.all,
         verbose: opts.verbose,
         exclude_by_default: opts.exclude,
@@ -51,52 +57,107 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if opts.daemon {
         println!("Starting in daemon mode. Polling for changes every 60 seconds...");
         loop {
-            // As per requirements: only fetch AWS if regions are specified (not empty).
-            // When GCP/Azure are added, we would check for their respective flags here.
-            let mut graph = petgraph::graph::Graph::new();
+            let mut builder = GraphBuilder::new();
 
-            if !settings.regions.is_empty() {
-                let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
-                let g = projector::build(&aws_provider, &settings);
-                // We'd ideally merge this if there are multiple providers
-                graph = g;
+            let aws_future = async {
+                if !settings.regions.is_empty() {
+                    provider::build_aws(settings.verbose, &settings).await.ok()
+                } else {
+                    None
+                }
+            };
+
+            let gcp_future = async {
+                if let Some(projects) = &settings.gcp_projects
+                    && !projects.is_empty()
+                {
+                    return atlas_lib::cloud::google::provider::build_gcp(
+                        settings.verbose,
+                        &settings,
+                    )
+                    .await
+                    .ok();
+                }
+                None
+            };
+
+            let azure_future = async {
+                if let Some(subs) = &settings.azure_subscriptions
+                    && !subs.is_empty()
+                {
+                    return atlas_lib::cloud::azure::provider::build_azure(
+                        settings.verbose,
+                        &settings,
+                    )
+                    .await
+                    .ok();
+                }
+                None
+            };
+
+            let (aws_opt, gcp_opt, azure_opt) = tokio::join!(aws_future, gcp_future, azure_future);
+
+            if let Some(aws_provider) = aws_opt {
+                projector::build(&mut builder, &aws_provider, &settings);
+            }
+            if let Some(gcp_provider) = gcp_opt {
+                projector::build(&mut builder, &gcp_provider, &settings);
+            }
+            if let Some(azure_provider) = azure_opt {
+                projector::build(&mut builder, &azure_provider, &settings);
             }
 
-            if let Some(projects) = &settings.gcp_projects
-                && !projects.is_empty()
-            {
-                let gcp_provider =
-                    atlas_lib::cloud::google::provider::build_gcp(settings.verbose, &settings)
-                        .await?;
-                let g = projector::build(&gcp_provider, &settings);
-                // Just replace graph for now if AWS isn't merged
-                graph = g;
-            }
-
-            let s = format!("{}", Dot::with_config(&graph, &[]));
+            let s = format!("{}", Dot::with_config(&builder.graph, &[]));
             fs::write("atlas.dot", s)?;
             println!("Graph updated successfully at atlas.dot");
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     } else {
-        let mut graph = petgraph::graph::Graph::new();
+        let mut builder = GraphBuilder::new();
 
-        if !settings.regions.is_empty() {
-            let aws_provider = provider::build_aws(settings.verbose, &settings).await?;
-            let g = projector::build(&aws_provider, &settings);
-            graph = g;
+        let aws_future = async {
+            if !settings.regions.is_empty() {
+                provider::build_aws(settings.verbose, &settings).await.ok()
+            } else {
+                None
+            }
+        };
+
+        let gcp_future = async {
+            if let Some(projects) = &settings.gcp_projects
+                && !projects.is_empty()
+            {
+                return atlas_lib::cloud::google::provider::build_gcp(settings.verbose, &settings)
+                    .await
+                    .ok();
+            }
+            None
+        };
+
+        let azure_future = async {
+            if let Some(subs) = &settings.azure_subscriptions
+                && !subs.is_empty()
+            {
+                return atlas_lib::cloud::azure::provider::build_azure(settings.verbose, &settings)
+                    .await
+                    .ok();
+            }
+            None
+        };
+
+        let (aws_opt, gcp_opt, azure_opt) = tokio::join!(aws_future, gcp_future, azure_future);
+
+        if let Some(aws_provider) = aws_opt {
+            projector::build(&mut builder, &aws_provider, &settings);
+        }
+        if let Some(gcp_provider) = gcp_opt {
+            projector::build(&mut builder, &gcp_provider, &settings);
+        }
+        if let Some(azure_provider) = azure_opt {
+            projector::build(&mut builder, &azure_provider, &settings);
         }
 
-        if let Some(projects) = &settings.gcp_projects
-            && !projects.is_empty()
-        {
-            let gcp_provider =
-                atlas_lib::cloud::google::provider::build_gcp(settings.verbose, &settings).await?;
-            let g = projector::build(&gcp_provider, &settings);
-            graph = g;
-        }
-
-        let s = format!("{}", Dot::with_config(&graph, &[]));
+        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
         fs::write("atlas.dot", s)?;
     }
 

@@ -1,36 +1,23 @@
 use crate::Settings;
 use crate::atlas::definition::{Edge, Node, Provider as AtlasProvider};
+use crate::atlas::graph_builder::GraphBuilder;
 use crate::cloud::definition::{
     AmazonCollection, GoogleCollection, MicrosoftCollection, Provider as CloudProvider,
 };
-use petgraph::graph::{Graph, NodeIndex};
-use std::collections::HashMap;
 
-pub fn build<'b>(data: &'b CloudProvider, opts: &'b Settings) -> Graph<Node, Edge> {
+pub fn build(builder: &mut GraphBuilder, data: &CloudProvider, opts: &Settings) {
     match data {
-        CloudProvider::AWS(aws_data) => aws_projector(aws_data, opts),
-        CloudProvider::GCP(gcp_data) => gcp_projector(gcp_data),
-        CloudProvider::Azure(azure_data) => azure_projector(azure_data),
+        CloudProvider::AWS(aws_data) => aws_projector(builder, aws_data, opts),
+        CloudProvider::GCP(gcp_data) => gcp_projector(builder, gcp_data),
+        CloudProvider::Azure(azure_data) => azure_projector(builder, azure_data),
     }
 }
 
-pub fn aws_projector<'a>(
-    aws_data: &'a Vec<(String, AmazonCollection)>,
-    opts: &'a Settings,
-) -> Graph<Node, Edge> {
-    let mut graph: Graph<Node, Edge> = Graph::new();
-    let mut node_map: HashMap<Node, NodeIndex> = HashMap::new();
-
-    let mut get_or_add_node = |graph: &mut Graph<Node, Edge>, node: Node| -> NodeIndex {
-        if let Some(&idx) = node_map.get(&node) {
-            idx
-        } else {
-            let idx = graph.add_node(node.clone());
-            node_map.insert(node, idx);
-            idx
-        }
-    };
-
+pub fn aws_projector(
+    builder: &mut GraphBuilder,
+    aws_data: &Vec<(String, AmazonCollection)>,
+    opts: &Settings,
+) {
     for (region, x) in aws_data {
         let region_node = Node {
             id: region.to_string(),
@@ -38,7 +25,7 @@ pub fn aws_projector<'a>(
             category: "AWS".to_string(),
             provider: AtlasProvider::Aws,
         };
-        let region_idx = get_or_add_node(&mut graph, region_node);
+        let region_idx = builder.get_or_add_node(region_node);
 
         match x {
             AmazonCollection::AmazonInstances(instance_data) => {
@@ -51,8 +38,8 @@ pub fn aws_projector<'a>(
                             category: "AWS::EC2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
-                        graph.add_edge(region_idx, idx, Edge::Contains);
+                        let idx = builder.get_or_add_node(node);
+                        builder.add_edge(region_idx, idx, Edge::Contains);
                         vpc_idx = Some(idx);
                     }
 
@@ -64,9 +51,9 @@ pub fn aws_projector<'a>(
                             category: "AWS::EC2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
                         if let Some(v_idx) = vpc_idx {
-                            graph.add_edge(v_idx, idx, Edge::Contains);
+                            builder.add_edge(v_idx, idx, Edge::Contains);
                         }
                         subnet_idx = Some(idx);
                     }
@@ -79,9 +66,9 @@ pub fn aws_projector<'a>(
                             category: "AWS::EC2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
                         if let Some(s_idx) = subnet_idx {
-                            graph.add_edge(s_idx, idx, Edge::Contains);
+                            builder.add_edge(s_idx, idx, Edge::Contains);
                         }
                         inst_idx = Some(idx);
                     }
@@ -95,10 +82,10 @@ pub fn aws_projector<'a>(
                             category: "AWS::EC2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let az_idx = get_or_add_node(&mut graph, node);
+                        let az_idx = builder.get_or_add_node(node);
 
                         if let Some(i_idx) = inst_idx {
-                            graph.add_edge(az_idx, i_idx, Edge::Contains);
+                            builder.add_edge(az_idx, i_idx, Edge::Contains);
                         }
                     }
 
@@ -109,9 +96,9 @@ pub fn aws_projector<'a>(
                             category: "Generic".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let ip_idx = get_or_add_node(&mut graph, node);
+                        let ip_idx = builder.get_or_add_node(node);
                         if let Some(i_idx) = inst_idx {
-                            graph.add_edge(i_idx, ip_idx, Edge::ConnectsTo);
+                            builder.add_edge(i_idx, ip_idx, Edge::ConnectsTo);
                         }
                     }
 
@@ -124,9 +111,9 @@ pub fn aws_projector<'a>(
                                     category: "AWS".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let tag_idx = get_or_add_node(&mut graph, node);
+                                let tag_idx = builder.get_or_add_node(node);
                                 if let Some(i_idx) = inst_idx {
-                                    graph.add_edge(i_idx, tag_idx, Edge::DependsOn);
+                                    builder.add_edge(i_idx, tag_idx, Edge::DependsOn);
                                 }
                             }
                         }
@@ -140,9 +127,9 @@ pub fn aws_projector<'a>(
                                 category: "AWS::EC2".to_string(),
                                 provider: AtlasProvider::Aws,
                             };
-                            let sg_idx = get_or_add_node(&mut graph, sg_node);
+                            let sg_idx = builder.get_or_add_node(sg_node);
                             if let Some(i_idx) = inst_idx {
-                                graph.add_edge(i_idx, sg_idx, Edge::ConnectsTo);
+                                builder.add_edge(i_idx, sg_idx, Edge::ConnectsTo);
                             }
                         }
                     }
@@ -160,7 +147,7 @@ pub fn aws_projector<'a>(
                                     category,
                                     provider: AtlasProvider::Aws,
                                 };
-                                let idx = get_or_add_node(&mut graph, node);
+                                let idx = builder.get_or_add_node(node);
 
                                 if use_global(res_name.as_str()) {
                                     let global_node = Node {
@@ -169,10 +156,10 @@ pub fn aws_projector<'a>(
                                         category: "AWS".to_string(),
                                         provider: AtlasProvider::Aws,
                                     };
-                                    let g_idx = get_or_add_node(&mut graph, global_node);
-                                    graph.add_edge(g_idx, idx, Edge::DependsOn);
+                                    let g_idx = builder.get_or_add_node(global_node);
+                                    builder.add_edge(g_idx, idx, Edge::DependsOn);
                                 } else {
-                                    graph.add_edge(region_idx, idx, Edge::DependsOn);
+                                    builder.add_edge(region_idx, idx, Edge::DependsOn);
                                 }
                             }
                         }
@@ -188,8 +175,8 @@ pub fn aws_projector<'a>(
                             category: "AWS::ECS".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
-                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        let idx = builder.get_or_add_node(node);
+                        builder.add_edge(region_idx, idx, Edge::DependsOn);
                     }
                 }
             }
@@ -202,8 +189,8 @@ pub fn aws_projector<'a>(
                             category: "AWS::Lambda".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
-                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        let idx = builder.get_or_add_node(node);
+                        builder.add_edge(region_idx, idx, Edge::DependsOn);
 
                         if let Some(role) = lambda.role() {
                             let role_node = Node {
@@ -212,8 +199,8 @@ pub fn aws_projector<'a>(
                                 category: "AWS::IAM".to_string(),
                                 provider: AtlasProvider::Aws,
                             };
-                            let r_idx = get_or_add_node(&mut graph, role_node);
-                            graph.add_edge(idx, r_idx, Edge::DependsOn);
+                            let r_idx = builder.get_or_add_node(role_node);
+                            builder.add_edge(idx, r_idx, Edge::DependsOn);
                         }
 
                         if let Some(vpc_config) = lambda.vpc_config() {
@@ -224,8 +211,8 @@ pub fn aws_projector<'a>(
                                     category: "AWS::EC2".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let sg_idx = get_or_add_node(&mut graph, sg_node);
-                                graph.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                                let sg_idx = builder.get_or_add_node(sg_node);
+                                builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
                             }
                         }
                     }
@@ -254,7 +241,7 @@ pub fn aws_projector<'a>(
                             category: "AWS::ElasticLoadBalancingV2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let lb_idx = get_or_add_node(&mut graph, lb_node);
+                        let lb_idx = builder.get_or_add_node(lb_node);
 
                         if let Some(vpc_id) = lb.vpc_id() {
                             let vpc_node = Node {
@@ -263,10 +250,10 @@ pub fn aws_projector<'a>(
                                 category: "AWS::EC2".to_string(),
                                 provider: AtlasProvider::Aws,
                             };
-                            let v_idx = get_or_add_node(&mut graph, vpc_node);
-                            graph.add_edge(v_idx, lb_idx, Edge::Contains);
+                            let v_idx = builder.get_or_add_node(vpc_node);
+                            builder.add_edge(v_idx, lb_idx, Edge::Contains);
                         } else {
-                            graph.add_edge(region_idx, lb_idx, Edge::DependsOn);
+                            builder.add_edge(region_idx, lb_idx, Edge::DependsOn);
                         }
                     }
                 }
@@ -279,7 +266,7 @@ pub fn aws_projector<'a>(
                             category: "AWS::ElasticLoadBalancingV2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let tg_idx = get_or_add_node(&mut graph, tg_node);
+                        let tg_idx = builder.get_or_add_node(tg_node);
 
                         if let Some(vpc_id) = tg.vpc_id() {
                             let vpc_node = Node {
@@ -288,8 +275,8 @@ pub fn aws_projector<'a>(
                                 category: "AWS::EC2".to_string(),
                                 provider: AtlasProvider::Aws,
                             };
-                            let v_idx = get_or_add_node(&mut graph, vpc_node);
-                            graph.add_edge(v_idx, tg_idx, Edge::Contains);
+                            let v_idx = builder.get_or_add_node(vpc_node);
+                            builder.add_edge(v_idx, tg_idx, Edge::Contains);
                         }
 
                         if let Some(health_descriptions) = target_health.get(arn) {
@@ -304,8 +291,8 @@ pub fn aws_projector<'a>(
                                     category: "AWS::EC2".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let i_idx = get_or_add_node(&mut graph, inst_node);
-                                graph.add_edge(tg_idx, i_idx, Edge::ConnectsTo);
+                                let i_idx = builder.get_or_add_node(inst_node);
+                                builder.add_edge(tg_idx, i_idx, Edge::ConnectsTo);
                             }
                         }
                     }
@@ -330,9 +317,9 @@ pub fn aws_projector<'a>(
                                 category: "AWS::ElasticLoadBalancingV2".to_string(),
                                 provider: AtlasProvider::Aws,
                             };
-                            let lb_idx = get_or_add_node(&mut graph, lb_node);
-                            let tg_idx = get_or_add_node(&mut graph, tg_node);
-                            graph.add_edge(lb_idx, tg_idx, Edge::ConnectsTo);
+                            let lb_idx = builder.get_or_add_node(lb_node);
+                            let tg_idx = builder.get_or_add_node(tg_node);
+                            builder.add_edge(lb_idx, tg_idx, Edge::ConnectsTo);
                         }
                     }
                 }
@@ -347,7 +334,7 @@ pub fn aws_projector<'a>(
                     category: "AWS".to_string(),
                     provider: AtlasProvider::Aws,
                 };
-                let g_idx = get_or_add_node(&mut graph, global_node);
+                let g_idx = builder.get_or_add_node(global_node);
 
                 for hz in hosted_zones {
                     let id = hz.id();
@@ -357,8 +344,8 @@ pub fn aws_projector<'a>(
                         category: "AWS::Route53".to_string(),
                         provider: AtlasProvider::Aws,
                     };
-                    let hz_idx = get_or_add_node(&mut graph, hz_node);
-                    graph.add_edge(g_idx, hz_idx, Edge::Contains);
+                    let hz_idx = builder.get_or_add_node(hz_node);
+                    builder.add_edge(g_idx, hz_idx, Edge::Contains);
                 }
 
                 for rs in record_sets {
@@ -369,9 +356,9 @@ pub fn aws_projector<'a>(
                         category: "AWS::Route53".to_string(),
                         provider: AtlasProvider::Aws,
                     };
-                    let rs_idx = get_or_add_node(&mut graph, rs_node);
+                    let rs_idx = builder.get_or_add_node(rs_node);
 
-                    graph.add_edge(g_idx, rs_idx, Edge::Contains);
+                    builder.add_edge(g_idx, rs_idx, Edge::Contains);
 
                     let records = rs.resource_records();
                     for r in records {
@@ -382,8 +369,8 @@ pub fn aws_projector<'a>(
                             category: "Generic".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let ip_idx = get_or_add_node(&mut graph, ip_node);
-                        graph.add_edge(rs_idx, ip_idx, Edge::ConnectsTo);
+                        let ip_idx = builder.get_or_add_node(ip_node);
+                        builder.add_edge(rs_idx, ip_idx, Edge::ConnectsTo);
                     }
                 }
             }
@@ -396,7 +383,7 @@ pub fn aws_projector<'a>(
                             category: "AWS::EKS".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(vpc_config) = cluster.resources_vpc_config() {
                             if let Some(vpc_id) = vpc_config.vpc_id() {
@@ -406,10 +393,10 @@ pub fn aws_projector<'a>(
                                     category: "AWS::EC2".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let vpc_idx = get_or_add_node(&mut graph, vpc_node);
-                                graph.add_edge(vpc_idx, idx, Edge::Contains);
+                                let vpc_idx = builder.get_or_add_node(vpc_node);
+                                builder.add_edge(vpc_idx, idx, Edge::Contains);
                             } else {
-                                graph.add_edge(region_idx, idx, Edge::DependsOn);
+                                builder.add_edge(region_idx, idx, Edge::DependsOn);
                             }
 
                             for sg_id in vpc_config.security_group_ids() {
@@ -419,11 +406,11 @@ pub fn aws_projector<'a>(
                                     category: "AWS::EC2".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let sg_idx = get_or_add_node(&mut graph, sg_node);
-                                graph.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                                let sg_idx = builder.get_or_add_node(sg_node);
+                                builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
                             }
                         } else {
-                            graph.add_edge(region_idx, idx, Edge::DependsOn);
+                            builder.add_edge(region_idx, idx, Edge::DependsOn);
                         }
                     }
                 }
@@ -437,8 +424,8 @@ pub fn aws_projector<'a>(
                             category: "AWS::ApiGateway".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
-                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        let idx = builder.get_or_add_node(node);
+                        builder.add_edge(region_idx, idx, Edge::DependsOn);
                     }
                 }
             }
@@ -451,7 +438,7 @@ pub fn aws_projector<'a>(
                             category: "AWS::RDS".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(subnet_group) = db.db_subnet_group() {
                             if let Some(vpc_id) = subnet_group.vpc_id() {
@@ -461,13 +448,13 @@ pub fn aws_projector<'a>(
                                     category: "AWS::EC2".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let vpc_idx = get_or_add_node(&mut graph, vpc_node);
-                                graph.add_edge(vpc_idx, idx, Edge::Contains);
+                                let vpc_idx = builder.get_or_add_node(vpc_node);
+                                builder.add_edge(vpc_idx, idx, Edge::Contains);
                             } else {
-                                graph.add_edge(region_idx, idx, Edge::DependsOn);
+                                builder.add_edge(region_idx, idx, Edge::DependsOn);
                             }
                         } else {
-                            graph.add_edge(region_idx, idx, Edge::DependsOn);
+                            builder.add_edge(region_idx, idx, Edge::DependsOn);
                         }
 
                         for sg in db.vpc_security_groups() {
@@ -478,8 +465,8 @@ pub fn aws_projector<'a>(
                                     category: "AWS::EC2".to_string(),
                                     provider: AtlasProvider::Aws,
                                 };
-                                let sg_idx = get_or_add_node(&mut graph, sg_node);
-                                graph.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                                let sg_idx = builder.get_or_add_node(sg_node);
+                                builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
                             }
                         }
                     }
@@ -493,8 +480,8 @@ pub fn aws_projector<'a>(
                         category: "AWS::DynamoDB".to_string(),
                         provider: AtlasProvider::Aws,
                     };
-                    let idx = get_or_add_node(&mut graph, node);
-                    graph.add_edge(region_idx, idx, Edge::DependsOn);
+                    let idx = builder.get_or_add_node(node);
+                    builder.add_edge(region_idx, idx, Edge::DependsOn);
                 }
             }
             AmazonCollection::AmazonSqs(queues) => {
@@ -505,8 +492,8 @@ pub fn aws_projector<'a>(
                         category: "AWS::SQS".to_string(),
                         provider: AtlasProvider::Aws,
                     };
-                    let idx = get_or_add_node(&mut graph, node);
-                    graph.add_edge(region_idx, idx, Edge::DependsOn);
+                    let idx = builder.get_or_add_node(node);
+                    builder.add_edge(region_idx, idx, Edge::DependsOn);
                 }
             }
             AmazonCollection::AmazonSns(topics) => {
@@ -518,8 +505,8 @@ pub fn aws_projector<'a>(
                             category: "AWS::SNS".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
-                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        let idx = builder.get_or_add_node(node);
+                        builder.add_edge(region_idx, idx, Edge::DependsOn);
                     }
                 }
             }
@@ -530,7 +517,7 @@ pub fn aws_projector<'a>(
                     category: "AWS".to_string(),
                     provider: AtlasProvider::Aws,
                 };
-                let g_idx = get_or_add_node(&mut graph, global_node);
+                let g_idx = builder.get_or_add_node(global_node);
 
                 for d in dists {
                     let id = d.id();
@@ -540,8 +527,8 @@ pub fn aws_projector<'a>(
                         category: "AWS::CloudFront".to_string(),
                         provider: AtlasProvider::Aws,
                     };
-                    let idx = get_or_add_node(&mut graph, node);
-                    graph.add_edge(g_idx, idx, Edge::Contains);
+                    let idx = builder.get_or_add_node(node);
+                    builder.add_edge(g_idx, idx, Edge::Contains);
                 }
             }
             AmazonCollection::AmazonSecurityGroups(groups) => {
@@ -553,8 +540,8 @@ pub fn aws_projector<'a>(
                             category: "AWS::EC2".to_string(),
                             provider: AtlasProvider::Aws,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
-                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        let idx = builder.get_or_add_node(node);
+                        builder.add_edge(region_idx, idx, Edge::DependsOn);
 
                         for perm in sg.ip_permissions() {
                             for pair in perm.user_id_group_pairs() {
@@ -565,9 +552,9 @@ pub fn aws_projector<'a>(
                                         category: "AWS::EC2".to_string(),
                                         provider: AtlasProvider::Aws,
                                     };
-                                    let ref_idx = get_or_add_node(&mut graph, ref_node);
+                                    let ref_idx = builder.get_or_add_node(ref_node);
                                     // The referenced group allows traffic TO this group
-                                    graph.add_edge(ref_idx, idx, Edge::ConnectsTo);
+                                    builder.add_edge(ref_idx, idx, Edge::ConnectsTo);
                                 }
                             }
                         }
@@ -576,24 +563,9 @@ pub fn aws_projector<'a>(
             }
         }
     }
-
-    graph
 }
 
-pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
-    let mut graph: Graph<Node, Edge> = Graph::new();
-    let mut node_map: HashMap<Node, NodeIndex> = HashMap::new();
-
-    let mut get_or_add_node = |graph: &mut Graph<Node, Edge>, node: Node| -> NodeIndex {
-        if let Some(&idx) = node_map.get(&node) {
-            idx
-        } else {
-            let idx = graph.add_node(node.clone());
-            node_map.insert(node, idx);
-            idx
-        }
-    };
-
+pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) {
     for x in gcp_data {
         match x {
             GoogleCollection::GoogleInstances(instances) => {
@@ -610,7 +582,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        project_idx = Some(get_or_add_node(&mut graph, project_node));
+                        project_idx = Some(builder.get_or_add_node(project_node));
                     }
 
                     if let Some(id) = &inst.id {
@@ -620,9 +592,9 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::Compute".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
                         if let Some(p_idx) = project_idx {
-                            graph.add_edge(p_idx, idx, Edge::DependsOn);
+                            builder.add_edge(p_idx, idx, Edge::DependsOn);
                         }
 
                         if let Some(network_interfaces) = &inst.network_interfaces {
@@ -634,8 +606,8 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                         category: "GCP::Compute".to_string(),
                                         provider: AtlasProvider::Gcp,
                                     };
-                                    let n_idx = get_or_add_node(&mut graph, net_node);
-                                    graph.add_edge(n_idx, idx, Edge::Contains);
+                                    let n_idx = builder.get_or_add_node(net_node);
+                                    builder.add_edge(n_idx, idx, Edge::Contains);
                                 }
                             }
                         }
@@ -651,7 +623,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::Compute".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(network) = &fw.network {
                             let net_node = Node {
@@ -660,8 +632,8 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                 category: "GCP::Compute".to_string(),
                                 provider: AtlasProvider::Gcp,
                             };
-                            let n_idx = get_or_add_node(&mut graph, net_node);
-                            graph.add_edge(n_idx, idx, Edge::Contains);
+                            let n_idx = builder.get_or_add_node(net_node);
+                            builder.add_edge(n_idx, idx, Edge::Contains);
                         }
                     }
                 }
@@ -675,7 +647,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::CloudSQL".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(ips) = &sql.ip_addresses {
                             for ip in ips {
@@ -686,8 +658,8 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                         category: "Generic".to_string(),
                                         provider: AtlasProvider::Gcp,
                                     };
-                                    let ip_idx = get_or_add_node(&mut graph, ip_node);
-                                    graph.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                                    let ip_idx = builder.get_or_add_node(ip_node);
+                                    builder.add_edge(idx, ip_idx, Edge::ConnectsTo);
                                 }
                             }
                         }
@@ -703,7 +675,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::CloudDNS".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        get_or_add_node(&mut graph, node);
+                        builder.get_or_add_node(node);
                     }
                 }
             }
@@ -716,7 +688,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::GKE".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(network) = &cluster.network {
                             let net_node = Node {
@@ -725,8 +697,8 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                 category: "GCP::Compute".to_string(),
                                 provider: AtlasProvider::Gcp,
                             };
-                            let n_idx = get_or_add_node(&mut graph, net_node);
-                            graph.add_edge(n_idx, idx, Edge::Contains);
+                            let n_idx = builder.get_or_add_node(net_node);
+                            builder.add_edge(n_idx, idx, Edge::Contains);
                         }
                     }
                 }
@@ -740,7 +712,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::CloudFunctions".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        get_or_add_node(&mut graph, node);
+                        builder.get_or_add_node(node);
                     }
                 }
             }
@@ -753,7 +725,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::Storage".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        get_or_add_node(&mut graph, node);
+                        builder.get_or_add_node(node);
                     }
                 }
             }
@@ -766,7 +738,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::PubSub".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        get_or_add_node(&mut graph, node);
+                        builder.get_or_add_node(node);
                     }
                 }
             }
@@ -779,7 +751,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::PubSub".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(topic) = &sub.topic {
                             let topic_node = Node {
@@ -788,8 +760,8 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                 category: "GCP::PubSub".to_string(),
                                 provider: AtlasProvider::Gcp,
                             };
-                            let t_idx = get_or_add_node(&mut graph, topic_node);
-                            graph.add_edge(idx, t_idx, Edge::ConnectsTo);
+                            let t_idx = builder.get_or_add_node(topic_node);
+                            builder.add_edge(idx, t_idx, Edge::ConnectsTo);
                         }
                     }
                 }
@@ -803,7 +775,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::CloudRun".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        get_or_add_node(&mut graph, node);
+                        builder.get_or_add_node(node);
                     }
                 }
             }
@@ -816,7 +788,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::Compute".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        get_or_add_node(&mut graph, node);
+                        builder.get_or_add_node(node);
                     }
                 }
             }
@@ -829,7 +801,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::Compute".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(network) = &subnetwork.network {
                             let net_node = Node {
@@ -838,8 +810,8 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                 category: "GCP::Compute".to_string(),
                                 provider: AtlasProvider::Gcp,
                             };
-                            let n_idx = get_or_add_node(&mut graph, net_node);
-                            graph.add_edge(n_idx, idx, Edge::Contains);
+                            let n_idx = builder.get_or_add_node(net_node);
+                            builder.add_edge(n_idx, idx, Edge::Contains);
                         }
                     }
                 }
@@ -853,7 +825,7 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                             category: "GCP::Compute".to_string(),
                             provider: AtlasProvider::Gcp,
                         };
-                        let idx = get_or_add_node(&mut graph, node);
+                        let idx = builder.get_or_add_node(node);
 
                         if let Some(ip) = &rule.ip_address {
                             let ip_node = Node {
@@ -862,20 +834,193 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                                 category: "Generic".to_string(),
                                 provider: AtlasProvider::Gcp,
                             };
-                            let ip_idx = get_or_add_node(&mut graph, ip_node);
-                            graph.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                            let ip_idx = builder.get_or_add_node(ip_node);
+                            builder.add_edge(idx, ip_idx, Edge::ConnectsTo);
                         }
                     }
                 }
             }
         }
     }
-
-    graph
 }
 
-pub fn azure_projector(_azure_data: &[MicrosoftCollection]) -> Graph<Node, Edge> {
-    todo!()
+pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
+    for x in azure_data {
+        match x {
+            MicrosoftCollection::AzureVirtualMachines(vms) => {
+                for vm in vms {
+                    if let Some(id) = &vm.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Compute::VirtualMachine".to_string(),
+                            category: "Azure::Compute".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        let idx = builder.get_or_add_node(node);
+
+                        for nic_id in &vm.network_interfaces {
+                            let nic_node = Node {
+                                id: nic_id.to_string(),
+                                name: "Azure::Network::NetworkInterface".to_string(),
+                                category: "Azure::Network".to_string(),
+                                provider: AtlasProvider::Azure,
+                            };
+                            let nic_idx = builder.get_or_add_node(nic_node);
+                            builder.add_edge(idx, nic_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+            }
+            MicrosoftCollection::AzureVirtualNetworks(vnets) => {
+                for vnet in vnets {
+                    if let Some(id) = &vnet.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Network::VirtualNetwork".to_string(),
+                            category: "Azure::Network".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        let idx = builder.get_or_add_node(node);
+
+                        for subnet_id in &vnet.subnets {
+                            let subnet_node = Node {
+                                id: subnet_id.to_string(),
+                                name: "Azure::Network::Subnet".to_string(),
+                                category: "Azure::Network".to_string(),
+                                provider: AtlasProvider::Azure,
+                            };
+                            let subnet_idx = builder.get_or_add_node(subnet_node);
+                            builder.add_edge(idx, subnet_idx, Edge::Contains);
+                        }
+                    }
+                }
+            }
+            MicrosoftCollection::AzureSubnets(subnets) => {
+                for subnet in subnets {
+                    if let Some(id) = &subnet.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Network::Subnet".to_string(),
+                            category: "Azure::Network".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        let idx = builder.get_or_add_node(node);
+
+                        if let Some(vnet_id) = &subnet.vnet_id {
+                            let vnet_node = Node {
+                                id: vnet_id.to_string(),
+                                name: "Azure::Network::VirtualNetwork".to_string(),
+                                category: "Azure::Network".to_string(),
+                                provider: AtlasProvider::Azure,
+                            };
+                            let v_idx = builder.get_or_add_node(vnet_node);
+                            builder.add_edge(v_idx, idx, Edge::Contains);
+                        }
+
+                        if let Some(nsg_id) = &subnet.network_security_group_id {
+                            let nsg_node = Node {
+                                id: nsg_id.to_string(),
+                                name: "Azure::Network::NetworkSecurityGroup".to_string(),
+                                category: "Azure::Network".to_string(),
+                                provider: AtlasProvider::Azure,
+                            };
+                            let nsg_idx = builder.get_or_add_node(nsg_node);
+                            builder.add_edge(idx, nsg_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+            }
+            MicrosoftCollection::AzureNetworkSecurityGroups(nsgs) => {
+                for nsg in nsgs {
+                    if let Some(id) = &nsg.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Network::NetworkSecurityGroup".to_string(),
+                            category: "Azure::Network".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        builder.get_or_add_node(node);
+                    }
+                }
+            }
+            MicrosoftCollection::AzurePublicIpAddresses(pips) => {
+                for pip in pips {
+                    if let Some(id) = &pip.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Network::PublicIpAddress".to_string(),
+                            category: "Azure::Network".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        let idx = builder.get_or_add_node(node);
+
+                        if let Some(ip) = &pip.ip_address {
+                            let ip_node = Node {
+                                id: ip.to_string(),
+                                name: "Generic::IpAddress".to_string(),
+                                category: "Generic".to_string(),
+                                provider: AtlasProvider::Azure,
+                            };
+                            let ip_idx = builder.get_or_add_node(ip_node);
+                            builder.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+            }
+            MicrosoftCollection::AzureStorageAccounts(accounts) => {
+                for account in accounts {
+                    if let Some(id) = &account.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Storage::StorageAccount".to_string(),
+                            category: "Azure::Storage".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        builder.get_or_add_node(node);
+                    }
+                }
+            }
+            MicrosoftCollection::AzureManagedClusters(clusters) => {
+                for cluster in clusters {
+                    if let Some(id) = &cluster.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::ContainerService::ManagedCluster".to_string(),
+                            category: "Azure::ContainerService".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        builder.get_or_add_node(node);
+                    }
+                }
+            }
+            MicrosoftCollection::AzureSqlServers(servers) => {
+                for server in servers {
+                    if let Some(id) = &server.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Sql::Server".to_string(),
+                            category: "Azure::Sql".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        builder.get_or_add_node(node);
+                    }
+                }
+            }
+            MicrosoftCollection::AzureAppServices(apps) => {
+                for app in apps {
+                    if let Some(id) = &app.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "Azure::Web::AppService".to_string(),
+                            category: "Azure::Web".to_string(),
+                            provider: AtlasProvider::Azure,
+                        };
+                        builder.get_or_add_node(node);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
