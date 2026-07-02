@@ -94,6 +94,7 @@ pub enum Node {
     AzureEventGridTopic(std::sync::Arc<str>),
     AzureDnsZone(std::sync::Arc<str>),
     AzureCdnProfile(std::sync::Arc<str>),
+    AzureServiceTag(std::sync::Arc<str>),
 
     // Cloudflare
     CloudflareZone(std::sync::Arc<str>),
@@ -183,6 +184,7 @@ impl fmt::Display for Node {
             }
             Node::AzureDnsZone(id) => write!(f, "Azure::Network::DnsZone({})", id),
             Node::AzureCdnProfile(id) => write!(f, "Azure::Network::CdnProfile({})", id),
+            Node::AzureServiceTag(id) => write!(f, "Azure::Network::ServiceTag({})", id),
 
             // Cloudflare
             Node::CloudflareZone(id) => write!(f, "Cloudflare::Zone({})", id),
@@ -207,6 +209,7 @@ pub enum Edge {
     AttachedTo, // Hardware/Logical attachment (e.g. ENI -> Subnet)
     HasIp,      // Semantic IP relationship (e.g. Instance -> HasIp)
     RoutesTo,   // Traffic routing
+    ResolvesTo, // DNS resolution
 }
 
 impl fmt::Display for Edge {

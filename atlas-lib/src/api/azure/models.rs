@@ -39,10 +39,31 @@ pub struct Subnet {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct SecurityRuleProperties {
+    pub direction: Option<String>,
+    pub destination_address_prefix: Option<String>,
+    pub destination_address_prefixes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SecurityRule {
+    pub properties: Option<SecurityRuleProperties>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSecurityGroupProperties {
+    pub security_rules: Option<Vec<SecurityRule>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct NetworkSecurityGroup {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
+    pub properties: Option<NetworkSecurityGroupProperties>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

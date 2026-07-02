@@ -17,6 +17,7 @@ pub struct Firewall {
     pub network: Option<String>,
     pub self_link: Option<String>,
     pub source_ranges: Option<Vec<String>>,
+    pub destination_ranges: Option<Vec<String>>,
     pub allowed: Option<Vec<FirewallAllowed>>,
     pub direction: Option<String>,
     pub target_tags: Option<Vec<String>>,

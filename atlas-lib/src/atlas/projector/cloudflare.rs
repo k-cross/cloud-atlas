@@ -15,7 +15,6 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
 
                 builder.add_edge(zone_node, record_node, Edge::Contains);
 
-                // Add GenericHostname for DNS Records (this is how we pivot across clouds)
                 let hostname_node =
                     builder.get_or_add_node(Node::GenericHostname(record.name.as_str().into()));
                 builder.add_edge(
@@ -23,6 +22,26 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                     hostname_node,
                     Edge::RoutesTo, // Maps to the generic hostname
                 );
+
+                use cloudflare::endpoints::dns::dns::DnsContent;
+                match &record.content {
+                    DnsContent::A { content } => {
+                        let ip_node = Node::GenericIpAddress(content.to_string().into());
+                        let ip_idx = builder.get_or_add_node(ip_node);
+                        builder.add_edge(hostname_node, ip_idx, Edge::ResolvesTo);
+                    }
+                    DnsContent::AAAA { content } => {
+                        let ip_node = Node::GenericIpAddress(content.to_string().into());
+                        let ip_idx = builder.get_or_add_node(ip_node);
+                        builder.add_edge(hostname_node, ip_idx, Edge::ResolvesTo);
+                    }
+                    DnsContent::CNAME { content } => {
+                        let target_hostname = Node::GenericHostname(content.as_str().into());
+                        let target_idx = builder.get_or_add_node(target_hostname);
+                        builder.add_edge(hostname_node, target_idx, Edge::ResolvesTo);
+                    }
+                    _ => {}
+                }
             }
         }
     }

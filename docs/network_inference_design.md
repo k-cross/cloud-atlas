@@ -6,17 +6,16 @@ Cloud Atlas aims to be a continuous, live digital twin of multi-cloud environmen
 2. Infer external and unsupported services via security configurations.
 3. Support future lightweight liveness and network telemetry via event-driven flow log ingestion.
 
-## 1. Cross-Cloud Connections via IP Overlap
-We use the property graph model to pivot on `GenericIpAddress` nodes. 
-- **Ingestion**: Network flow logs or routing tables provide source/destination IPs.
-- **Mapping**: `[Provider A Resource] -> ConnectsTo -> GenericIpAddress(IP) <- HasIp <- [Provider B Resource]`.
-- **Outcome**: Disparate clouds naturally connect in the unified graph through shared IP nodes.
+## 1. Cross-Cloud Connections via Universal Pivot Nodes
+We use the property graph model to organically merge disparate cloud environments by pivoting on universal identifiers.
+- **Node Types**: `Node::GenericIpAddress` and `Node::GenericHostname` act as the common language between clouds.
+- **Mapping**: For instance, Cloudflare DNS connects via `Edge::ResolvesTo -> Node::GenericIpAddress`, while an AWS EC2 Instance connects via `Edge::ConnectsTo -> Node::GenericIpAddress`. 
+- **Outcome**: The graph deduplicates identical nodes, seamlessly connecting Cloudflare and AWS without any direct API-level correlation.
 
 ## 2. Inferring External Services
-For services without API support, we parse security boundaries (Security Groups, Firewalls) and DNS routing.
-- **Egress Rules**: Map outbound CIDR blocks in Security Groups to `GenericIpAddress` nodes.
-- **Domain Routing**: Map DNS records (e.g. Route53) to `GenericHostname` nodes.
-- **Resolution**: Cross-reference known CIDR blocks to label IPs with `ExternalService(Name)` nodes.
+For services without direct API integration, we infer their presence using security boundaries and DNS.
+- **Security Boundaries**: We parse outbound rules in AWS Security Groups, GCP Firewalls, and Azure Network Security Groups, mapping explicit CIDRs to `GenericIpAddress` nodes via `Edge::RoutesTo`.
+- **Cloud-Specific Abstractions**: Mappings that don't resolve to raw IPs (like Azure Service Tags) are given dedicated types (e.g. `Node::AzureServiceTag`) to prevent generic node pollution.
 - **Graph path**: `AwsEc2SecurityGroup -> RoutesTo -> GenericIpAddress -> ResolvesTo -> ExternalService`.
 
 ## 3. Lightweight Network Telemetry

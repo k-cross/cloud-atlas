@@ -117,10 +117,17 @@ pub async fn build_azure(
                 });
             }
             "microsoft.network/networksecuritygroups" => {
+                let mut properties = None;
+                if let Some(props_val) = &res.properties
+                    && let Ok(p) = serde_json::from_value(props_val.clone())
+                {
+                    properties = Some(p);
+                }
                 nsgs.push(NetworkSecurityGroup {
                     id: res.id,
                     name: res.name,
                     location: res.location,
+                    properties,
                 });
             }
             "microsoft.network/publicipaddresses" => {
