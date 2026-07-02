@@ -39,6 +39,14 @@ pub enum AmazonCollection {
         hosted_zones: Vec<aws_sdk_route53::types::HostedZone>,
         record_sets: Vec<aws_sdk_route53::types::ResourceRecordSet>,
     },
+    AmazonEks(Vec<aws_sdk_eks::types::Cluster>),
+    AmazonApiGateway(Vec<aws_sdk_apigateway::types::RestApi>),
+    AmazonRds(Vec<aws_sdk_rds::types::DbInstance>),
+    AmazonDynamoDb(Vec<String>), // Table names
+    AmazonSqs(Vec<String>),      // Queue URLs
+    AmazonSns(Vec<aws_sdk_sns::types::Topic>),
+    AmazonCloudFront(Vec<aws_sdk_cloudfront::types::DistributionSummary>),
+    AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),
 }
 
 #[derive(Debug)]

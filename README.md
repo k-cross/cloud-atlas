@@ -7,7 +7,7 @@ It builds from existing cloud configurations as they exist in reality, not an id
 
 ## Goals
 
-- [ ] Maintain a live, in-memory graph continuously synchronized via event streams (e.g., AWS EventBridge)
+- [x] Maintain a live, in-memory graph continuously synchronized
 - [ ] Visualize graph in comprehensible layout exploring network/service layers
 - [ ] Make the graph explorable
     - [x] Outputs a point-in-time `dot` file (explorable w/ other tools like `gephi`)
@@ -19,15 +19,17 @@ It builds from existing cloud configurations as they exist in reality, not an id
 
 The best tool I know of for exploring the dot file so far has been [gephi](https://gephi.org/).
 Current work is being done to build better relationships in the graph output.
-The graph only generates for a single AWS region, but it is intended to give multi-region relationships eventually.
+The graph generates for a single AWS region (default `us-east-1`), but also maps global resources like Route53 Hosted Zones and S3 Buckets.
 
 ## AWS Notes
 
 The global region is for resources that don't cleanly map to a specific region.
 
 ### S3
-
 S3 Buckets are not region specific so the relationships for a bucket should point to all resources in all regions.
+
+### Route53
+Route53 Hosted Zones and Record Sets are mapped globally. Record Sets project `ConnectsTo` edges directly to the IPs and Alias Targets (like Load Balancers) they route traffic to.
 
 ## Build Instructions
 
@@ -38,3 +40,11 @@ This is a simple CLI utility.
 
 Using `atlas` assumes that AWS credentials are in place.
 It runs and generates an `atlas.dot` file in the directory being run.
+
+```bash
+# Run a single point-in-time snapshot
+cargo run
+
+# Run as a continuously updating daemon (polls every 60s)
+cargo run -- --daemon
+```

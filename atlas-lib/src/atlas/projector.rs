@@ -8,9 +8,9 @@ use std::collections::HashMap;
 
 pub fn build<'b>(data: &'b CloudProvider, opts: &'b Settings) -> Graph<Node, Edge> {
     match data {
-        CloudProvider::AWS(aws_data) => aws_projector(&aws_data, opts),
-        CloudProvider::GCP(gcp_data) => gcp_projector(&gcp_data),
-        CloudProvider::Azure(azure_data) => azure_projector(&azure_data),
+        CloudProvider::AWS(aws_data) => aws_projector(aws_data, opts),
+        CloudProvider::GCP(gcp_data) => gcp_projector(gcp_data),
+        CloudProvider::Azure(azure_data) => azure_projector(azure_data),
     }
 }
 
@@ -86,19 +86,19 @@ pub fn aws_projector<'a>(
                         inst_idx = Some(idx);
                     }
 
-                    if let Some(place) = inst.placement.as_ref() {
-                        if let Some(az_name) = place.availability_zone.as_ref() {
-                            let node = Node {
-                                id: az_name.to_string(),
-                                name: "AWS::EC2::AvailabilityZone".to_string(),
-                                category: "AWS::EC2".to_string(),
-                                provider: AtlasProvider::Aws,
-                            };
-                            let az_idx = get_or_add_node(&mut graph, node);
+                    if let Some(place) = inst.placement.as_ref()
+                        && let Some(az_name) = place.availability_zone.as_ref()
+                    {
+                        let node = Node {
+                            id: az_name.to_string(),
+                            name: "AWS::EC2::AvailabilityZone".to_string(),
+                            category: "AWS::EC2".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let az_idx = get_or_add_node(&mut graph, node);
 
-                            if let Some(i_idx) = inst_idx {
-                                graph.add_edge(az_idx, i_idx, Edge::Contains);
-                            }
+                        if let Some(i_idx) = inst_idx {
+                            graph.add_edge(az_idx, i_idx, Edge::Contains);
                         }
                     }
 
@@ -128,6 +128,21 @@ pub fn aws_projector<'a>(
                                 if let Some(i_idx) = inst_idx {
                                     graph.add_edge(i_idx, tag_idx, Edge::DependsOn);
                                 }
+                            }
+                        }
+                    }
+
+                    for sg in inst.security_groups() {
+                        if let Some(sg_id) = sg.group_id() {
+                            let sg_node = Node {
+                                id: sg_id.to_string(),
+                                name: "AWS::EC2::SecurityGroup".to_string(),
+                                category: "AWS::EC2".to_string(),
+                                provider: AtlasProvider::Aws,
+                            };
+                            let sg_idx = get_or_add_node(&mut graph, sg_node);
+                            if let Some(i_idx) = inst_idx {
+                                graph.add_edge(i_idx, sg_idx, Edge::ConnectsTo);
                             }
                         }
                     }
@@ -200,6 +215,19 @@ pub fn aws_projector<'a>(
                             let r_idx = get_or_add_node(&mut graph, role_node);
                             graph.add_edge(idx, r_idx, Edge::DependsOn);
                         }
+
+                        if let Some(vpc_config) = lambda.vpc_config() {
+                            for sg_id in vpc_config.security_group_ids() {
+                                let sg_node = Node {
+                                    id: sg_id.to_string(),
+                                    name: "AWS::EC2::SecurityGroup".to_string(),
+                                    category: "AWS::EC2".to_string(),
+                                    provider: AtlasProvider::Aws,
+                                };
+                                let sg_idx = get_or_add_node(&mut graph, sg_node);
+                                graph.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                            }
+                        }
                     }
                 }
 
@@ -265,7 +293,11 @@ pub fn aws_projector<'a>(
                         }
 
                         if let Some(health_descriptions) = target_health.get(arn) {
-                            for target_id in health_descriptions.iter().filter_map(|h| h.target()).filter_map(|t| t.id()) {
+                            for target_id in health_descriptions
+                                .iter()
+                                .filter_map(|h| h.target())
+                                .filter_map(|t| t.id())
+                            {
                                 let inst_node = Node {
                                     id: target_id.to_string(),
                                     name: "AWS::EC2::Instance".to_string(),
@@ -281,7 +313,11 @@ pub fn aws_projector<'a>(
 
                 for listener in listeners {
                     if let Some(lb_arn) = listener.load_balancer_arn() {
-                        for tg_arn in listener.default_actions().iter().filter_map(|a| a.target_group_arn()) {
+                        for tg_arn in listener
+                            .default_actions()
+                            .iter()
+                            .filter_map(|a| a.target_group_arn())
+                        {
                             let lb_node = Node {
                                 id: lb_arn.to_string(),
                                 name: "AWS::ElasticLoadBalancingV2::LoadBalancer".to_string(),
@@ -351,17 +387,204 @@ pub fn aws_projector<'a>(
                     }
                 }
             }
+            AmazonCollection::AmazonEks(clusters) => {
+                for cluster in clusters {
+                    if let Some(name) = cluster.name() {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "AWS::EKS::Cluster".to_string(),
+                            category: "AWS::EKS".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(vpc_config) = cluster.resources_vpc_config() {
+                            if let Some(vpc_id) = vpc_config.vpc_id() {
+                                let vpc_node = Node {
+                                    id: vpc_id.to_string(),
+                                    name: "AWS::EC2::VPC".to_string(),
+                                    category: "AWS::EC2".to_string(),
+                                    provider: AtlasProvider::Aws,
+                                };
+                                let vpc_idx = get_or_add_node(&mut graph, vpc_node);
+                                graph.add_edge(vpc_idx, idx, Edge::Contains);
+                            } else {
+                                graph.add_edge(region_idx, idx, Edge::DependsOn);
+                            }
+
+                            for sg_id in vpc_config.security_group_ids() {
+                                let sg_node = Node {
+                                    id: sg_id.to_string(),
+                                    name: "AWS::EC2::SecurityGroup".to_string(),
+                                    category: "AWS::EC2".to_string(),
+                                    provider: AtlasProvider::Aws,
+                                };
+                                let sg_idx = get_or_add_node(&mut graph, sg_node);
+                                graph.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                            }
+                        } else {
+                            graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        }
+                    }
+                }
+            }
+            AmazonCollection::AmazonApiGateway(apis) => {
+                for api in apis {
+                    if let Some(id) = api.id() {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "AWS::ApiGateway::RestApi".to_string(),
+                            category: "AWS::ApiGateway".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                    }
+                }
+            }
+            AmazonCollection::AmazonRds(dbs) => {
+                for db in dbs {
+                    if let Some(id) = db.db_instance_identifier() {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "AWS::RDS::DBInstance".to_string(),
+                            category: "AWS::RDS".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(subnet_group) = db.db_subnet_group() {
+                            if let Some(vpc_id) = subnet_group.vpc_id() {
+                                let vpc_node = Node {
+                                    id: vpc_id.to_string(),
+                                    name: "AWS::EC2::VPC".to_string(),
+                                    category: "AWS::EC2".to_string(),
+                                    provider: AtlasProvider::Aws,
+                                };
+                                let vpc_idx = get_or_add_node(&mut graph, vpc_node);
+                                graph.add_edge(vpc_idx, idx, Edge::Contains);
+                            } else {
+                                graph.add_edge(region_idx, idx, Edge::DependsOn);
+                            }
+                        } else {
+                            graph.add_edge(region_idx, idx, Edge::DependsOn);
+                        }
+
+                        for sg in db.vpc_security_groups() {
+                            if let Some(sg_id) = sg.vpc_security_group_id() {
+                                let sg_node = Node {
+                                    id: sg_id.to_string(),
+                                    name: "AWS::EC2::SecurityGroup".to_string(),
+                                    category: "AWS::EC2".to_string(),
+                                    provider: AtlasProvider::Aws,
+                                };
+                                let sg_idx = get_or_add_node(&mut graph, sg_node);
+                                graph.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                            }
+                        }
+                    }
+                }
+            }
+            AmazonCollection::AmazonDynamoDb(tables) => {
+                for t in tables {
+                    let node = Node {
+                        id: t.to_string(),
+                        name: "AWS::DynamoDB::Table".to_string(),
+                        category: "AWS::DynamoDB".to_string(),
+                        provider: AtlasProvider::Aws,
+                    };
+                    let idx = get_or_add_node(&mut graph, node);
+                    graph.add_edge(region_idx, idx, Edge::DependsOn);
+                }
+            }
+            AmazonCollection::AmazonSqs(queues) => {
+                for q in queues {
+                    let node = Node {
+                        id: q.to_string(),
+                        name: "AWS::SQS::Queue".to_string(),
+                        category: "AWS::SQS".to_string(),
+                        provider: AtlasProvider::Aws,
+                    };
+                    let idx = get_or_add_node(&mut graph, node);
+                    graph.add_edge(region_idx, idx, Edge::DependsOn);
+                }
+            }
+            AmazonCollection::AmazonSns(topics) => {
+                for t in topics {
+                    if let Some(arn) = t.topic_arn() {
+                        let node = Node {
+                            id: arn.to_string(),
+                            name: "AWS::SNS::Topic".to_string(),
+                            category: "AWS::SNS".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+                    }
+                }
+            }
+            AmazonCollection::AmazonCloudFront(dists) => {
+                let global_node = Node {
+                    id: "global".to_string(),
+                    name: "AWS::Region".to_string(),
+                    category: "AWS".to_string(),
+                    provider: AtlasProvider::Aws,
+                };
+                let g_idx = get_or_add_node(&mut graph, global_node);
+
+                for d in dists {
+                    let id = d.id();
+                    let node = Node {
+                        id: id.to_string(),
+                        name: "AWS::CloudFront::Distribution".to_string(),
+                        category: "AWS::CloudFront".to_string(),
+                        provider: AtlasProvider::Aws,
+                    };
+                    let idx = get_or_add_node(&mut graph, node);
+                    graph.add_edge(g_idx, idx, Edge::Contains);
+                }
+            }
+            AmazonCollection::AmazonSecurityGroups(groups) => {
+                for sg in groups {
+                    if let Some(id) = sg.group_id() {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "AWS::EC2::SecurityGroup".to_string(),
+                            category: "AWS::EC2".to_string(),
+                            provider: AtlasProvider::Aws,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+                        graph.add_edge(region_idx, idx, Edge::DependsOn);
+
+                        for perm in sg.ip_permissions() {
+                            for pair in perm.user_id_group_pairs() {
+                                if let Some(referenced_group_id) = pair.group_id() {
+                                    let ref_node = Node {
+                                        id: referenced_group_id.to_string(),
+                                        name: "AWS::EC2::SecurityGroup".to_string(),
+                                        category: "AWS::EC2".to_string(),
+                                        provider: AtlasProvider::Aws,
+                                    };
+                                    let ref_idx = get_or_add_node(&mut graph, ref_node);
+                                    // The referenced group allows traffic TO this group
+                                    graph.add_edge(ref_idx, idx, Edge::ConnectsTo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
     graph
 }
 
-pub fn gcp_projector<'a>(_gcp_data: &Vec<GoogleCollection>) -> Graph<Node, Edge> {
+pub fn gcp_projector(_gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
     todo!()
 }
 
-pub fn azure_projector<'a>(_azure_data: &Vec<MicrosoftCollection>) -> Graph<Node, Edge> {
+pub fn azure_projector(_azure_data: &[MicrosoftCollection]) -> Graph<Node, Edge> {
     todo!()
 }
 
@@ -406,10 +629,7 @@ fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
 }
 
 fn use_global(name: &str) -> bool {
-    match name {
-        "AWS::S3::Bucket" => true,
-        _ => false,
-    }
+    matches!(name, "AWS::S3::Bucket")
 }
 
 fn get_category(name: &str) -> String {

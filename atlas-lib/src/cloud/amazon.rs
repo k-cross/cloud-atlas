@@ -1,8 +1,16 @@
+pub mod api_gateway;
+pub mod cloudfront;
 pub mod container_service;
+pub mod dynamodb;
+pub mod eks;
 pub mod eventbridge;
 pub mod instance;
 pub mod lambda;
 pub mod load_balancer;
 pub mod provider;
+pub mod rds;
 pub mod resource;
 pub mod route53;
+pub mod security_group;
+pub mod sns;
+pub mod sqs;
