@@ -8,9 +8,10 @@ It builds from existing cloud configurations as they exist in reality, not an id
 ## Architecture
 
 Cloud Atlas builds a **Strongly Typed Semantic Graph**:
-- **Nodes**: Modeled as specific Enum variants for over 40 cloud resources (e.g., `Node::AwsEc2Instance`, `Node::AzureVirtualNetwork`), ensuring strict compile-time safety and graph integrity.
+- **Nodes**: Modeled as specific Enum variants for over 40 cloud resources (e.g., `Node::AwsEc2Instance`, `Node::AzureVirtualNetwork`), wrapping zero-copy `Arc<str>` types for high-performance memory efficiency.
 - **Edges**: Relationships go beyond simple containment, leveraging strict semantic edges like `AttachedTo`, `HasIp`, and `RoutesTo` to deeply mimic network topology. 
 - **Graph Storage**: The graph is stored entirely in memory using `petgraph`, enabling extremely fast deduplication and continuous traversal.
+- **Core Orchestration**: Driven by the `AtlasEngine`, which handles concurrent fetching, graceful error handling, and long-living graph state management for continuous daemon loops.
 
 ## Goals
 
@@ -28,7 +29,7 @@ Cloud Atlas builds a **Strongly Typed Semantic Graph**:
 
 The best tool I know of for exploring the dot file so far has been [gephi](https://gephi.org/).
 Current work is being done to build better relationships in the graph output.
-The graph can now fetch resources concurrently across multiple AWS regions, GCP projects, and Azure subscriptions, merging them into a single comprehensive in-memory model.
+The graph can now fetch resources concurrently across multiple AWS regions, GCP projects, and Azure subscriptions, merging them into a single comprehensive in-memory model. Thanks to shared pivot nodes (`GenericHostname` and `GenericIpAddress`), Cloud Atlas natively visualizes cross-cloud connectivity (e.g. AWS Route53 routing directly to Azure App Services or GCP Cloud Run).
 
 ## AWS Notes
 

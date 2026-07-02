@@ -79,10 +79,17 @@ pub struct SqlServer {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct AppServiceProperties {
+    pub default_host_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AppService {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
+    pub properties: Option<AppServiceProperties>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

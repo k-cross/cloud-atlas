@@ -135,45 +135,49 @@ mod tests {
         use crate::cloud::definition::GoogleCollection;
 
         let i1 = Instance {
-            id: Some("12345".to_string()),
+            id: Some("12345".to_string().into()),
             name: Some("my-gcp-instance".to_owned()),
             self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance".to_owned()),
             ..Default::default()
         };
 
         let i2 = Instance {
-            id: Some("67890".to_string()),
+            id: Some("67890".to_string().into()),
             name: Some("my-gcp-instance-2".to_owned()),
             self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance-2".to_owned()),
             ..Default::default()
         };
 
         let fw = Firewall {
-            id: Some("fw-1".to_string()),
-            name: Some("allow-ssh".to_string()),
-            network: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string()),
+            id: Some("fw-1".to_string().into()),
+            name: Some("allow-ssh".to_string().into()),
+            network: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string().into()),
             ..Default::default()
         };
 
         let ip = SqlIpAddress {
-            ip_type: Some("PRIMARY".to_string()),
-            ip_address: Some("10.0.0.5".to_string()),
+            ip_type: Some("PRIMARY".to_string().into()),
+            ip_address: Some("10.0.0.5".to_string().into()),
         };
         let sql = SqlInstance {
-            name: Some("my-sql-db".to_string()),
+            name: Some("my-sql-db".to_string().into()),
             ip_addresses: Some(vec![ip]),
             ..Default::default()
         };
 
         let dns = ManagedZone {
-            name: Some("my-zone".to_string()),
-            dns_name: Some("example.com.".to_string()),
+            name: Some("my-zone".to_string().into()),
+            dns_name: Some("example.com.".to_string().into()),
             ..Default::default()
         };
 
         let gke = Cluster {
-            name: Some("my-cluster".to_string()),
-            network: Some("projects/my-gcp-project/global/networks/default".to_string()),
+            name: Some("my-cluster".to_string().into()),
+            network: Some(
+                "projects/my-gcp-project/global/networks/default"
+                    .to_string()
+                    .into(),
+            ),
             ..Default::default()
         };
 
@@ -185,39 +189,47 @@ mod tests {
         };
 
         let bucket = Bucket {
-            id: Some("my-bucket".to_string()),
-            name: Some("my-bucket".to_string()),
+            id: Some("my-bucket".to_string().into()),
+            name: Some("my-bucket".to_string().into()),
             ..Default::default()
         };
 
         let topic = Topic {
-            name: Some("projects/my-gcp-project/topics/my-topic".to_string()),
+            name: Some("projects/my-gcp-project/topics/my-topic".to_string().into()),
         };
 
         let sub = Subscription {
-            name: Some("projects/my-gcp-project/subscriptions/my-sub".to_string()),
-            topic: Some("projects/my-gcp-project/topics/my-topic".to_string()),
+            name: Some(
+                "projects/my-gcp-project/subscriptions/my-sub"
+                    .to_string()
+                    .into(),
+            ),
+            topic: Some("projects/my-gcp-project/topics/my-topic".to_string().into()),
         };
 
         let run_svc = Service {
-            name: Some("projects/my-gcp-project/locations/us-central1/services/my-svc".to_string()),
+            name: Some(
+                "projects/my-gcp-project/locations/us-central1/services/my-svc"
+                    .to_string()
+                    .into(),
+            ),
             ..Default::default()
         };
 
         let net = Network {
-            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string()),
+            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string().into()),
             ..Default::default()
         };
 
         let subnet = Subnetwork {
-            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/regions/us-central1/subnetworks/default".to_string()),
-            network: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string()),
+            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/regions/us-central1/subnetworks/default".to_string().into()),
+            network: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string().into()),
             ..Default::default()
         };
 
         let fw_rule = ForwardingRule {
-            id: Some("fw-rule-1".to_string()),
-            ip_address: Some("34.120.0.1".to_string()),
+            id: Some("fw-rule-1".to_string().into()),
+            ip_address: Some("34.120.0.1".to_string().into()),
             ..Default::default()
         };
 
@@ -277,30 +289,30 @@ mod tests {
         use crate::cloud::definition::MicrosoftCollection;
 
         let vm = VirtualMachine {
-            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1".to_string()),
-            name: Some("vm1".to_string()),
-            location: Some("eastus".to_string()),
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1".to_string().into()),
+            name: Some("vm1".to_string().into()),
+            location: Some("eastus".to_string().into()),
             network_interfaces: vec!["/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkInterfaces/nic1".to_string()],
         };
 
         let vnet = VirtualNetwork {
-            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".to_string()),
-            name: Some("vnet1".to_string()),
-            location: Some("eastus".to_string()),
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".to_string().into()),
+            name: Some("vnet1".to_string().into()),
+            location: Some("eastus".to_string().into()),
             subnets: vec!["/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default".to_string()],
         };
 
         let subnet = Subnet {
-            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default".to_string()),
-            name: Some("default".to_string()),
-            vnet_id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".to_string()),
-            network_security_group_id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".to_string()),
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default".to_string().into()),
+            name: Some("default".to_string().into()),
+            vnet_id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".to_string().into()),
+            network_security_group_id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".to_string().into()),
         };
 
         let nsg = NetworkSecurityGroup {
-            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".to_string()),
-            name: Some("nsg1".to_string()),
-            location: Some("eastus".to_string()),
+            id: Some("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".to_string().into()),
+            name: Some("nsg1".to_string().into()),
+            location: Some("eastus".to_string().into()),
         };
 
         Provider::Azure(vec![

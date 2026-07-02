@@ -171,10 +171,17 @@ pub async fn build_azure(
                         location: res.location,
                     });
                 } else {
+                    let mut properties = None;
+                    if let Some(props_val) = &res.properties
+                        && let Ok(p) = serde_json::from_value(props_val.clone())
+                    {
+                        properties = Some(p);
+                    }
                     apps.push(AppService {
                         id: res.id,
                         name: res.name,
                         location: res.location,
+                        properties,
                     });
                 }
             }

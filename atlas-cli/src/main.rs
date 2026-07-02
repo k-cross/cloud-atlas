@@ -1,9 +1,5 @@
-use atlas_lib::atlas::graph_builder::GraphBuilder;
-use atlas_lib::atlas::projector;
-use atlas_lib::cloud::amazon::provider;
+use atlas_lib::atlas::engine::AtlasEngine;
 use clap::Parser;
-use petgraph::dot::Dot;
-use std::fs;
 
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
@@ -54,111 +50,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         exclude_by_default: opts.exclude,
     };
 
+    let mut engine = AtlasEngine::new(settings);
+
     if opts.daemon {
-        println!("Starting in daemon mode. Polling for changes every 60 seconds...");
-        loop {
-            let mut builder = GraphBuilder::new();
-
-            let aws_future = async {
-                if !settings.regions.is_empty() {
-                    provider::build_aws(settings.verbose, &settings).await.ok()
-                } else {
-                    None
-                }
-            };
-
-            let gcp_future = async {
-                if let Some(projects) = &settings.gcp_projects
-                    && !projects.is_empty()
-                {
-                    return atlas_lib::cloud::google::provider::build_gcp(
-                        settings.verbose,
-                        &settings,
-                    )
-                    .await
-                    .ok();
-                }
-                None
-            };
-
-            let azure_future = async {
-                if let Some(subs) = &settings.azure_subscriptions
-                    && !subs.is_empty()
-                {
-                    return atlas_lib::cloud::azure::provider::build_azure(
-                        settings.verbose,
-                        &settings,
-                    )
-                    .await
-                    .ok();
-                }
-                None
-            };
-
-            let (aws_opt, gcp_opt, azure_opt) = tokio::join!(aws_future, gcp_future, azure_future);
-
-            if let Some(aws_provider) = aws_opt {
-                projector::build(&mut builder, &aws_provider, &settings);
-            }
-            if let Some(gcp_provider) = gcp_opt {
-                projector::build(&mut builder, &gcp_provider, &settings);
-            }
-            if let Some(azure_provider) = azure_opt {
-                projector::build(&mut builder, &azure_provider, &settings);
-            }
-
-            let s = format!("{}", Dot::with_config(&builder.graph, &[]));
-            fs::write("atlas.dot", s)?;
-            println!("Graph updated successfully at atlas.dot");
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
+        engine.run_daemon(60).await?;
     } else {
-        let mut builder = GraphBuilder::new();
-
-        let aws_future = async {
-            if !settings.regions.is_empty() {
-                provider::build_aws(settings.verbose, &settings).await.ok()
-            } else {
-                None
-            }
-        };
-
-        let gcp_future = async {
-            if let Some(projects) = &settings.gcp_projects
-                && !projects.is_empty()
-            {
-                return atlas_lib::cloud::google::provider::build_gcp(settings.verbose, &settings)
-                    .await
-                    .ok();
-            }
-            None
-        };
-
-        let azure_future = async {
-            if let Some(subs) = &settings.azure_subscriptions
-                && !subs.is_empty()
-            {
-                return atlas_lib::cloud::azure::provider::build_azure(settings.verbose, &settings)
-                    .await
-                    .ok();
-            }
-            None
-        };
-
-        let (aws_opt, gcp_opt, azure_opt) = tokio::join!(aws_future, gcp_future, azure_future);
-
-        if let Some(aws_provider) = aws_opt {
-            projector::build(&mut builder, &aws_provider, &settings);
-        }
-        if let Some(gcp_provider) = gcp_opt {
-            projector::build(&mut builder, &gcp_provider, &settings);
-        }
-        if let Some(azure_provider) = azure_opt {
-            projector::build(&mut builder, &azure_provider, &settings);
-        }
-
-        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
-        fs::write("atlas.dot", s)?;
+        engine.run_once().await?;
     }
 
     Ok(())

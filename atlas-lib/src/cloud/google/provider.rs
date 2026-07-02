@@ -34,17 +34,17 @@ pub async fn build_gcp(
             let client_ref = client.clone();
             futures.push(async move {
                 let (
-                    instances,
-                    firewalls,
-                    sqls,
-                    zones,
-                    clusters,
-                    funcs,
-                    buckets,
-                    (topics, subscriptions),
-                    runs,
-                    (networks, subnets, fwrules),
-                ) = tokio::try_join!(
+                    r_instances,
+                    r_firewalls,
+                    r_sqls,
+                    r_zones,
+                    r_clusters,
+                    r_funcs,
+                    r_buckets,
+                    r_pubsub,
+                    r_runs,
+                    r_network,
+                ) = tokio::join!(
                     instance::collector::runner(&p, &client_ref),
                     firewall::collector::runner(&p, &client_ref),
                     sql::collector::runner(&p, &client_ref),
@@ -55,23 +55,44 @@ pub async fn build_gcp(
                     pubsub::collector::runner(&p, &client_ref),
                     run::collector::runner(&p, &client_ref),
                     compute_network::collector::runner(&p, &client_ref),
-                )?;
+                );
 
-                let local_services = vec![
-                    instances,
-                    firewalls,
-                    sqls,
-                    zones,
-                    clusters,
-                    funcs,
-                    buckets,
-                    topics,
-                    subscriptions,
-                    runs,
-                    networks,
-                    subnets,
-                    fwrules,
-                ];
+                let mut local_services = Vec::new();
+
+                let mut add_if_ok = |res: Result<
+                    crate::cloud::definition::GoogleCollection,
+                    Box<dyn std::error::Error>,
+                >| {
+                    if let Ok(collection) = res {
+                        local_services.push(collection);
+                    } else if let Err(e) = res {
+                        eprintln!("Error fetching GCP resource: {:?}", e);
+                    }
+                };
+
+                add_if_ok(r_instances);
+                add_if_ok(r_firewalls);
+                add_if_ok(r_sqls);
+                add_if_ok(r_zones);
+                add_if_ok(r_clusters);
+                add_if_ok(r_funcs);
+                add_if_ok(r_buckets);
+                add_if_ok(r_runs);
+
+                if let Ok((topics, subscriptions)) = r_pubsub {
+                    local_services.push(topics);
+                    local_services.push(subscriptions);
+                } else if let Err(e) = r_pubsub {
+                    eprintln!("Error fetching GCP PubSub resources: {:?}", e);
+                }
+
+                if let Ok((networks, subnets, fwrules)) = r_network {
+                    local_services.push(networks);
+                    local_services.push(subnets);
+                    local_services.push(fwrules);
+                } else if let Err(e) = r_network {
+                    eprintln!("Error fetching GCP Network resources: {:?}", e);
+                }
 
                 Ok::<Vec<crate::cloud::definition::GoogleCollection>, Box<dyn std::error::Error>>(
                     local_services,

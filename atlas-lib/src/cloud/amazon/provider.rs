@@ -16,22 +16,22 @@ pub async fn build_aws(
     for r in opts.regions.clone() {
         futures.push(async move {
             let (
-                ecs,
-                eb,
-                insts,
-                lambdas,
-                load_balancers,
-                ress,
-                route53,
-                eks,
-                api_gateway,
-                rds,
-                dynamodb,
-                sqs,
-                sns,
-                cloudfront,
-                security_groups,
-            ) = tokio::try_join!(
+                r_ecs,
+                r_eb,
+                r_insts,
+                r_lambdas,
+                r_load_balancers,
+                r_ress,
+                r_route53,
+                r_eks,
+                r_api_gateway,
+                r_rds,
+                r_dynamodb,
+                r_sqs,
+                r_sns,
+                r_cloudfront,
+                r_security_groups,
+            ) = tokio::join!(
                 container_service::collector::runner(r.as_str()),
                 eventbridge::collector::runner(r.as_str()),
                 instance::collector::runner(r.as_str()),
@@ -47,25 +47,33 @@ pub async fn build_aws(
                 sns::collector::runner(r.as_str()),
                 cloudfront::collector::runner(r.as_str()),
                 security_group::collector::runner(r.as_str()),
-            )?;
+            );
 
-            let local_services = vec![
-                (r.to_owned(), ecs),
-                (r.to_owned(), eb),
-                (r.to_owned(), insts),
-                (r.to_owned(), lambdas),
-                (r.to_owned(), load_balancers),
-                (r.to_owned(), ress),
-                (r.to_owned(), route53),
-                (r.to_owned(), eks),
-                (r.to_owned(), api_gateway),
-                (r.to_owned(), rds),
-                (r.to_owned(), dynamodb),
-                (r.to_owned(), sqs),
-                (r.to_owned(), sns),
-                (r.to_owned(), cloudfront),
-                (r.to_owned(), security_groups),
-            ];
+            let mut local_services = Vec::new();
+
+            let mut add_if_ok = |res: Result<AmazonCollection, Box<dyn std::error::Error>>| {
+                if let Ok(collection) = res {
+                    local_services.push((r.to_owned(), collection));
+                } else if let Err(e) = res {
+                    eprintln!("Error fetching AWS resource in region {}: {:?}", r, e);
+                }
+            };
+
+            add_if_ok(r_ecs);
+            add_if_ok(r_eb);
+            add_if_ok(r_insts);
+            add_if_ok(r_lambdas);
+            add_if_ok(r_load_balancers);
+            add_if_ok(r_ress);
+            add_if_ok(r_route53);
+            add_if_ok(r_eks);
+            add_if_ok(r_api_gateway);
+            add_if_ok(r_rds);
+            add_if_ok(r_dynamodb);
+            add_if_ok(r_sqs);
+            add_if_ok(r_sns);
+            add_if_ok(r_cloudfront);
+            add_if_ok(r_security_groups);
 
             Ok::<Vec<(String, AmazonCollection)>, Box<dyn std::error::Error>>(local_services)
         });
