@@ -1,3 +1,4 @@
+pub mod api;
 pub mod atlas;
 pub mod cloud;
 

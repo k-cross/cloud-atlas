@@ -7,7 +7,7 @@ pub mod collector {
         project: &str,
         client: &GoogleApiClient,
     ) -> Result<GoogleCollection, Box<dyn std::error::Error>> {
-        let instances = compute::list_instances(client, project).await?;
-        Ok(GoogleCollection::GoogleInstances(instances))
+        let firewalls = compute::list_firewalls(client, project).await?;
+        Ok(GoogleCollection::GoogleFirewalls(firewalls))
     }
 }

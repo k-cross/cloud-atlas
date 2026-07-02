@@ -642,6 +642,232 @@ pub fn gcp_projector(gcp_data: &[GoogleCollection]) -> Graph<Node, Edge> {
                     }
                 }
             }
+            GoogleCollection::GoogleFirewalls(firewalls) => {
+                for fw in firewalls {
+                    if let Some(id) = &fw.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "GCP::Compute::Firewall".to_string(),
+                            category: "GCP::Compute".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(network) = &fw.network {
+                            let net_node = Node {
+                                id: network.to_string(),
+                                name: "GCP::Compute::Network".to_string(),
+                                category: "GCP::Compute".to_string(),
+                                provider: AtlasProvider::Gcp,
+                            };
+                            let n_idx = get_or_add_node(&mut graph, net_node);
+                            graph.add_edge(n_idx, idx, Edge::Contains);
+                        }
+                    }
+                }
+            }
+            GoogleCollection::GoogleSql(instances) => {
+                for sql in instances {
+                    if let Some(name) = &sql.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::CloudSQL::Instance".to_string(),
+                            category: "GCP::CloudSQL".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(ips) = &sql.ip_addresses {
+                            for ip in ips {
+                                if let Some(ip_addr) = &ip.ip_address {
+                                    let ip_node = Node {
+                                        id: ip_addr.to_string(),
+                                        name: "Generic::IpAddress".to_string(),
+                                        category: "Generic".to_string(),
+                                        provider: AtlasProvider::Gcp,
+                                    };
+                                    let ip_idx = get_or_add_node(&mut graph, ip_node);
+                                    graph.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            GoogleCollection::GoogleDns(zones) => {
+                for zone in zones {
+                    if let Some(name) = &zone.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::CloudDNS::ManagedZone".to_string(),
+                            category: "GCP::CloudDNS".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        get_or_add_node(&mut graph, node);
+                    }
+                }
+            }
+            GoogleCollection::GoogleGke(clusters) => {
+                for cluster in clusters {
+                    if let Some(name) = &cluster.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::GKE::Cluster".to_string(),
+                            category: "GCP::GKE".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(network) = &cluster.network {
+                            let net_node = Node {
+                                id: network.to_string(),
+                                name: "GCP::Compute::Network".to_string(),
+                                category: "GCP::Compute".to_string(),
+                                provider: AtlasProvider::Gcp,
+                            };
+                            let n_idx = get_or_add_node(&mut graph, net_node);
+                            graph.add_edge(n_idx, idx, Edge::Contains);
+                        }
+                    }
+                }
+            }
+            GoogleCollection::GoogleFunctions(functions) => {
+                for func in functions {
+                    if let Some(name) = &func.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::CloudFunctions::Function".to_string(),
+                            category: "GCP::CloudFunctions".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        get_or_add_node(&mut graph, node);
+                    }
+                }
+            }
+            GoogleCollection::GoogleStorageBuckets(buckets) => {
+                for bucket in buckets {
+                    if let Some(id) = &bucket.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "GCP::Storage::Bucket".to_string(),
+                            category: "GCP::Storage".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        get_or_add_node(&mut graph, node);
+                    }
+                }
+            }
+            GoogleCollection::GooglePubSubTopics(topics) => {
+                for topic in topics {
+                    if let Some(name) = &topic.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::PubSub::Topic".to_string(),
+                            category: "GCP::PubSub".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        get_or_add_node(&mut graph, node);
+                    }
+                }
+            }
+            GoogleCollection::GooglePubSubSubscriptions(subscriptions) => {
+                for sub in subscriptions {
+                    if let Some(name) = &sub.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::PubSub::Subscription".to_string(),
+                            category: "GCP::PubSub".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(topic) = &sub.topic {
+                            let topic_node = Node {
+                                id: topic.to_string(),
+                                name: "GCP::PubSub::Topic".to_string(),
+                                category: "GCP::PubSub".to_string(),
+                                provider: AtlasProvider::Gcp,
+                            };
+                            let t_idx = get_or_add_node(&mut graph, topic_node);
+                            graph.add_edge(idx, t_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+            }
+            GoogleCollection::GoogleRunServices(services) => {
+                for service in services {
+                    if let Some(name) = &service.name {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::CloudRun::Service".to_string(),
+                            category: "GCP::CloudRun".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        get_or_add_node(&mut graph, node);
+                    }
+                }
+            }
+            GoogleCollection::GoogleNetworks(networks) => {
+                for network in networks {
+                    if let Some(name) = &network.self_link {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::Compute::Network".to_string(),
+                            category: "GCP::Compute".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        get_or_add_node(&mut graph, node);
+                    }
+                }
+            }
+            GoogleCollection::GoogleSubnetworks(subnetworks) => {
+                for subnetwork in subnetworks {
+                    if let Some(name) = &subnetwork.self_link {
+                        let node = Node {
+                            id: name.to_string(),
+                            name: "GCP::Compute::Subnetwork".to_string(),
+                            category: "GCP::Compute".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(network) = &subnetwork.network {
+                            let net_node = Node {
+                                id: network.to_string(),
+                                name: "GCP::Compute::Network".to_string(),
+                                category: "GCP::Compute".to_string(),
+                                provider: AtlasProvider::Gcp,
+                            };
+                            let n_idx = get_or_add_node(&mut graph, net_node);
+                            graph.add_edge(n_idx, idx, Edge::Contains);
+                        }
+                    }
+                }
+            }
+            GoogleCollection::GoogleForwardingRules(rules) => {
+                for rule in rules {
+                    if let Some(id) = &rule.id {
+                        let node = Node {
+                            id: id.to_string(),
+                            name: "GCP::Compute::ForwardingRule".to_string(),
+                            category: "GCP::Compute".to_string(),
+                            provider: AtlasProvider::Gcp,
+                        };
+                        let idx = get_or_add_node(&mut graph, node);
+
+                        if let Some(ip) = &rule.ip_address {
+                            let ip_node = Node {
+                                id: ip.to_string(),
+                                name: "Generic::IpAddress".to_string(),
+                                category: "Generic".to_string(),
+                                provider: AtlasProvider::Gcp,
+                            };
+                            let ip_idx = get_or_add_node(&mut graph, ip_node);
+                            graph.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                        }
+                    }
+                }
+            }
         }
     }
 

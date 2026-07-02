@@ -1,10 +1,9 @@
 use crate::Settings;
+use crate::api::google::client::GoogleApiClient;
 use crate::cloud::definition::Provider;
-use crate::cloud::google::instance;
-use google_compute1::Compute;
-use hyper_rustls::HttpsConnectorBuilder;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use crate::cloud::google::{
+    compute_network, dns, firewall, functions, gke, instance, pubsub, run, sql, storage,
+};
 use yup_oauth2::ApplicationSecret;
 
 pub async fn build_gcp(
@@ -22,21 +21,68 @@ pub async fn build_gcp(
     .build()
     .await?;
 
-    let https = HttpsConnectorBuilder::new()
-        .with_native_roots()?
-        .https_or_http()
-        .enable_http1()
-        .build();
-    let client = Client::builder(TokioExecutor::new()).build(https);
+    let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
+    let token = auth.token(scopes).await?;
+    let token_str = token.token().unwrap_or("").to_string();
 
-    let compute = Compute::new(client, auth);
+    let client = GoogleApiClient::new(token_str);
+
+    let mut futures = Vec::new();
 
     if let Some(projects) = &opts.gcp_projects {
-        for p in projects {
-            let (instances,) = tokio::try_join!(instance::collector::runner(p, &compute))?;
+        for p in projects.clone() {
+            let client_ref = client.clone();
+            futures.push(async move {
+                let (
+                    instances,
+                    firewalls,
+                    sqls,
+                    zones,
+                    clusters,
+                    funcs,
+                    buckets,
+                    (topics, subscriptions),
+                    runs,
+                    (networks, subnets, fwrules),
+                ) = tokio::try_join!(
+                    instance::collector::runner(&p, &client_ref),
+                    firewall::collector::runner(&p, &client_ref),
+                    sql::collector::runner(&p, &client_ref),
+                    dns::collector::runner(&p, &client_ref),
+                    gke::collector::runner(&p, &client_ref),
+                    functions::collector::runner(&p, &client_ref),
+                    storage::collector::runner(&p, &client_ref),
+                    pubsub::collector::runner(&p, &client_ref),
+                    run::collector::runner(&p, &client_ref),
+                    compute_network::collector::runner(&p, &client_ref),
+                )?;
 
-            services.push(instances);
+                let local_services = vec![
+                    instances,
+                    firewalls,
+                    sqls,
+                    zones,
+                    clusters,
+                    funcs,
+                    buckets,
+                    topics,
+                    subscriptions,
+                    runs,
+                    networks,
+                    subnets,
+                    fwrules,
+                ];
+
+                Ok::<Vec<crate::cloud::definition::GoogleCollection>, Box<dyn std::error::Error>>(
+                    local_services,
+                )
+            });
         }
+    }
+
+    let results = futures::future::try_join_all(futures).await?;
+    for mut res in results {
+        services.append(&mut res);
     }
 
     Ok(Provider::GCP(services))

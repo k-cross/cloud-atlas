@@ -1,13 +1,13 @@
 pub mod collector {
     use crate::api::google::client::GoogleApiClient;
-    use crate::api::google::compute;
+    use crate::api::google::functions;
     use crate::cloud::definition::GoogleCollection;
 
     pub async fn runner(
         project: &str,
         client: &GoogleApiClient,
     ) -> Result<GoogleCollection, Box<dyn std::error::Error>> {
-        let instances = compute::list_instances(client, project).await?;
-        Ok(GoogleCollection::GoogleInstances(instances))
+        let functions = functions::list_functions(client, project).await?;
+        Ok(GoogleCollection::GoogleFunctions(functions))
     }
 }

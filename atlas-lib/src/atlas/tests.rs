@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::Settings;
     use crate::atlas::projector;
@@ -119,20 +120,119 @@ mod tests {
         println!("Mock DOT file generated at mock_atlas.dot");
     }
     fn make_gcp_provider() -> Provider {
+        use crate::api::google::compute::{Firewall, Instance};
+        use crate::api::google::compute_network::{ForwardingRule, Network, Subnetwork};
+        use crate::api::google::dns::ManagedZone;
+        use crate::api::google::functions::CloudFunction;
+        use crate::api::google::gke::Cluster;
+        use crate::api::google::pubsub::{Subscription, Topic};
+        use crate::api::google::run::Service;
+        use crate::api::google::sql::{SqlInstance, SqlIpAddress};
+        use crate::api::google::storage::Bucket;
         use crate::cloud::definition::GoogleCollection;
-        use google_compute1::api::Instance;
 
-        let mut i1 = Instance::default();
-        i1.id = Some(12345u64);
-        i1.name = Some("my-gcp-instance".to_owned());
-        i1.self_link = Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance".to_owned());
+        let i1 = Instance {
+            id: Some("12345".to_string()),
+            name: Some("my-gcp-instance".to_owned()),
+            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance".to_owned()),
+            ..Default::default()
+        };
 
-        let mut i2 = Instance::default();
-        i2.id = Some(67890u64);
-        i2.name = Some("my-gcp-instance-2".to_owned());
-        i2.self_link = Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance-2".to_owned());
+        let i2 = Instance {
+            id: Some("67890".to_string()),
+            name: Some("my-gcp-instance-2".to_owned()),
+            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/zones/us-central1-a/instances/my-gcp-instance-2".to_owned()),
+            ..Default::default()
+        };
 
-        Provider::GCP(vec![GoogleCollection::GoogleInstances(vec![i1, i2])])
+        let fw = Firewall {
+            id: Some("fw-1".to_string()),
+            name: Some("allow-ssh".to_string()),
+            network: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string()),
+            ..Default::default()
+        };
+
+        let ip = SqlIpAddress {
+            ip_type: Some("PRIMARY".to_string()),
+            ip_address: Some("10.0.0.5".to_string()),
+        };
+        let sql = SqlInstance {
+            name: Some("my-sql-db".to_string()),
+            ip_addresses: Some(vec![ip]),
+            ..Default::default()
+        };
+
+        let dns = ManagedZone {
+            name: Some("my-zone".to_string()),
+            dns_name: Some("example.com.".to_string()),
+            ..Default::default()
+        };
+
+        let gke = Cluster {
+            name: Some("my-cluster".to_string()),
+            network: Some("projects/my-gcp-project/global/networks/default".to_string()),
+            ..Default::default()
+        };
+
+        let func = CloudFunction {
+            name: Some(
+                "projects/my-gcp-project/locations/us-central1/functions/my-func".to_string(),
+            ),
+            ..Default::default()
+        };
+
+        let bucket = Bucket {
+            id: Some("my-bucket".to_string()),
+            name: Some("my-bucket".to_string()),
+            ..Default::default()
+        };
+
+        let topic = Topic {
+            name: Some("projects/my-gcp-project/topics/my-topic".to_string()),
+        };
+
+        let sub = Subscription {
+            name: Some("projects/my-gcp-project/subscriptions/my-sub".to_string()),
+            topic: Some("projects/my-gcp-project/topics/my-topic".to_string()),
+        };
+
+        let run_svc = Service {
+            name: Some("projects/my-gcp-project/locations/us-central1/services/my-svc".to_string()),
+            ..Default::default()
+        };
+
+        let net = Network {
+            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string()),
+            ..Default::default()
+        };
+
+        let subnet = Subnetwork {
+            self_link: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/regions/us-central1/subnetworks/default".to_string()),
+            network: Some("https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default".to_string()),
+            ..Default::default()
+        };
+
+        let fw_rule = ForwardingRule {
+            id: Some("fw-rule-1".to_string()),
+            ip_address: Some("34.120.0.1".to_string()),
+            ..Default::default()
+        };
+
+        Provider::GCP(vec![
+            GoogleCollection::GoogleInstances(vec![i1, i2]),
+            GoogleCollection::GoogleFirewalls(vec![fw]),
+            GoogleCollection::GoogleSql(vec![sql]),
+            GoogleCollection::GoogleDns(vec![dns]),
+            GoogleCollection::GoogleGke(vec![gke]),
+            GoogleCollection::GoogleFunctions(vec![func]),
+            GoogleCollection::GoogleStorageBuckets(vec![bucket]),
+            GoogleCollection::GooglePubSubTopics(vec![topic]),
+            GoogleCollection::GooglePubSubSubscriptions(vec![sub]),
+            GoogleCollection::GoogleRunServices(vec![run_svc]),
+            GoogleCollection::GoogleNetworks(vec![net]),
+            GoogleCollection::GoogleSubnetworks(vec![subnet]),
+            GoogleCollection::GoogleForwardingRules(vec![fw_rule]),
+        ])
     }
 
     #[test]
@@ -152,6 +252,18 @@ mod tests {
 
         let s = format!("{}", Dot::with_config(&g, &[]));
         assert!(s.contains("GCP::Compute::Instance"));
+        assert!(s.contains("GCP::Compute::Firewall"));
+        assert!(s.contains("GCP::CloudSQL::Instance"));
+        assert!(s.contains("GCP::CloudDNS::ManagedZone"));
+        assert!(s.contains("GCP::GKE::Cluster"));
+        assert!(s.contains("GCP::CloudFunctions::Function"));
+        assert!(s.contains("GCP::Storage::Bucket"));
+        assert!(s.contains("GCP::PubSub::Topic"));
+        assert!(s.contains("GCP::PubSub::Subscription"));
+        assert!(s.contains("GCP::CloudRun::Service"));
+        assert!(s.contains("GCP::Compute::Network"));
+        assert!(s.contains("GCP::Compute::Subnetwork"));
+        assert!(s.contains("GCP::Compute::ForwardingRule"));
         assert!(s.contains("my-gcp-project"));
         fs::write("mock_atlas_gcp.dot", s).unwrap();
     }

@@ -1,10 +1,9 @@
+pub mod client;
+pub mod compute;
 pub mod compute_network;
 pub mod dns;
-pub mod firewall;
 pub mod functions;
 pub mod gke;
-pub mod instance;
-pub mod provider;
 pub mod pubsub;
 pub mod run;
 pub mod sql;

@@ -51,7 +51,19 @@ pub enum AmazonCollection {
 
 #[derive(Debug)]
 pub enum GoogleCollection {
-    GoogleInstances(Vec<google_compute1::api::Instance>),
+    GoogleInstances(Vec<crate::api::google::compute::Instance>),
+    GoogleFirewalls(Vec<crate::api::google::compute::Firewall>),
+    GoogleSql(Vec<crate::api::google::sql::SqlInstance>),
+    GoogleDns(Vec<crate::api::google::dns::ManagedZone>),
+    GoogleGke(Vec<crate::api::google::gke::Cluster>),
+    GoogleFunctions(Vec<crate::api::google::functions::CloudFunction>),
+    GoogleStorageBuckets(Vec<crate::api::google::storage::Bucket>),
+    GooglePubSubTopics(Vec<crate::api::google::pubsub::Topic>),
+    GooglePubSubSubscriptions(Vec<crate::api::google::pubsub::Subscription>),
+    GoogleRunServices(Vec<crate::api::google::run::Service>),
+    GoogleNetworks(Vec<crate::api::google::compute_network::Network>),
+    GoogleSubnetworks(Vec<crate::api::google::compute_network::Subnetwork>),
+    GoogleForwardingRules(Vec<crate::api::google::compute_network::ForwardingRule>),
 }
 
 #[derive(Debug)]
