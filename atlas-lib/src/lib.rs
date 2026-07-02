@@ -13,6 +13,9 @@ pub struct Settings {
     /// The Azure subscriptions.
     pub azure_subscriptions: Option<Vec<String>>,
 
+    /// Whether to include Cloudflare resources.
+    pub cloudflare: bool,
+
     /// Include all mappings by default
     pub all: bool,
 

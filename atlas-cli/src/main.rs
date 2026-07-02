@@ -16,6 +16,10 @@ pub struct Opt {
     #[clap(long, value_parser, num_args = 1..)]
     azure_subscriptions: Option<Vec<String>>,
 
+    /// Whether to include Cloudflare resources.
+    #[clap(long)]
+    cloudflare: bool,
+
     /// Include all mappings by default
     #[clap(short, long)]
     all: bool,
@@ -45,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         regions: opts.regions,
         gcp_projects: opts.gcp_projects,
         azure_subscriptions: opts.azure_subscriptions,
+        cloudflare: opts.cloudflare,
         all: opts.all,
         verbose: opts.verbose,
         exclude_by_default: opts.exclude,

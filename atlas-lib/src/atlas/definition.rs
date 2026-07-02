@@ -6,6 +6,7 @@ pub enum Provider {
     Aws,
     Gcp,
     Azure,
+    Cloudflare,
     Hetzner,
     DigitalOcean,
     MsGraph,
@@ -27,7 +28,10 @@ pub enum Node {
     // AWS
     AwsRegion(std::sync::Arc<str>),
     AwsGlobal(std::sync::Arc<str>),
-    AwsTag(std::sync::Arc<str>),
+    AwsTag {
+        key: std::sync::Arc<str>,
+        value: std::sync::Arc<str>,
+    },
     AwsEc2Instance(std::sync::Arc<str>),
     AwsEc2Vpc(std::sync::Arc<str>),
     AwsEc2Subnet(std::sync::Arc<str>),
@@ -90,6 +94,16 @@ pub enum Node {
     AzureEventGridTopic(std::sync::Arc<str>),
     AzureDnsZone(std::sync::Arc<str>),
     AzureCdnProfile(std::sync::Arc<str>),
+
+    // Cloudflare
+    CloudflareZone(std::sync::Arc<str>),
+    CloudflareDnsRecord(std::sync::Arc<str>),
+    CloudflareWorker(std::sync::Arc<str>),
+    CloudflareDurableObject(std::sync::Arc<str>),
+    CloudflareKvNamespace(std::sync::Arc<str>),
+    CloudflareR2Bucket(std::sync::Arc<str>),
+    CloudflareD1Database(std::sync::Arc<str>),
+    ExternalService(std::sync::Arc<str>),
 }
 
 impl fmt::Display for Node {
@@ -103,14 +117,14 @@ impl fmt::Display for Node {
             // AWS
             Node::AwsRegion(id) => write!(f, "AWS::Region({})", id),
             Node::AwsGlobal(id) => write!(f, "AWS::Global({})", id),
-            Node::AwsTag(id) => write!(f, "AWS::Tag({})", id),
-            Node::AwsEc2Instance(id) => write!(f, "AWS::EC2::Instance({})", id),
+            Node::AwsTag { key, value } => write!(f, "AWS::Tag({}={})", key, value),
+            Node::AwsEc2Instance(id) => write!(f, "AWS::Ec2Instance({})", id),
             Node::AwsEc2Vpc(id) => write!(f, "AWS::EC2::VPC({})", id),
             Node::AwsEc2Subnet(id) => write!(f, "AWS::EC2::Subnet({})", id),
             Node::AwsEc2AvailabilityZone(id) => write!(f, "AWS::EC2::AvailabilityZone({})", id),
-            Node::AwsEc2SecurityGroup(id) => write!(f, "AWS::EC2::SecurityGroup({})", id),
-            Node::AwsEc2Eni(id) => write!(f, "AWS::EC2::ENI({})", id),
-            Node::AwsEcsCluster(id) => write!(f, "AWS::ECS::Cluster({})", id),
+            Node::AwsEc2SecurityGroup(id) => write!(f, "AWS::Ec2SecurityGroup({})", id),
+            Node::AwsEc2Eni(id) => write!(f, "AWS::Ec2Eni({}-eni)", id), // preserve the -eni suffix for visual display without allocation
+            Node::AwsEcsCluster(id) => write!(f, "AWS::EcsCluster({})", id),
             Node::AwsLambdaFunction(id) => write!(f, "AWS::Lambda::Function({})", id),
             Node::AwsIamRole(id) => write!(f, "AWS::IAM::Role({})", id),
             Node::AwsEventbridgeBus(id) => write!(f, "AWS::Eventbridge::Bus({})", id),
@@ -158,15 +172,27 @@ impl fmt::Display for Node {
             Node::AzurePublicIpAddress(id) => write!(f, "Azure::Network::PublicIpAddress({})", id),
             Node::AzureStorageAccount(id) => write!(f, "Azure::Storage::StorageAccount({})", id),
             Node::AzureManagedCluster(id) => write!(f, "Azure::Containers::ManagedCluster({})", id),
-            Node::AzureSqlServer(id) => write!(f, "Azure::Sql::Server({})", id),
+            Node::AzureSqlServer(id) => write!(f, "Azure::Databases::SqlServer({})", id),
             Node::AzureAppService(id) => write!(f, "Azure::Web::AppService({})", id),
             Node::AzureFunctionApp(id) => write!(f, "Azure::Web::FunctionApp({})", id),
-            Node::AzureApiManagement(id) => write!(f, "Azure::ApiManagement::Service({})", id),
-            Node::AzureCosmosDb(id) => write!(f, "Azure::DocumentDb::DatabaseAccount({})", id),
-            Node::AzureServiceBus(id) => write!(f, "Azure::ServiceBus::Namespace({})", id),
-            Node::AzureEventGridTopic(id) => write!(f, "Azure::EventGrid::Topic({})", id),
+            Node::AzureApiManagement(id) => write!(f, "Azure::Web::ApiManagement({})", id),
+            Node::AzureCosmosDb(id) => write!(f, "Azure::Databases::CosmosDb({})", id),
+            Node::AzureServiceBus(id) => write!(f, "Azure::Integration::ServiceBus({})", id),
+            Node::AzureEventGridTopic(id) => {
+                write!(f, "Azure::Integration::EventGridTopic({})", id)
+            }
             Node::AzureDnsZone(id) => write!(f, "Azure::Network::DnsZone({})", id),
-            Node::AzureCdnProfile(id) => write!(f, "Azure::Cdn::Profile({})", id),
+            Node::AzureCdnProfile(id) => write!(f, "Azure::Network::CdnProfile({})", id),
+
+            // Cloudflare
+            Node::CloudflareZone(id) => write!(f, "Cloudflare::Zone({})", id),
+            Node::CloudflareDnsRecord(id) => write!(f, "Cloudflare::DnsRecord({})", id),
+            Node::CloudflareWorker(id) => write!(f, "Cloudflare::Worker({})", id),
+            Node::CloudflareDurableObject(id) => write!(f, "Cloudflare::DurableObject({})", id),
+            Node::CloudflareKvNamespace(id) => write!(f, "Cloudflare::KvNamespace({})", id),
+            Node::CloudflareR2Bucket(id) => write!(f, "Cloudflare::R2Bucket({})", id),
+            Node::CloudflareD1Database(id) => write!(f, "Cloudflare::D1Database({})", id),
+            Node::ExternalService(id) => write!(f, "External::Service({})", id),
         }
     }
 }

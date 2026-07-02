@@ -29,6 +29,7 @@ aws-sdk-sqs = "1.0"
 aws-types = "1.0"
 azure_core = "1.0.0"
 azure_identity = "1.0.0"
+cloudflare = "0.14.0"
 futures = "0.3"
 petgraph = "0.7"
 rayon = "1.12.0"
@@ -38,5 +39,6 @@ serde_json = "1.0"
 tokio = { version = "1.21", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5.8"
 uuid = { version = "1.2", features = ["v4"] }
 yup-oauth2 = "11"

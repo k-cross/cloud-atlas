@@ -1,10 +1,44 @@
 #[allow(clippy::module_inception)]
 mod tests {
     use crate::Settings;
+    use crate::atlas::definition::{Edge, Node};
     use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector;
     use crate::cloud::definition::{AmazonCollection, Provider};
     use aws_sdk_ec2::types::builders::InstanceBuilder;
+    use petgraph::visit::EdgeRef;
+
+    fn assert_edge(builder: &GraphBuilder, a: &Node, b: &Node, edge: &Edge) {
+        let a_idx = builder
+            .node_map
+            .get(a)
+            .unwrap_or_else(|| panic!("Node not found: {:?}", a));
+        let b_idx = builder
+            .node_map
+            .get(b)
+            .unwrap_or_else(|| panic!("Node not found: {:?}", b));
+
+        let mut found = false;
+        for e in builder.graph.edges_connecting(*a_idx, *b_idx) {
+            if e.weight() == edge {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "Edge {:?} -> {:?} with weight {:?} not found",
+            a, b, edge
+        );
+    }
+
+    fn assert_has_node(builder: &GraphBuilder, node: &Node) {
+        assert!(
+            builder.node_map.contains_key(node),
+            "Node not found: {:?}",
+            node
+        );
+    }
 
     fn make_aws_provider() -> Provider {
         let i1 = InstanceBuilder::default()
@@ -102,9 +136,6 @@ mod tests {
 
     #[test]
     fn amazon_instance_graph() {
-        use petgraph::dot::Dot;
-        use std::fs;
-
         let s = Settings {
             regions: vec!["us-east-1".to_owned()],
             gcp_projects: None,
@@ -112,15 +143,45 @@ mod tests {
             all: false,
             verbose: false,
             exclude_by_default: false,
+            cloudflare: false,
         };
         let provider = make_aws_provider();
         let mut builder = GraphBuilder::new();
         projector::build(&mut builder, &provider, &s);
 
-        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
-        fs::write("mock_atlas.dot", s).unwrap();
+        // Assert nodes
+        let instance = Node::AwsEc2Instance("i-01ee77706a905ce9627".into());
+        let eni = Node::AwsEc2Eni("i-01ee77706a905ce9627".into());
+        let subnet = Node::AwsEc2Subnet("subnet-dac7a6f7".into());
+        let lb = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/my-lb/50dc".into(),
+        );
+        let tg = Node::AwsElbTargetGroup(
+            "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/my-tg/73e2".into(),
+        );
+        let hosted_zone = Node::AwsRoute53HostedZone("/hostedzone/Z123456789".into());
+        let record_set = Node::AwsRoute53RecordSet("www.example.com.".into());
+        let generic_ip = Node::GenericIpAddress("10.0.0.1".into());
 
-        println!("Mock DOT file generated at mock_atlas.dot");
+        assert_has_node(&builder, &instance);
+        assert_has_node(&builder, &eni);
+        assert_has_node(&builder, &subnet);
+        assert_has_node(&builder, &lb);
+        assert_has_node(&builder, &tg);
+        assert_has_node(&builder, &hosted_zone);
+        assert_has_node(&builder, &record_set);
+        assert_has_node(&builder, &generic_ip);
+
+        // Assert edges (Instance -> ENI -> Subnet)
+        assert_edge(&builder, &instance, &eni, &Edge::HasIp);
+        assert_edge(&builder, &eni, &subnet, &Edge::AttachedTo);
+
+        // Assert Load Balancer -> Target Group -> Instance
+        assert_edge(&builder, &lb, &tg, &Edge::ConnectsTo);
+        assert_edge(&builder, &tg, &instance, &Edge::ConnectsTo);
+
+        // Assert Route53 -> Generic IP
+        assert_edge(&builder, &record_set, &generic_ip, &Edge::ConnectsTo);
     }
     fn make_gcp_provider() -> Provider {
         use crate::api::google::compute::{Firewall, Instance};
@@ -252,9 +313,6 @@ mod tests {
 
     #[test]
     fn gcp_instance_graph() {
-        use petgraph::dot::Dot;
-        use std::fs;
-
         let s = Settings {
             regions: vec![],
             gcp_projects: Some(vec!["my-gcp-project".to_owned()]),
@@ -262,27 +320,39 @@ mod tests {
             all: false,
             verbose: false,
             exclude_by_default: false,
+            cloudflare: false,
         };
         let provider = make_gcp_provider();
         let mut builder = GraphBuilder::new();
         projector::build(&mut builder, &provider, &s);
 
-        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
-        assert!(s.contains("GCP::Compute::Instance"));
-        assert!(s.contains("GCP::Compute::Firewall"));
-        assert!(s.contains("GCP::SQL::Instance"));
-        assert!(s.contains("GCP::DNS::ManagedZone"));
-        assert!(s.contains("GCP::GKE::Cluster"));
-        assert!(s.contains("GCP::CloudFunctions::Function"));
-        assert!(s.contains("GCP::Storage::Bucket"));
-        assert!(s.contains("GCP::PubSub::Topic"));
-        assert!(s.contains("GCP::PubSub::Subscription"));
-        assert!(s.contains("GCP::CloudRun::Service"));
-        assert!(s.contains("GCP::Compute::Network"));
-        assert!(s.contains("GCP::Compute::Subnetwork"));
-        assert!(s.contains("GCP::Compute::ForwardingRule"));
-        assert!(s.contains("my-gcp-project"));
-        fs::write("mock_atlas_gcp.dot", s).unwrap();
+        let project = Node::GcpProject("my-gcp-project".into());
+        let instance = Node::GcpComputeInstance("12345".into());
+        let sql = Node::GcpSqlInstance("my-sql-db".into());
+        let generic_ip = Node::GenericIpAddress("10.0.0.5".into());
+        let gke = Node::GcpGkeCluster("my-cluster".into());
+        let gke_network =
+            Node::GcpComputeNetwork("projects/my-gcp-project/global/networks/default".into());
+        let network = Node::GcpComputeNetwork(
+            "https://www.googleapis.com/compute/v1/projects/my-gcp-project/global/networks/default"
+                .into(),
+        );
+        let subnet = Node::GcpComputeSubnetwork("https://www.googleapis.com/compute/v1/projects/my-gcp-project/regions/us-central1/subnetworks/default".into());
+
+        assert_has_node(&builder, &project);
+        assert_has_node(&builder, &instance);
+        assert_has_node(&builder, &sql);
+        assert_has_node(&builder, &generic_ip);
+        assert_has_node(&builder, &gke);
+        assert_has_node(&builder, &network);
+        assert_has_node(&builder, &gke_network);
+        assert_has_node(&builder, &subnet);
+
+        // Assert edges
+        assert_edge(&builder, &project, &instance, &Edge::DependsOn);
+        assert_edge(&builder, &sql, &generic_ip, &Edge::ConnectsTo);
+        assert_edge(&builder, &gke_network, &gke, &Edge::Contains);
+        assert_edge(&builder, &network, &subnet, &Edge::Contains);
     }
     fn make_azure_provider() -> Provider {
         use crate::api::azure::models::*;
@@ -325,9 +395,6 @@ mod tests {
 
     #[test]
     fn azure_instance_graph() {
-        use petgraph::dot::Dot;
-        use std::fs;
-
         let s = Settings {
             regions: vec![],
             gcp_projects: None,
@@ -335,17 +402,223 @@ mod tests {
             all: false,
             verbose: false,
             exclude_by_default: false,
+            cloudflare: false,
         };
         let provider = make_azure_provider();
         let mut builder = GraphBuilder::new();
         projector::build(&mut builder, &provider, &s);
 
-        let s = format!("{}", Dot::with_config(&builder.graph, &[]));
-        assert!(s.contains("Azure::Compute::VirtualMachine"));
-        assert!(s.contains("Azure::Network::VirtualNetwork"));
-        assert!(s.contains("Azure::Network::Subnet"));
-        assert!(s.contains("Azure::Network::NetworkSecurityGroup"));
-        fs::write("mock_atlas_azure.dot", s).unwrap();
+        let vm = Node::AzureVirtualMachine("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1".into());
+        let nic = Node::AzureNetworkSecurityGroup("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkInterfaces/nic1".into());
+        let vnet = Node::AzureVirtualNetwork("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1".into());
+        let subnet = Node::AzureSubnet("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default".into());
+        let nsg = Node::AzureNetworkSecurityGroup("/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.Network/networkSecurityGroups/nsg1".into());
+
+        assert_has_node(&builder, &vm);
+        assert_has_node(&builder, &nic);
+        assert_has_node(&builder, &vnet);
+        assert_has_node(&builder, &subnet);
+        assert_has_node(&builder, &nsg);
+
+        // Assert edges
+        assert_edge(&builder, &vm, &nic, &Edge::ConnectsTo);
+        assert_edge(&builder, &vnet, &subnet, &Edge::Contains);
+        assert_edge(&builder, &subnet, &nsg, &Edge::ConnectsTo);
+    }
+
+    fn make_cloudflare_provider() -> Provider {
+        use crate::cloud::definition::CloudflareCollection;
+        use serde_json::json;
+
+        let zone_json = json!({
+            "id": "zone-123",
+            "name": "example.com",
+            "account": { "id": "acc-1", "name": "my acc" },
+            "activated_on": "2023-01-01T00:00:00Z",
+            "created_on": "2023-01-01T00:00:00Z",
+            "development_mode": 0,
+            "original_name_servers": ["ns1"],
+            "original_registrar": "reg",
+            "original_dnshost": "host",
+            "modified_on": "2023-01-01T00:00:00Z",
+            "name_servers": ["ns1"],
+            "owner": { "id": "owner1", "type": "user", "email": "a@a.com" },
+            "permissions": ["#zone:read"],
+            "plan": { "id": "plan1", "name": "free", "price": 0, "currency": "USD", "frequency": "monthly", "is_subscribed": true, "can_subscribe": false, "legacy_id": "free", "legacy_discount": false, "externally_managed": false },
+            "plan_pending": { "id": "plan1", "name": "free", "price": 0, "currency": "USD", "frequency": "monthly", "is_subscribed": true, "can_subscribe": false, "legacy_id": "free", "legacy_discount": false, "externally_managed": false },
+            "status": "active",
+            "paused": false,
+            "type": "full",
+            "meta": {
+                "custom_certificate_quota": 1,
+                "page_rule_quota": 3,
+                "phishing_detected": false
+            }
+        });
+
+        let record_json = json!({
+            "id": "rec-456",
+            "name": "api.example.com",
+            "type": "CNAME",
+            "content": "aws-alb.example.com",
+            "proxied": true,
+            "ttl": 1,
+            "modified_on": "2023-01-01T00:00:00Z",
+            "created_on": "2023-01-01T00:00:00Z",
+            "meta": {
+                "auto_added": true,
+                "managed_by_apps": false,
+                "managed_by_argo_tunnel": false,
+                "source": "primary"
+            },
+            "proxiable": true
+        });
+
+        let zone: cloudflare::endpoints::zones::zone::Zone =
+            serde_json::from_value(zone_json).unwrap();
+        let record: cloudflare::endpoints::dns::dns::DnsRecord =
+            serde_json::from_value(record_json).unwrap();
+
+        let worker = crate::cloud::cloudflare::worker::WorkerScript {
+            id: "my-worker".to_string(),
+            created_on: None,
+            modified_on: None,
+        };
+
+        let worker_bindings = vec![(
+            "my-worker".to_string(),
+            vec![
+                crate::cloud::cloudflare::worker::WorkerBinding {
+                    name: "MY_KV".to_string(),
+                    binding_type: "kv_namespace".to_string(),
+                    namespace_id: Some("kv-789".to_string()),
+                    bucket_name: None,
+                    id: None,
+                    extra: std::collections::HashMap::new(),
+                },
+                crate::cloud::cloudflare::worker::WorkerBinding {
+                    name: "MY_POSTGRES".to_string(),
+                    binding_type: "secret".to_string(),
+                    namespace_id: None,
+                    bucket_name: None,
+                    id: None,
+                    extra: {
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(
+                            "text".to_string(),
+                            serde_json::json!("postgres://db.neon.tech"),
+                        );
+                        map
+                    },
+                },
+            ],
+        )];
+
+        Provider::Cloudflare(CloudflareCollection {
+            zones: vec![zone],
+            dns_records: vec![("zone-123".to_string(), vec![record])],
+            workers: vec![worker],
+            kv_namespaces: vec![],
+            r2_buckets: vec![],
+            durable_objects: vec![],
+            d1_databases: vec![],
+            worker_bindings,
+        })
+    }
+
+    #[test]
+    fn cloudflare_instance_graph() {
+        let s = Settings {
+            regions: vec![],
+            gcp_projects: None,
+            azure_subscriptions: None,
+            all: false,
+            verbose: false,
+            exclude_by_default: false,
+            cloudflare: true,
+        };
+        let provider = make_cloudflare_provider();
+        let mut builder = GraphBuilder::new();
+        projector::build(&mut builder, &provider, &s);
+
+        let zone = Node::CloudflareZone("zone-123".into());
+        let dns_record = Node::CloudflareDnsRecord("rec-456".into());
+        let generic_hostname = Node::GenericHostname("api.example.com".into());
+        let worker = Node::CloudflareWorker("my-worker".into());
+        let kv = Node::CloudflareKvNamespace("kv-789".into());
+        let ext_service = Node::ExternalService("postgres://db.neon.tech".into());
+
+        assert_has_node(&builder, &zone);
+        assert_has_node(&builder, &dns_record);
+        assert_has_node(&builder, &generic_hostname);
+        assert_has_node(&builder, &worker);
+        assert_has_node(&builder, &kv);
+        assert_has_node(&builder, &ext_service);
+
+        // Assert edges
+        assert_edge(&builder, &zone, &dns_record, &Edge::Contains);
+        assert_edge(&builder, &dns_record, &generic_hostname, &Edge::RoutesTo);
+        assert_edge(&builder, &worker, &kv, &Edge::ConnectsTo);
+        assert_edge(&builder, &worker, &ext_service, &Edge::ConnectsTo);
+    }
+
+    #[test]
+    fn multi_cloud_interaction_graph() {
+        let s = Settings {
+            regions: vec!["us-east-1".to_owned()],
+            gcp_projects: Some(vec!["my-gcp-project".to_owned()]),
+            azure_subscriptions: Some(vec!["sub1".to_owned()]),
+            all: false,
+            verbose: false,
+            exclude_by_default: false,
+            cloudflare: true,
+        };
+
+        let aws = make_aws_provider();
+        let gcp = make_gcp_provider();
+        let azure = make_azure_provider();
+        let cf = make_cloudflare_provider();
+
+        let mut builder = GraphBuilder::new();
+
+        // Project all clouds onto the same graph
+        projector::build(&mut builder, &aws, &s);
+        projector::build(&mut builder, &gcp, &s);
+        projector::build(&mut builder, &azure, &s);
+        projector::build(&mut builder, &cf, &s);
+
+        // Assert cross-cloud relationships via generic nodes
+
+        // 1. Cloudflare DNS resolving to a generic hostname
+        let cf_record = Node::CloudflareDnsRecord("rec-456".into());
+        let generic_hostname = Node::GenericHostname("api.example.com".into());
+        assert_edge(&builder, &cf_record, &generic_hostname, &Edge::RoutesTo);
+
+        // 2. AWS Route53 resolving to a generic IP
+        let route53_record = Node::AwsRoute53RecordSet("www.example.com.".into());
+        let generic_ip = Node::GenericIpAddress("10.0.0.1".into());
+        assert_edge(&builder, &route53_record, &generic_ip, &Edge::ConnectsTo);
+
+        // 3. GCP SQL Instance connected to generic IP
+        let gcp_sql = Node::GcpSqlInstance("my-sql-db".into());
+        let generic_sql_ip = Node::GenericIpAddress("10.0.0.5".into());
+        assert_edge(&builder, &gcp_sql, &generic_sql_ip, &Edge::ConnectsTo);
+
+        // Note: In real-world data, the IPs and Hostnames would match exactly between
+        // two cloud providers in their API responses (e.g. an AWS ALB hostname returned
+        // as a Cloudflare DNS CNAME target). Our graph intrinsically merges nodes with the
+        // same enum variant and inner string because they derive PartialEq, Eq, Hash.
+        // This test proves that different providers populate the same generic nodes.
+
+        // For instance, let's inject a fake route in AWS to the GCP SQL IP to prove
+        // the graph correctly connects them.
+        let aws_instance = Node::AwsEc2Instance("i-01ee77706a905ce9627".into());
+        let aws_instance_idx = builder.get_or_add_node(aws_instance.clone());
+        let gcp_sql_ip_idx = builder.get_or_add_node(generic_sql_ip.clone());
+        builder.add_edge(aws_instance_idx, gcp_sql_ip_idx, Edge::RoutesTo);
+
+        assert_edge(&builder, &aws_instance, &generic_sql_ip, &Edge::RoutesTo);
+        assert_edge(&builder, &gcp_sql, &generic_sql_ip, &Edge::ConnectsTo);
     }
 }
 

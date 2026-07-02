@@ -1,0 +1,12 @@
+digraph {
+    0 [ label = "Cloudflare::Zone(zone-123)" ]
+    1 [ label = "Cloudflare::DnsRecord(rec-456)" ]
+    2 [ label = "Generic::Hostname(api.example.com)" ]
+    3 [ label = "Cloudflare::Worker(my-worker)" ]
+    4 [ label = "Cloudflare::KvNamespace(kv-789)" ]
+    5 [ label = "External::Service(postgres://db.neon.tech)" ]
+    0 -> 1 [ label = "Contains" ]
+    1 -> 2 [ label = "RoutesTo" ]
+    3 -> 4 [ label = "ConnectsTo" ]
+    3 -> 5 [ label = "ConnectsTo" ]
+}

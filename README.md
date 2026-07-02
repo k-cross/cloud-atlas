@@ -19,9 +19,10 @@ Cloud Atlas builds a **Strongly Typed Semantic Graph**:
 - [ ] Visualize graph in comprehensible layout exploring network/service layers
 - [ ] Make the graph explorable
     - [x] Outputs a point-in-time `dot` file (explorable w/ other tools like `gephi`)
-- [ ] Work across GCP, AWS, and Azure
+- [ ] Work across GCP, AWS, Azure, and Cloudflare
     - [x] AWS
     - [x] GCP
+    - [x] Cloudflare
     - [x] Azure
 - [ ] Extendable for on-prem use-cases
 
@@ -44,6 +45,10 @@ Route53 Hosted Zones and Record Sets are mapped globally. Record Sets project `C
 ## GCP Notes
 
 GCP resources are supported using lightweight custom REST clients for performance and reduced binary bloat. Authenticate locally and use the `--gcp-projects` flag to include GCP resources in the final graph output. Supported services include Compute Instances, Firewalls, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, and Network topologies.
+
+## Cloudflare Notes
+
+Cloudflare resources are supported using the `CLOUDFLARE_API_TOKEN` environment variable for authentication. Use the `--cloudflare` flag to include Cloudflare resources in the final graph output. Supported services include Zones, DNS Records, and Workers.
 
 ## Azure Notes
 
@@ -72,6 +77,9 @@ cargo run -- --regions us-east-1 us-west-2
 
 # Include GCP projects in the snapshot
 cargo run -- --regions us-east-1 --gcp-projects my-gcp-project-1 my-gcp-project-2
+
+# Include Cloudflare resources in the snapshot
+CLOUDFLARE_API_TOKEN=your_token_here cargo run -- --cloudflare
 
 # Include Azure subscriptions in the snapshot
 cargo run -- --regions us-east-1 --azure-subscriptions my-subscription-1 my-subscription-2

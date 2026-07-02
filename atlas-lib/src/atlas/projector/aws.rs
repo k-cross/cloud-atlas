@@ -39,15 +39,14 @@ pub fn aws_projector(
                         let idx = builder.get_or_add_node(node);
                         inst_idx = Some(idx);
 
-                        // Pivot: Instance -> HasIp -> ENI -> AttachedTo -> Subnet
-                        if let Some(s_idx) = subnet_idx {
-                            let eni_node = Node::AwsEc2Eni(format!("{}-eni", instance_id).into());
+                        if let Some(subnet_idx) = subnet_idx {
+                            let eni_node = Node::AwsEc2Eni(instance_id.clone().into());
                             let eni_idx = builder.get_or_add_node(eni_node);
 
                             // Instance -> HasIp -> ENI
                             builder.add_edge(idx, eni_idx, Edge::HasIp);
                             // ENI -> AttachedTo -> Subnet
-                            builder.add_edge(eni_idx, s_idx, Edge::AttachedTo);
+                            builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
                         }
                     }
 
@@ -73,7 +72,10 @@ pub fn aws_projector(
                     if let Some(tags) = inst.tags.as_ref() {
                         for tag in tags {
                             if let (Some(k), Some(v)) = (tag.key.as_ref(), tag.value.as_ref()) {
-                                let node = Node::AwsTag(format!("{}={}", k, v).into());
+                                let node = Node::AwsTag {
+                                    key: k.as_str().into(),
+                                    value: v.as_str().into(),
+                                };
                                 let tag_idx = builder.get_or_add_node(node);
                                 if let Some(i_idx) = inst_idx {
                                     builder.add_edge(i_idx, tag_idx, Edge::DependsOn);
@@ -369,6 +371,27 @@ pub fn aws_projector(
                                     let ref_idx = builder.get_or_add_node(ref_node);
                                     // The referenced group allows traffic TO this group
                                     builder.add_edge(ref_idx, idx, Edge::ConnectsTo);
+                                }
+                            }
+                        }
+
+                        for perm in sg.ip_permissions_egress() {
+                            for ip_range in perm.ip_ranges() {
+                                if let Some(cidr) = ip_range.cidr_ip() {
+                                    if !is_large_cidr(cidr) {
+                                        let ip_node = Node::GenericIpAddress(cidr.to_string().into());
+                                        let ip_idx = builder.get_or_add_node(ip_node);
+                                        builder.add_edge(idx, ip_idx, Edge::RoutesTo);
+                                    }
+                                }
+                            }
+                            for ipv6_range in perm.ipv6_ranges() {
+                                if let Some(cidr) = ipv6_range.cidr_ipv6() {
+                                    if !is_large_cidr(cidr) {
+                                        let ip_node = Node::GenericIpAddress(cidr.to_string().into());
+                                        let ip_idx = builder.get_or_add_node(ip_node);
+                                        builder.add_edge(idx, ip_idx, Edge::RoutesTo);
+                                    }
                                 }
                             }
                         }
