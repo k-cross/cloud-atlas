@@ -77,4 +77,11 @@ pub enum MicrosoftCollection {
     AzureManagedClusters(Vec<crate::api::azure::models::ManagedCluster>),
     AzureSqlServers(Vec<crate::api::azure::models::SqlServer>),
     AzureAppServices(Vec<crate::api::azure::models::AppService>),
+    AzureFunctionApps(Vec<crate::api::azure::models::FunctionApp>),
+    AzureApiManagement(Vec<crate::api::azure::models::ApiManagement>),
+    AzureCosmosDbs(Vec<crate::api::azure::models::CosmosDb>),
+    AzureServiceBuses(Vec<crate::api::azure::models::ServiceBus>),
+    AzureEventGridTopics(Vec<crate::api::azure::models::EventGridTopic>),
+    AzureDnsZones(Vec<crate::api::azure::models::DnsZone>),
+    AzureCdnProfiles(Vec<crate::api::azure::models::CdnProfile>),
 }

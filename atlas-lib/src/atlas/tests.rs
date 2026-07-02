@@ -258,8 +258,8 @@ mod tests {
         let s = format!("{}", Dot::with_config(&builder.graph, &[]));
         assert!(s.contains("GCP::Compute::Instance"));
         assert!(s.contains("GCP::Compute::Firewall"));
-        assert!(s.contains("GCP::CloudSQL::Instance"));
-        assert!(s.contains("GCP::CloudDNS::ManagedZone"));
+        assert!(s.contains("GCP::SQL::Instance"));
+        assert!(s.contains("GCP::DNS::ManagedZone"));
         assert!(s.contains("GCP::GKE::Cluster"));
         assert!(s.contains("GCP::CloudFunctions::Function"));
         assert!(s.contains("GCP::Storage::Bucket"));

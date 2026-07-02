@@ -5,6 +5,13 @@ The goal is to make it easy to gain fast visual insight into how infrastructure 
 This is intended to be a visual aide to help with discussions involving architecture, and triage.
 It builds from existing cloud configurations as they exist in reality, not an idealized view of intent.
 
+## Architecture
+
+Cloud Atlas builds a **Strongly Typed Semantic Graph**:
+- **Nodes**: Modeled as specific Enum variants for over 40 cloud resources (e.g., `Node::AwsEc2Instance`, `Node::AzureVirtualNetwork`), ensuring strict compile-time safety and graph integrity.
+- **Edges**: Relationships go beyond simple containment, leveraging strict semantic edges like `AttachedTo`, `HasIp`, and `RoutesTo` to deeply mimic network topology. 
+- **Graph Storage**: The graph is stored entirely in memory using `petgraph`, enabling extremely fast deduplication and continuous traversal.
+
 ## Goals
 
 - [x] Maintain a live, in-memory graph continuously synchronized
@@ -35,11 +42,15 @@ Route53 Hosted Zones and Record Sets are mapped globally. Record Sets project `C
 
 ## GCP Notes
 
-GCP resources are supported using lightweight custom REST clients for performance and reduced binary bloat. Authenticate locally and use the `--gcp-projects` flag to include GCP resources in the final graph output. Supported services include Compute Instances, Firewalls, Cloud SQL, Cloud DNS, GKE, Cloud Functions, and Network topologies.
+GCP resources are supported using lightweight custom REST clients for performance and reduced binary bloat. Authenticate locally and use the `--gcp-projects` flag to include GCP resources in the final graph output. Supported services include Compute Instances, Firewalls, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, and Network topologies.
 
 ## Azure Notes
 
-Azure resources are supported using Azure Resource Graph (ARG) for blazing fast, cross-subscription resource fetching. Authenticate locally with `az login` and use the `--azure-subscriptions` flag to include Azure resources in the final graph output. Supported services include Virtual Machines, Virtual Networks, Network Security Groups, Storage, AKS, App Services, and SQL Servers.
+Azure resources are supported using Azure Resource Graph (ARG) for blazing fast, cross-subscription resource fetching. Authenticate locally with `az login` and use the `--azure-subscriptions` flag to include Azure resources in the final graph output. Supported services now include a wide range of managed services:
+- **Compute**: Virtual Machines, AKS (Managed Clusters), App Services, Function Apps
+- **Network**: Virtual Networks, Subnets, NSGs, Public IPs, DNS Zones, CDN Profiles
+- **Storage/Database**: Storage Accounts, SQL Servers, Cosmos DB
+- **Messaging**: Service Bus, Event Grid
 
 ## Build Instructions
 

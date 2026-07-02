@@ -23,7 +23,13 @@ pub async fn build_azure(
             "microsoft.storage/storageaccounts",
             "microsoft.containerservice/managedclusters",
             "microsoft.sql/servers",
-            "microsoft.web/sites"
+            "microsoft.web/sites",
+            "microsoft.apimanagement/service",
+            "microsoft.documentdb/databaseaccounts",
+            "microsoft.servicebus/namespaces",
+            "microsoft.eventgrid/topics",
+            "microsoft.network/dnszones",
+            "microsoft.cdn/profiles"
         )
         | project id, name, type, location, properties
     "#;
@@ -39,6 +45,13 @@ pub async fn build_azure(
     let mut aks = Vec::new();
     let mut sql = Vec::new();
     let mut apps = Vec::new();
+    let mut funcs = Vec::new();
+    let mut apims = Vec::new();
+    let mut cosmos = Vec::new();
+    let mut sbuses = Vec::new();
+    let mut egrids = Vec::new();
+    let mut dns = Vec::new();
+    let mut cdns = Vec::new();
 
     for res_val in raw_resources {
         let res: AzureResource = serde_json::from_value(res_val)?;
@@ -145,7 +158,63 @@ pub async fn build_azure(
                 });
             }
             "microsoft.web/sites" => {
-                apps.push(AppService {
+                let kind = res
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.get("kind"))
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("");
+                if kind.contains("functionapp") {
+                    funcs.push(FunctionApp {
+                        id: res.id,
+                        name: res.name,
+                        location: res.location,
+                    });
+                } else {
+                    apps.push(AppService {
+                        id: res.id,
+                        name: res.name,
+                        location: res.location,
+                    });
+                }
+            }
+            "microsoft.apimanagement/service" => {
+                apims.push(ApiManagement {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            "microsoft.documentdb/databaseaccounts" => {
+                cosmos.push(CosmosDb {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            "microsoft.servicebus/namespaces" => {
+                sbuses.push(ServiceBus {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            "microsoft.eventgrid/topics" => {
+                egrids.push(EventGridTopic {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            "microsoft.network/dnszones" => {
+                dns.push(DnsZone {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            "microsoft.cdn/profiles" => {
+                cdns.push(CdnProfile {
                     id: res.id,
                     name: res.name,
                     location: res.location,
@@ -165,6 +234,13 @@ pub async fn build_azure(
         MicrosoftCollection::AzureManagedClusters(aks),
         MicrosoftCollection::AzureSqlServers(sql),
         MicrosoftCollection::AzureAppServices(apps),
+        MicrosoftCollection::AzureFunctionApps(funcs),
+        MicrosoftCollection::AzureApiManagement(apims),
+        MicrosoftCollection::AzureCosmosDbs(cosmos),
+        MicrosoftCollection::AzureServiceBuses(sbuses),
+        MicrosoftCollection::AzureEventGridTopics(egrids),
+        MicrosoftCollection::AzureDnsZones(dns),
+        MicrosoftCollection::AzureCdnProfiles(cdns),
     ];
 
     Ok(Provider::Azure(collections))

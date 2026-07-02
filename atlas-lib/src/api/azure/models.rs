@@ -84,3 +84,59 @@ pub struct AppService {
     pub name: Option<String>,
     pub location: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionApp {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiManagement {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CosmosDb {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceBus {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EventGridTopic {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsZone {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CdnProfile {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+}
