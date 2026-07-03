@@ -131,7 +131,6 @@ version = "0.1.0"
 dependencies = [
  "atlas-lib",
  "clap",
- "petgraph",
  "tokio",
  "tracing-subscriber",
 ]
@@ -156,7 +155,6 @@ dependencies = [
  "aws-sdk-sns",
  "aws-sdk-sqs",
  "aws-smithy-types",
- "aws-types",
  "azure_core",
  "azure_identity",
  "cloudflare",
@@ -167,7 +165,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
@@ -330,9 +327,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-config"
-version = "1.112.0"
+version = "1.113.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f778c69eb379899f4279f65668645666f31fc00b5ec0d5e10197882bb775d56c"
+checksum = "6274d889a0ee7f81416de89c15a4c9bfea4ec4e376ad9a490d25f0e8a0ab5805"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -3063,9 +3060,9 @@ dependencies = [
 
 [[package]]
 name = "rustc-hash"
-version = "2.1.2"
+version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94300abf3f1ae2e2b8ffb7b58043de3d399c73fa6f4b73826402a5c457614dbe"
+checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
 
 [[package]]
 name = "rustc_version"
