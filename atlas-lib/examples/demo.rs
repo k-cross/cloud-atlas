@@ -27,6 +27,12 @@ fn main() -> ExitCode {
     let dot = format!("{}", Dot::with_config(&builder.graph, &[]));
     fs::write(filename, dot).expect("Failed to write dot file");
 
+    // Also emit the render snapshot consumed by the atlas-render workspace,
+    // so the interactive renderer can be exercised without credentials.
+    let json = atlas_lib::atlas::export::snapshot_json(&builder.graph)
+        .expect("Failed to serialize render snapshot");
+    fs::write("multi_cloud_demo.json", json).expect("Failed to write json file");
+
     // Tally every node and edge kind present in the graph.
     let mut node_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for node in builder.graph.node_weights() {

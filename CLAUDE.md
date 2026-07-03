@@ -34,7 +34,15 @@ cargo run -- --daemon          # polls every 60 seconds
 cargo run -- --all --verbose   # include all mappings, verbose output
 ```
 
-Output is written to `atlas.dot` in the working directory (gitignored). Visualize with Gephi.
+Output is written to `atlas.dot` plus a render snapshot `atlas.json` in the working directory (both gitignored). Visualize `.dot` with Gephi.
+
+## Rendering Workspace (`atlas-render/`)
+
+Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate cargo workspace** — `atlas-render/` is `exclude`d from the root workspace and must never depend on `atlas-lib` (the cloud SDK tree doesn't build for wasm, and rendering stays decoupled from graph building). The only contract is the versioned render snapshot JSON: producer in `atlas-lib/src/atlas/export.rs`, consumer in `atlas-render/atlas-layout/src/graph.rs` — bump `SNAPSHOT_VERSION` on **both** sides when the shape changes.
+
+- `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` position buffer); `parallel` feature enables rayon natively.
+- `atlas-layout-wasm` — wasm-bindgen bridge; builds with `cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`.
+- Test with `cargo test` **inside `atlas-render/`** (the root `cargo test` does not cover it). End-to-end without credentials: `cargo run --example demo` (root) then `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`).
 
 ## Auth (reference only — not available locally)
 

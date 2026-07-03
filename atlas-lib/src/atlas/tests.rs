@@ -665,4 +665,30 @@ mod tests {
             "unknown config resource should be excluded when exclude_by_default is set"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Render snapshot export (contract with the atlas-render workspace)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_snapshot_covers_whole_fixture_graph() {
+        let builder = fixtures::build_graph();
+        let snapshot = crate::atlas::export::render_snapshot(&builder.graph);
+
+        assert_eq!(snapshot.version, crate::atlas::export::SNAPSHOT_VERSION);
+        assert_eq!(snapshot.nodes.len(), builder.graph.node_count());
+        assert_eq!(snapshot.edges.len(), builder.graph.edge_count());
+
+        let ids: std::collections::HashSet<u32> = snapshot.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids.len(), snapshot.nodes.len(), "node ids must be unique");
+        for edge in &snapshot.edges {
+            assert!(ids.contains(&edge.source) && ids.contains(&edge.target));
+        }
+
+        // Labels use Display and kinds use the enum variant name, so the
+        // rendering layer can style by resource type.
+        let json = crate::atlas::export::snapshot_json(&builder.graph).unwrap();
+        assert!(json.contains("\"kind\":\"AwsEc2Eni\""));
+        assert!(json.contains("\"version\":1"));
+    }
 }

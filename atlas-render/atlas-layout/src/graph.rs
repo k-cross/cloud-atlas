@@ -1,0 +1,238 @@
+//! The render snapshot interchange format and its layout-facing view.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt;
+
+/// Version of the snapshot contract this crate understands. Must stay in
+/// sync with `SNAPSHOT_VERSION` in `atlas-lib`'s `atlas::export` module.
+pub const SNAPSHOT_VERSION: u32 = 1;
+
+/// The full snapshot as exported by atlas-lib (`atlas.json`). Labels and
+/// kinds ride along for the rendering layer (colors, tooltips); the layout
+/// itself only consumes topology.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSnapshot {
+    pub version: u32,
+    pub nodes: Vec<SnapshotNode>,
+    pub edges: Vec<SnapshotEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotNode {
+    pub id: u32,
+    pub label: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotEdge {
+    pub source: u32,
+    pub target: u32,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GraphError {
+    UnsupportedVersion {
+        found: u32,
+        supported: u32,
+    },
+    UnknownNodeId {
+        id: u32,
+    },
+    EdgeOutOfBounds {
+        source: u32,
+        target: u32,
+        node_count: usize,
+    },
+    Json(String),
+}
+
+impl fmt::Display for GraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GraphError::UnsupportedVersion { found, supported } => write!(
+                f,
+                "unsupported snapshot version {found} (this build supports {supported})"
+            ),
+            GraphError::UnknownNodeId { id } => {
+                write!(f, "edge references node id {id} absent from the node list")
+            }
+            GraphError::EdgeOutOfBounds {
+                source,
+                target,
+                node_count,
+            } => write!(
+                f,
+                "edge ({source} -> {target}) out of bounds for {node_count} nodes"
+            ),
+            GraphError::Json(msg) => write!(f, "invalid snapshot JSON: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for GraphError {}
+
+/// Topology-only view the layout algorithm runs on. Node identity is the
+/// dense index `0..node_count`, which is also the index into the position
+/// buffer (`positions[2*i]`, `positions[2*i + 1]`).
+#[derive(Debug, Clone)]
+pub struct LayoutGraph {
+    node_count: usize,
+    edges: Vec<(u32, u32)>,
+    degrees: Vec<u32>,
+}
+
+impl LayoutGraph {
+    pub fn new(node_count: usize, edges: Vec<(u32, u32)>) -> Result<Self, GraphError> {
+        let mut degrees = vec![0u32; node_count];
+        for &(source, target) in &edges {
+            if source as usize >= node_count || target as usize >= node_count {
+                return Err(GraphError::EdgeOutOfBounds {
+                    source,
+                    target,
+                    node_count,
+                });
+            }
+            degrees[source as usize] += 1;
+            degrees[target as usize] += 1;
+        }
+        Ok(Self {
+            node_count,
+            edges,
+            degrees,
+        })
+    }
+
+    /// Snapshot node ids are remapped to dense indices in node-list order, so
+    /// the layout does not depend on producers keeping ids contiguous.
+    pub fn from_snapshot(snapshot: &GraphSnapshot) -> Result<Self, GraphError> {
+        if snapshot.version != SNAPSHOT_VERSION {
+            return Err(GraphError::UnsupportedVersion {
+                found: snapshot.version,
+                supported: SNAPSHOT_VERSION,
+            });
+        }
+        let index_of: HashMap<u32, u32> = snapshot
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id, i as u32))
+            .collect();
+        let lookup = |id: u32| {
+            index_of
+                .get(&id)
+                .copied()
+                .ok_or(GraphError::UnknownNodeId { id })
+        };
+        let edges = snapshot
+            .edges
+            .iter()
+            .map(|e| Ok((lookup(e.source)?, lookup(e.target)?)))
+            .collect::<Result<Vec<_>, GraphError>>()?;
+        Self::new(snapshot.nodes.len(), edges)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, GraphError> {
+        let snapshot: GraphSnapshot =
+            serde_json::from_str(json).map_err(|e| GraphError::Json(e.to_string()))?;
+        Self::from_snapshot(&snapshot)
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.node_count
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn edges(&self) -> &[(u32, u32)] {
+        &self.edges
+    }
+
+    pub fn degree(&self, node: usize) -> u32 {
+        self.degrees[node]
+    }
+
+    /// ForceAtlas2 mass: degree + 1. Hubs repel harder, leaves stay light.
+    pub fn mass(&self, node: usize) -> f32 {
+        (self.degrees[node] + 1) as f32
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Pins the wire contract with atlas-lib's exporter. If this test breaks,
+    // the exporter changed shape and SNAPSHOT_VERSION must be bumped on both
+    // sides.
+    const SAMPLE: &str = r#"{
+        "version": 1,
+        "nodes": [
+            {"id": 0, "label": "Instance(i-1)", "kind": "AwsEc2Instance"},
+            {"id": 1, "label": "Eni(eni-1)", "kind": "AwsEc2Eni"},
+            {"id": 2, "label": "Subnet(subnet-1)", "kind": "AwsEc2Subnet"}
+        ],
+        "edges": [
+            {"source": 0, "target": 1, "kind": "HasIp"},
+            {"source": 1, "target": 2, "kind": "AttachedTo"}
+        ]
+    }"#;
+
+    #[test]
+    fn parses_snapshot_json() {
+        let graph = LayoutGraph::from_json(SAMPLE).unwrap();
+        assert_eq!(graph.node_count(), 3);
+        assert_eq!(graph.edge_count(), 2);
+        assert_eq!(graph.degree(1), 2);
+        assert_eq!(graph.mass(1), 3.0);
+    }
+
+    #[test]
+    fn remaps_sparse_node_ids() {
+        let json = r#"{
+            "version": 1,
+            "nodes": [
+                {"id": 10, "label": "a", "kind": "GenericIpAddress"},
+                {"id": 99, "label": "b", "kind": "GenericHostname"}
+            ],
+            "edges": [{"source": 99, "target": 10, "kind": "ResolvesTo"}]
+        }"#;
+        let graph = LayoutGraph::from_json(json).unwrap();
+        assert_eq!(graph.node_count(), 2);
+        assert_eq!(graph.edges(), &[(1, 0)]);
+    }
+
+    #[test]
+    fn rejects_unknown_edge_endpoint() {
+        let json = r#"{
+            "version": 1,
+            "nodes": [{"id": 0, "label": "a", "kind": "GenericIpAddress"}],
+            "edges": [{"source": 0, "target": 5, "kind": "RoutesTo"}]
+        }"#;
+        assert_eq!(
+            LayoutGraph::from_json(json).unwrap_err(),
+            GraphError::UnknownNodeId { id: 5 }
+        );
+    }
+
+    #[test]
+    fn rejects_future_version() {
+        let json = r#"{"version": 2, "nodes": [], "edges": []}"#;
+        assert!(matches!(
+            LayoutGraph::from_json(json).unwrap_err(),
+            GraphError::UnsupportedVersion { found: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_edge() {
+        assert!(matches!(
+            LayoutGraph::new(2, vec![(0, 2)]).unwrap_err(),
+            GraphError::EdgeOutOfBounds { .. }
+        ));
+    }
+}

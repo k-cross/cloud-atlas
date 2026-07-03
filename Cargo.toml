@@ -5,3 +5,10 @@ members = [
   "atlas-lib",
   "atlas-cli",
 ]
+
+# The rendering stack is its own workspace: it must never pull in the cloud
+# SDK dependency tree, and it builds for wasm32-unknown-unknown with its own
+# profile. The only link between the two is the render snapshot JSON.
+exclude = [
+  "atlas-render",
+]

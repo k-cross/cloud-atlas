@@ -106,7 +106,9 @@ impl AtlasEngine {
     async fn export_graph(&self) -> Result<(), Box<dyn std::error::Error>> {
         let s = format!("{}", Dot::with_config(&self.builder.graph, &[]));
         tokio::fs::write("atlas.dot", s).await?;
-        println!("Graph updated successfully at atlas.dot");
+        let json = crate::atlas::export::snapshot_json(&self.builder.graph)?;
+        tokio::fs::write("atlas.json", json).await?;
+        println!("Graph updated successfully at atlas.dot (render snapshot: atlas.json)");
         Ok(())
     }
 }

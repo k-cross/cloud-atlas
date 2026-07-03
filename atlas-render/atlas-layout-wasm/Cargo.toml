@@ -1,0 +1,15 @@
+[package]
+name = "atlas-layout-wasm"
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/k-cross/cloud-atlas"
+license = "MPL2"
+description = "wasm-bindgen bridge exposing the atlas-layout engine to JavaScript."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+atlas-layout = { path = "../atlas-layout" }
+js-sys = "0.3"
+wasm-bindgen = "0.2"

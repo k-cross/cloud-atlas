@@ -3,3 +3,5 @@ target
 atlas.dot
 references
 *.dot
+atlas.json
+multi_cloud_demo.json
