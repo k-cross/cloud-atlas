@@ -1,0 +1,24 @@
+{
+  "name": "atlas-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wasm": "wasm-pack build ../atlas-layout-wasm --target web --out-dir ../atlas-web/pkg",
+    "dev": "bun serve.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./test",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "graphology": "^0.26.0",
+    "sigma": "^3.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/bun": "^1.2.0",
+    "wasm-pack": "^0.13.1"
+  },
+  "trustedDependencies": [
+    "wasm-pack"
+  ]
+}

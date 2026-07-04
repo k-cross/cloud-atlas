@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cloud-atlas</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1216;
+        --panel: #171c23e6;
+        --text: #cfd6e4;
+        --muted: #8b93a1;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #graph {
+        position: absolute;
+        inset: 0;
+      }
+      #panel {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 1;
+        max-width: 280px;
+        padding: 12px 14px;
+        background: var(--panel);
+        border: 1px solid #2a313c;
+        border-radius: 8px;
+        backdrop-filter: blur(4px);
+      }
+      #panel h1 {
+        margin: 0 0 4px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      #status {
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      #legend {
+        display: grid;
+        gap: 3px;
+        margin-bottom: 10px;
+      }
+      .swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 6px;
+        border-radius: 50%;
+        vertical-align: -1px;
+      }
+      .count {
+        color: var(--muted);
+      }
+      button {
+        padding: 4px 10px;
+        background: #222a35;
+        color: var(--text);
+        border: 1px solid #37404d;
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #2b3543;
+      }
+      #error {
+        position: absolute;
+        inset: 0;
+        z-index: 2;
+        display: none;
+        place-content: center;
+        padding: 24px;
+        text-align: center;
+        white-space: pre-wrap;
+        color: #ff7a7a;
+        background: var(--bg);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="graph"></div>
+    <div id="panel">
+      <h1>cloud-atlas</h1>
+      <div id="status">loading…</div>
+      <div id="legend"></div>
+      <button id="reheat">Reheat layout</button>
+    </div>
+    <div id="error"></div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

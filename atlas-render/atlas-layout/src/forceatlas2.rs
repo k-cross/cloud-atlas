@@ -59,7 +59,13 @@ pub struct ForceAtlas2 {
     /// "swinging" — the disagreement between successive force directions.
     forces: Vec<f32>,
     prev_forces: Vec<f32>,
+    /// Per-node mass-weighted swing, cached by `integrate` so the totals pass
+    /// and the displacement pass don't each recompute it.
+    swings: Vec<f32>,
     masses: Vec<f32>,
+    /// Reused across iterations so the Barnes-Hut tree isn't reallocated every
+    /// step; empty until the first tree-based iteration.
+    tree: QuadTree,
     speed: f32,
     speed_efficiency: f32,
 }
@@ -83,7 +89,9 @@ impl ForceAtlas2 {
             positions,
             forces: vec![0.0; 2 * n],
             prev_forces: vec![0.0; 2 * n],
+            swings: vec![0.0; n],
             masses,
+            tree: QuadTree::new(),
             speed: 1.0,
             speed_efficiency: 1.0,
         }
@@ -138,11 +146,28 @@ impl ForceAtlas2 {
         let kg = self.settings.gravity;
         let strong = self.settings.strong_gravity;
         let theta = self.settings.theta;
-        let positions = &self.positions;
-        let masses = &self.masses;
+        let use_tree = self.settings.barnes_hut && n > BARNES_HUT_CUTOFF;
 
-        let tree = (self.settings.barnes_hut && n > BARNES_HUT_CUTOFF)
-            .then(|| QuadTree::build(positions, masses));
+        // Disjoint field borrows: the tree (and read-only positions/masses) are
+        // shared into the kernel while `forces` is written — in parallel under
+        // the `parallel` feature. Borrowing `tree` off `self` also lets it
+        // reuse its cell buffer across iterations instead of reallocating.
+        let ForceAtlas2 {
+            positions,
+            masses,
+            forces,
+            tree,
+            ..
+        } = self;
+        let positions: &[f32] = positions;
+        let masses: &[f32] = masses;
+
+        let tree = if use_tree {
+            tree.rebuild(positions, masses);
+            Some(&*tree)
+        } else {
+            None
+        };
 
         // Each node's force is computed independently from the shared
         // read-only positions/tree, writing only its own force slot — the
@@ -150,7 +175,7 @@ impl ForceAtlas2 {
         // (and, later, wasm threads) without locks.
         let kernel = |i: usize, force: &mut [f32]| {
             let (x, y, m) = (positions[2 * i], positions[2 * i + 1], masses[i]);
-            let (fx, fy) = match &tree {
+            let (fx, fy) = match tree {
                 Some(tree) => tree.repulsion(i as u32, x, y, m, kr, theta),
                 None => QuadTree::brute_force_repulsion(positions, masses, i, kr),
             };
@@ -168,13 +193,13 @@ impl ForceAtlas2 {
         };
 
         #[cfg(feature = "parallel")]
-        self.forces
+        forces
             .par_chunks_exact_mut(2)
             .enumerate()
             .for_each(|(i, force)| kernel(i, force));
 
         #[cfg(not(feature = "parallel"))]
-        self.forces
+        forces
             .chunks_exact_mut(2)
             .enumerate()
             .for_each(|(i, force)| kernel(i, force));
@@ -213,10 +238,13 @@ impl ForceAtlas2 {
         for i in 0..n {
             let (fx, fy) = (self.forces[2 * i], self.forces[2 * i + 1]);
             let (px, py) = (self.prev_forces[2 * i], self.prev_forces[2 * i + 1]);
-            let swing = ((fx - px).powi(2) + (fy - py).powi(2)).sqrt();
-            let traction = ((fx + px).powi(2) + (fy + py).powi(2)).sqrt() / 2.0;
-            total_swinging += self.masses[i] * swing;
-            total_traction += self.masses[i] * traction;
+            // Mass-weighted swing is reused verbatim by the displacement pass
+            // below, so cache it rather than recomputing the sqrt per node.
+            let swing = self.masses[i] * ((fx - px).powi(2) + (fy - py).powi(2)).sqrt();
+            let traction = self.masses[i] * ((fx + px).powi(2) + (fy + py).powi(2)).sqrt() / 2.0;
+            self.swings[i] = swing;
+            total_swinging += swing;
+            total_traction += traction;
         }
         total_swinging = total_swinging.max(1e-9);
         total_traction = total_traction.max(1e-9);
@@ -249,8 +277,7 @@ impl ForceAtlas2 {
 
         for i in 0..n {
             let (fx, fy) = (self.forces[2 * i], self.forces[2 * i + 1]);
-            let (px, py) = (self.prev_forces[2 * i], self.prev_forces[2 * i + 1]);
-            let swing = self.masses[i] * ((fx - px).powi(2) + (fy - py).powi(2)).sqrt();
+            let swing = self.swings[i];
             let factor = self.speed / (1.0 + (self.speed * swing).sqrt());
             self.positions[2 * i] += fx * factor;
             self.positions[2 * i + 1] += fy * factor;

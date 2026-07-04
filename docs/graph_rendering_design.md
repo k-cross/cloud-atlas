@@ -28,12 +28,12 @@ Drawing inspiration from leading operational tools (such as Netflix's Vizceral a
 
 ## 4. Phased Implementation Plan
 
-| Phase | Focus Area | Deliverable |
-| --- | --- | --- |
-| **Phase 1** | Rust WASM Bridge | Lock-free layout computation engine compiled to WASM. |
-| **Phase 2** | WebGL Render Setup | Sigma.js integration to ingest coordinate buffers and render base nodes. |
-| **Phase 3** | Contextual Data | Edge styling for error rates, node health status overlays, and metadata tooltips. |
-| **Phase 4** | Search Integration | Implementation of the Neo4j Graph RAG backend for the UI search bars. |
+| Phase | Focus Area | Deliverable | Status |
+| --- | --- | --- | --- |
+| **Phase 1** | Rust WASM Bridge | Lock-free layout computation engine compiled to WASM. | Done — `atlas-render/atlas-layout` + `atlas-layout-wasm` |
+| **Phase 2** | WebGL Render Setup | Sigma.js integration to ingest coordinate buffers and render base nodes. | Done — `atlas-render/atlas-web` (bun + Sigma.js, provider-colored nodes, live physics loop) |
+| **Phase 3** | Contextual Data | Edge styling for error rates, node health status overlays, and metadata tooltips. | Upcoming |
+| **Phase 4** | Search Integration | Implementation of the Neo4j Graph RAG backend for the UI search bars. | Upcoming |
 
 ---
 

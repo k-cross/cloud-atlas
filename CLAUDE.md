@@ -42,7 +42,8 @@ Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate c
 
 - `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` position buffer); `parallel` feature enables rayon natively.
 - `atlas-layout-wasm` — wasm-bindgen bridge; builds with `cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`.
-- Test with `cargo test` **inside `atlas-render/`** (the root `cargo test` does not cover it). End-to-end without credentials: `cargo run --example demo` (root) then `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`).
+- `atlas-web` — Sigma.js WebGL frontend, a **bun** app (use bun, not node/npm): `bun install && bun run wasm && bun dev` inside `atlas-render/atlas-web/` serves the snapshot at `http://localhost:4680`.
+- Test with `cargo test` **inside `atlas-render/`** (the root `cargo test` does not cover it). End-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (in `atlas-render/atlas-web/`) to view in the browser at `http://localhost:4680`.
 
 ## Auth (reference only — not available locally)
 

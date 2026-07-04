@@ -1,8 +1,9 @@
 # atlas-render
 
-Interactive rendering stack for cloud-atlas (Phase 1 of
+Interactive rendering stack for cloud-atlas (Phases 1–2 of
 `docs/graph_rendering_design.md`): a force-directed layout engine that
-compiles to WebAssembly.
+compiles to WebAssembly, plus a Sigma.js (WebGL) web frontend that renders
+it live in the browser.
 
 This is a **separate cargo workspace** on purpose. It never depends on
 `atlas-lib` — the cloud SDK dependency tree does not build for
@@ -35,20 +36,47 @@ bump both together when the shape changes.
 - **`atlas-layout-wasm`** — thin `wasm-bindgen` bridge exposing
   `LayoutEngine` to JavaScript. Positions cross the boundary as a
   `Float32Array` (zero-copy `positionsView()` or detached
-  `positionsCopy()`), ready for Sigma.js in Phase 2.
+  `positionsCopy()`), consumed by `atlas-web`.
+- **`atlas-web/`** — Sigma.js (WebGL) frontend, a bun app rather than a
+  cargo crate. Each animation frame it steps the wasm engine, copies the
+  position buffer into graphology node attributes, and lets Sigma redraw.
+  Nodes are colored by provider (derived from the snapshot `kind` prefix)
+  and sized by degree; a panel shows live layout status, per-provider
+  counts, and a reheat button.
 
 ## Build & test
 
 ```sh
-cargo test                                            # native unit tests
+# Rust unit tests (atlas-layout, atlas-layout-wasm)
+cargo test
+
+# Check wasm compilation without the JS glue
 cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown --release
 ```
 
-For a browser-ready package (JS glue + `.d.ts`):
+The web frontend uses [bun](https://bun.sh) (`wasm-pack` is a bun dev
+dependency — no separate global install needed):
 
 ```sh
-cargo install wasm-pack
-wasm-pack build atlas-layout-wasm --target web --release
+cd atlas-web
+bun install
+bun run wasm       # wasm-pack build → atlas-web/pkg/ (JS glue + .wasm)
+bun dev            # http://localhost:4680
+```
+
+`bun dev` serves `atlas.json` from the repo root if present, else
+`multi_cloud_demo.json` (generate it with `cargo run --example demo` in the
+root workspace); pass an explicit path with `bun serve.ts path/to.json`.
+
+End-to-end without credentials:
+
+```sh
+# 1. Generate the demo snapshot (repo root)
+cargo run --example demo
+# 2. Verify layout engine natively
+cargo run --example layout_demo -- ../multi_cloud_demo.json   # inside atlas-render/
+# 3. View in browser
+cd atlas-web && bun dev
 ```
 
 ## Concurrency
@@ -63,10 +91,12 @@ cargo test -p atlas-layout --features parallel
 
 Browser wasm runs the same code single-threaded for now: wasm threads
 require SharedArrayBuffer (COOP/COEP headers) and an atomics-enabled build
-(e.g. `wasm-bindgen-rayon`). That is deliberately out of scope for Phase 1;
-the kernel shape already fits it.
+(e.g. `wasm-bindgen-rayon`). That is deliberately deferred; the kernel
+shape already fits it.
 
-## Driving it from JS (Phase 2 preview)
+## Driving it from JS
+
+`atlas-web/src/main.ts` is the real integration; the shape of the loop:
 
 ```js
 import init, { LayoutEngine } from "./pkg/atlas_layout_wasm.js";

@@ -52,11 +52,29 @@ pub struct QuadTree {
     cells: Vec<Cell>,
 }
 
+impl Default for QuadTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QuadTree {
-    /// `positions` is interleaved `[x0, y0, x1, y1, ..]`; `masses` is per node.
-    pub fn build(positions: &[f32], masses: &[f32]) -> Self {
+    /// An empty tree that owns no allocation yet. Fill it with `rebuild`.
+    pub fn new() -> Self {
+        Self { cells: Vec::new() }
+    }
+
+    /// Rebuild in place for a new frame's positions, reusing the existing cell
+    /// allocation. The layout builds a tree every physics step, so retaining
+    /// the buffer across frames turns a per-step allocation of ~2N cells into
+    /// a `clear` + refill that reuses capacity after the first iteration.
+    pub fn rebuild(&mut self, positions: &[f32], masses: &[f32]) {
         let n = masses.len();
         debug_assert_eq!(positions.len(), 2 * n);
+        self.cells.clear();
+        if n == 0 {
+            return;
+        }
 
         // Bounding square, slightly inflated so no point sits exactly on the
         // border and child selection stays unambiguous.
@@ -72,13 +90,18 @@ impl QuadTree {
         let cy = (min_y + max_y) / 2.0;
         let half = ((max_x - min_x).max(max_y - min_y) / 2.0) * 1.01 + 1e-3;
 
-        let mut tree = Self {
-            cells: vec![Cell::empty(cx, cy, half)],
-        };
+        self.cells.push(Cell::empty(cx, cy, half));
         for i in 0..n {
-            tree.insert(i as u32, positions[2 * i], positions[2 * i + 1], masses[i]);
+            self.insert(i as u32, positions[2 * i], positions[2 * i + 1], masses[i]);
         }
-        tree.finalize();
+        self.finalize();
+    }
+
+    /// Convenience constructor: an owned tree built from a single frame.
+    /// `positions` is interleaved `[x0, y0, x1, y1, ..]`; `masses` is per node.
+    pub fn build(positions: &[f32], masses: &[f32]) -> Self {
+        let mut tree = Self::new();
+        tree.rebuild(positions, masses);
         tree
     }
 
@@ -169,6 +192,10 @@ impl QuadTree {
     /// the Barnes-Hut opening criterion (region size / distance); regions
     /// smaller than that are treated as a single super-node.
     pub fn repulsion(&self, idx: u32, x: f32, y: f32, m: f32, kr: f32, theta: f32) -> (f32, f32) {
+        // An empty tree (0-node rebuild) has no root cell to seed the walk.
+        if self.cells.is_empty() {
+            return (0.0, 0.0);
+        }
         let theta_sq = theta * theta;
         let (mut fx, mut fy) = (0.0f32, 0.0f32);
         // Worst case: 3 unexpanded siblings per level plus the current path.
@@ -336,6 +363,31 @@ mod tests {
             );
             let (ex, ey) = QuadTree::brute_force_repulsion(&positions, &masses, i, 1.0);
             assert!((ax - ex).abs() < 1e-2 && (ay - ey).abs() < 1e-2);
+        }
+    }
+
+    #[test]
+    fn empty_tree_repulsion_is_zero_not_a_panic() {
+        // rebuild() over a 0-node frame leaves no root cell; querying it must
+        // return zero force rather than indexing into an empty buffer.
+        let mut tree = QuadTree::new();
+        tree.rebuild(&[], &[]);
+        assert_eq!(tree.repulsion(0, 0.0, 0.0, 1.0, 1.0, 0.5), (0.0, 0.0));
+    }
+
+    #[test]
+    fn rebuild_reuses_buffer_and_matches_fresh_build() {
+        // Reusing the allocation across frames must be indistinguishable from a
+        // fresh build: same cells, so same repulsion, just no reallocation.
+        let (p1, m1) = scatter(300);
+        let (p2, m2) = scatter(300);
+        let mut reused = QuadTree::build(&p1, &m1);
+        reused.rebuild(&p2, &m2); // second frame reuses the buffer
+        let fresh = QuadTree::build(&p2, &m2);
+        for i in 0..m2.len() {
+            let (rx, ry) = reused.repulsion(i as u32, p2[2 * i], p2[2 * i + 1], m2[i], 1.0, 0.5);
+            let (fx, fy) = fresh.repulsion(i as u32, p2[2 * i], p2[2 * i + 1], m2[i], 1.0, 0.5);
+            assert_eq!((rx, ry), (fx, fy), "node {i} diverged after reuse");
         }
     }
 
