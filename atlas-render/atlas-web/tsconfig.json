@@ -1,13 +1,23 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "allowJs": true,
-    "strict": true,
-    "noEmit": true,
-    "skipLibCheck": true,
-    "types": ["bun"]
-  },
-  "include": ["src", "serve.ts", "env.d.ts", "test"]
+	"extends": "./.svelte-kit/tsconfig.json",
+	"compilerOptions": {
+		"rewriteRelativeImportExtensions": true,
+		"allowJs": true,
+		"checkJs": true,
+		"esModuleInterop": true,
+		"forceConsistentCasingInFileNames": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"sourceMap": true,
+		"strict": true,
+		"moduleResolution": "bundler"
+	},
+	// Bun unit tests (`src/lib/*.test.ts`) use the `bun:test` runtime and are
+	// validated by `bun run test:unit` + Biome, not svelte-check.
+	"exclude": ["node_modules/**", "src/**/*.test.ts"]
+	// Path aliases are handled by https://svelte.dev/docs/kit/configuration#alias
+	// except $lib which is handled by https://svelte.dev/docs/kit/configuration#files
+	//
+	// To make changes to top-level options such as include and exclude, we recommend extending
+	// the generated config; see https://svelte.dev/docs/kit/configuration#typescript
 }

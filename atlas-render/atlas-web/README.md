@@ -1,79 +1,63 @@
 # atlas-web
 
-Sigma.js (WebGL) frontend for the render snapshot, fed by the wasm layout
-engine. See `../../docs/graph_rendering_design.md`.
+The web frontend for Cloud Atlas. This is a SvelteKit Single Page Application (SPA) that renders the live digital twin cloud environment graph using WebGL.
 
-## Develop
+## Architecture
 
-One command for the whole stack (wasm + live server + this frontend), from the
-repo root:
+- **SvelteKit**: Manages the application structure, routing, and sleek UI overlay. (Server-Side Rendering is intentionally disabled since the core visualization requires browser-native WebGL contexts).
+- **Sigma.js**: Renders the large-scale property graph dynamically using WebGL.
+- **atlas-layout-wasm**: A WebAssembly port of the backend's ForceAtlas2 physics layout engine. Computes complex node forces directly in the browser for high performance.
+- **WebSocket**: Connects to `atlas-server` to ingest continuous live snapshots and incremental graph patches from the cloud environment.
 
-```bash
-cargo xtask dev --demo    # credential-free; Ctrl-C stops everything
+## Development
+
+The frontend is tightly integrated with the workspace's `xtask` orchestrator.
+
+**Run the development stack:**
+```sh
+cargo xtask dev --demo
 ```
+This command automatically:
+1. Compiles the Rust WebAssembly layout engine.
+2. Boots the SvelteKit development server (`bun run dev`).
+3. Boots the live `atlas-server` backend.
 
-Or run just this app by hand:
-
-```bash
+**Run the frontend independently:**
+If you need to isolate the frontend development process:
+```sh
+# Install dependencies
 bun install
-bun run wasm      # build pkg/ from atlas-layout-wasm
-bun dev           # serve at http://localhost:4680
+
+# Build the WebAssembly engine
+bun run wasm
+
+# Run SvelteKit in dev mode
+bun run dev
 ```
 
-## Tests
+## Testing
 
-Two layers guard against regressions:
+Two layers:
 
-### Unit (`bun test`) — fast, no build needed
+- **Unit** (`bun run test:unit`) — pure logic in `src/lib/*.test.ts` (Bun test runner, no DOM): snapshot→graphology translation, incremental `applyPatch`, `snapshotFromGraph` round-trip, provider bucketing, degree sizing.
+- **End-to-end** (`bun run test:e2e`) — Playwright/Chromium against the real pipeline (SvelteKit + wasm layout + Sigma/WebGL), both data paths: `?static` (a fixture `global-setup` writes) and live over WebSocket against `atlas-server --demo`. Covers node/edge counts, the WebGL canvas, the legend, layout settling, reheat, the snapshot-version-mismatch overlay, the zero-width-container guard, the **settled-graph pixel-stability** (shake) regression, live patch application, and **warm-start node pinning**.
 
-Pure logic with no DOM or wasm dependency:
-
-- `test/style.test.ts` — provider bucketing, color maps, degree→size scaling.
-- `test/graph.test.ts` — snapshot/patch → graphology translation (`src/graph.ts`):
-  stable-key node addressing, degree-based sizing, multigraph edge preservation,
-  incremental `applyPatch` (add/remove, idempotent replay, out-of-order guard),
-  and the `snapshotFromGraph` round-trip the layout engine is re-fed from.
-
-```bash
-bun run test      # == bun test ./test
-bun test          # also fine — see note
+```sh
+bun run test:unit   # fast, no build
+bun run test:e2e    # global-setup builds wasm + snapshot fixture, then two webServers
+bun run test        # bun run wasm && playwright test
 ```
 
-> `bunfig.toml` pins the test root to `./test`, so a bare `bun test` won't try
-> to run the Playwright `*.spec.ts` files under `e2e/` (which use a different
-> runner and error out under bun's). Playwright discovers `e2e/` via its own
-> `testDir` and is unaffected.
+Both layers run in the workspace gate (`cargo xtask test`).
 
-### End-to-end (`playwright test`) — full render pipeline
+## Formatting & Linting
 
-`e2e/render.spec.ts` runs headless Chromium against two `webServer`s Playwright
-boots for it:
+[Biome](https://biomejs.dev) is the single tool for formatting and linting JS/TS/JSON/CSS (preferred over Prettier/ESLint). `.svelte` files are owned by the Svelte tooling (`bun run check` / the Svelte VS Code extension), since Biome only sees a `.svelte` file's `<script>` in isolation.
 
-- **Static** — `serve.ts` hosts the credential-free Globex demo snapshot; the
-  app loads it with `?static` (one HTTP fetch, no server) for deterministic
-  render assertions: node/edge counts, the WebGL canvas, the provider legend,
-  layout settling, the reheat path (wasm engine swap), and the
-  snapshot-version-mismatch error overlay.
-- **Live** — `atlas-server --demo` pushes a snapshot then churning patches over
-  WebSocket; the app connects by default and the tests assert it renders the
-  pushed snapshot and applies the live patches (node count changes as the demo
-  sentinel flips).
-
-**Prerequisites** (the Playwright `webServer`s won't start without them):
-
-```bash
-bun run wasm                              # pkg/ built (rebuild after any SNAPSHOT_VERSION bump)
-cargo run --example demo                  # (repo root) writes multi_cloud_demo.json
-bunx playwright install chromium          # one-time browser download
+```sh
+bun run format     # biome format --write .
+bun run lint       # biome check .            (format + lint + import sorting; no writes)
+bun run lint:fix   # biome check --write .    (apply safe fixes)
 ```
 
-The live server is launched via `cargo run -p atlas-server` from the config, so
-the root workspace must build. Then:
-
-```bash
-bun run test:e2e                          # == playwright test
-```
-
-Static assets serve on port 4680 (`E2E_PORT`) and the live server on 4681
-(`E2E_SERVER_PORT`, the app's default WebSocket target), so neither collides
-with a `bun dev` on 4680 if you reuse it.
+`cargo xtask test` runs `bun run lint` as part of the gate, and `.vscode/` sets Biome as the default formatter with format-on-save.

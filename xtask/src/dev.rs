@@ -92,12 +92,12 @@ pub fn dev(opts: DevOpts) -> Result<(), String> {
     }
 
     println!(
-        "\n▶ bun serve.ts (web on http://localhost:{})",
+        "\n▶ bun run dev (web on http://localhost:{})",
         opts.web_port
     );
     let web = spawn_prefixed(
         Command::new("bun")
-            .arg("serve.ts")
+            .args(["run", "dev"])
             .env("PORT", opts.web_port.to_string())
             .current_dir(root.join("atlas-render/atlas-web")),
         "web",

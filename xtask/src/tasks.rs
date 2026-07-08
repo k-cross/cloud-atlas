@@ -60,7 +60,7 @@ fn newest_mtime(path: &Path) -> Option<SystemTime> {
 /// engine the browser loads.
 pub fn ensure_wasm(force: bool) -> Result<(), String> {
     let root = repo_root();
-    let artifact = web_dir().join("pkg/atlas_layout_wasm_bg.wasm");
+    let artifact = web_dir().join("static/pkg/atlas_layout_wasm_bg.wasm");
 
     let stale = force || !artifact.exists() || {
         let built = artifact.metadata().and_then(|m| m.modified()).ok();
@@ -113,8 +113,11 @@ pub fn test(e2e: bool) -> Result<(), String> {
     let root = repo_root();
     run(&root, "cargo", &["test", "--workspace"])?;
     run(&render_dir(), "cargo", &["test"])?;
-    run(&web_dir(), "bun", &["test", "./test"])?;
-    run(&web_dir(), "bun", &["run", "typecheck"])?;
+    // Biome (format + lint) for JS/TS/JSON/CSS, svelte-check for types/.svelte,
+    // then the frontend unit tests (pure graph/style logic).
+    run(&web_dir(), "bun", &["run", "lint"])?;
+    run(&web_dir(), "bun", &["run", "check"])?;
+    run(&web_dir(), "bun", &["run", "test:unit"])?;
     if e2e {
         // Playwright drives the real wasm + demo snapshot; make sure both exist
         // and are fresh before spending browser time.

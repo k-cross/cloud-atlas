@@ -1,0 +1,22 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
+	"vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+	"files": {
+		"includes": ["**", "!**/static/pkg", "!**/test-results", "!**/*.svelte"]
+	},
+	"formatter": { "enabled": true, "indentStyle": "tab", "lineWidth": 100 },
+	"assist": {
+		"enabled": true,
+		"actions": { "source": { "organizeImports": "on" } }
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"style": {
+				"noNonNullAssertion": "off"
+			}
+		}
+	},
+	"javascript": { "formatter": { "quoteStyle": "double" } }
+}
