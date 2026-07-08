@@ -1,9 +1,12 @@
 // Phase 2 of docs/graph_rendering_design.md, now fed live: the frontend opens
 // a WebSocket to atlas-server, renders the initial snapshot, and applies the
-// incremental patches the server pushes as the graph changes. The wasm layout
-// engine (Phase 1) still owns the physics; on every topology change we hand it
-// the updated graph and let it re-converge. Falls back to a static
-// `/snapshot.json` fetch when no server is reachable (bun `serve.ts`).
+// incremental patches the server pushes as the graph changes. Falls back to a
+// static `/snapshot.json` fetch when no server is reachable (bun `serve.ts`).
+//
+// The wasm layout engine (Phase 1) settles each layout *off-screen*; only the
+// converged result is revealed (with a short tween under a pinned coordinate
+// box). Streaming the engine's raw per-iteration positions into Sigma — plus
+// Sigma re-fitting the view on every change — was what made the graph shake.
 
 import Graph from "graphology";
 import Sigma from "sigma";
@@ -18,13 +21,19 @@ import {
 } from "./graph";
 import { PROVIDER_COLORS, type Provider, providerOf } from "./style";
 
-// Physics iterations per animation frame: the budget that keeps a frame
-// under 16ms on large graphs while still converging in a few seconds.
-const STEPS_PER_FRAME = 3;
-
-// The engine's adaptive speed decays as the layout converges; below this
-// the motion is invisible and we stop burning CPU.
-const SETTLED_SPEED = 0.01;
+// The layout is settled *off-screen* — the engine's raw per-iteration churn is
+// never streamed into Sigma (that churn, plus Sigma re-normalizing the view on
+// every position change, was the shaking). Only the final settled layout is
+// revealed, via a short eased tween, under a pinned coordinate box.
+//
+// Settling is time-budgeted per frame so a large graph never blocks the main
+// thread; the engine's adaptive speed tells us when it has converged.
+const SETTLE_BUDGET_MS = 10; // work per frame while settling
+const SETTLE_STEP = 20; // engine iterations per inner step
+const SETTLE_MAX_ITERS = 3000; // safety cap for pathological graphs
+const SETTLED_SPEED = 0.01; // engine speed below which we call it settled
+const REVEAL_MS = 700; // eased reveal (tween to the settled layout) duration
+const BBOX_PADDING = 0.08; // fraction of the extent added around the layout
 
 const statusEl = document.getElementById("status")!;
 const legendEl = document.getElementById("legend")!;
@@ -117,76 +126,152 @@ async function main() {
 
   let engine: LayoutEngine | null = null;
   let iterations = 0;
-  let running = false;
+  let phase = "loading"; // loading | laying out | settled
   let connection = "connecting";
-
-  function syncPositions() {
-    if (!engine) return;
-    // Re-acquire the view every frame: wasm memory growth invalidates it.
-    const positions = engine.positionsView();
-    let i = 0;
-    graph.updateEachNodeAttributes(
-      (_node, attrs) => {
-        attrs.x = positions[2 * i];
-        attrs.y = positions[2 * i + 1];
-        i += 1;
-        return attrs;
-      },
-      { attributes: ["x", "y"] },
-    );
-  }
+  let anim = 0; // in-flight rAF id (settle or reveal), cancellable
+  let bboxPinned = false; // coordinate box fixed after the first cold layout
 
   function updateStatus() {
-    const state = running ? "layout running" : "settled";
     statusEl.textContent =
       `${graph.order} nodes · ${graph.size} edges · ` +
-      `${iterations} iterations · ${state} · ${connection}`;
+      `${iterations} iterations · ${phase} · ${connection}`;
   }
 
-  function frame() {
-    if (!engine) return;
-    engine.step(STEPS_PER_FRAME);
-    iterations += STEPS_PER_FRAME;
-    syncPositions();
-    running = engine.speed() >= SETTLED_SPEED;
-    updateStatus();
-    if (running) requestAnimationFrame(frame);
-  }
+  const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
 
-  function start() {
-    if (!running) {
-      running = true;
-      requestAnimationFrame(frame);
+  // Pin Sigma's coordinate normalization to a fixed box. Sigma otherwise
+  // recomputes the graph extent on every position change and re-fits the whole
+  // view each frame, so any node moving makes the entire graph rescale/recenter
+  // — the shaking, amplified under zoom. A fixed box makes screen positions a
+  // stable function of graph coordinates.
+  function pinBBox(positions: Float32Array) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let i = 0; i < positions.length; i += 2) {
+      minX = Math.min(minX, positions[i]);
+      maxX = Math.max(maxX, positions[i]);
+      minY = Math.min(minY, positions[i + 1]);
+      maxY = Math.max(maxY, positions[i + 1]);
     }
+    const padX = (maxX - minX) * BBOX_PADDING || 1;
+    const padY = (maxY - minY) * BBOX_PADDING || 1;
+    renderer.setCustomBBox({
+      x: [minX - padX, maxX + padX],
+      y: [minY - padY, maxY + padY],
+    });
+    renderer.refresh();
   }
 
-  // (Re)build the layout engine from the current graph. The engine has no
-  // incremental API, so any topology change re-runs the layout from the
-  // deterministic initial placement — same mechanism as the reheat button.
-  function restartEngine() {
+  // Current graph coordinates, in graphology iteration order (== engine order).
+  function currentPositions(): { x: number[]; y: number[] } {
+    const x: number[] = [];
+    const y: number[] = [];
+    graph.forEachNode((_k, a) => {
+      x.push(a.x as number);
+      y.push(a.y as number);
+    });
+    return { x, y };
+  }
+
+  // Ease every node from its current position to the settled `target`, holding
+  // the pinned box fixed so the tween is pure motion with no re-normalization.
+  function reveal(start: { x: number[]; y: number[] }, target: Float32Array) {
+    if (anim) cancelAnimationFrame(anim);
+    const t0 = performance.now();
+    const tick = () => {
+      const e = easeOutCubic(Math.min(1, (performance.now() - t0) / REVEAL_MS));
+      let i = 0;
+      graph.updateEachNodeAttributes(
+        (_k, a) => {
+          a.x = start.x[i] + (target[2 * i] - start.x[i]) * e;
+          a.y = start.y[i] + (target[2 * i + 1] - start.y[i]) * e;
+          i += 1;
+          return a;
+        },
+        { attributes: ["x", "y"] },
+      );
+      if (e < 1) {
+        anim = requestAnimationFrame(tick);
+      } else {
+        phase = "settled";
+        anim = 0;
+      }
+      updateStatus();
+    };
+    anim = requestAnimationFrame(tick);
+  }
+
+  // Rebuild the engine from the current graph, settle it off-screen, then
+  // reveal the result. `warm` seeds the engine with current positions (via the
+  // snapshot) so a live patch continues the layout locally; cold (initial load,
+  // reheat) lays out afresh, re-pins the box, and refits the camera.
+  function layoutAndReveal(warm: boolean) {
+    if (anim) cancelAnimationFrame(anim);
     engine?.free();
-    engine = new LayoutEngine(JSON.stringify(snapshotFromGraph(graph)));
-    iterations = 0;
-    syncPositions();
-    start();
+    engine = new LayoutEngine(JSON.stringify(snapshotFromGraph(graph, warm)));
+    if (!warm) iterations = 0;
+
+    const start = currentPositions();
+    phase = "laying out";
+    let settleIters = 0;
+
+    const settle = () => {
+      const budgetStart = performance.now();
+      // Run as many steps as fit in the frame budget — fast graphs settle in a
+      // frame or two; big graphs stay responsive.
+      while (
+        performance.now() - budgetStart < SETTLE_BUDGET_MS &&
+        engine!.speed() >= SETTLED_SPEED &&
+        settleIters < SETTLE_MAX_ITERS
+      ) {
+        engine!.step(SETTLE_STEP);
+        settleIters += SETTLE_STEP;
+        iterations += SETTLE_STEP;
+      }
+      updateStatus();
+      if (engine!.speed() >= SETTLED_SPEED && settleIters < SETTLE_MAX_ITERS) {
+        anim = requestAnimationFrame(settle);
+        return;
+      }
+      const target = engine!.positionsCopy(); // detached from wasm memory
+      if (!warm || !bboxPinned) {
+        pinBBox(target);
+        bboxPinned = true;
+        renderer.getCamera().animatedReset(); // fit the freshly pinned box
+      }
+      reveal(start, target);
+    };
+    anim = requestAnimationFrame(settle);
   }
 
   function loadSnapshot(snapshot: Snapshot) {
     checkVersion(snapshot.version);
     graph.clear();
     graph.import(buildGraph(snapshot).export());
-    restartEngine();
+    layoutAndReveal(false);
     renderLegend(graph);
   }
 
   function onPatch(patch: GraphPatch) {
     checkVersion(patch.version);
     applyPatch(graph, patch);
-    restartEngine();
+    // Warm: keep existing nodes where they are and settle the change locally,
+    // so a live update nudges the graph instead of relaying it out.
+    layoutAndReveal(true);
     renderLegend(graph);
   }
 
-  document.getElementById("reheat")!.addEventListener("click", restartEngine);
+  // Reheat is a deliberate cold re-layout of the whole graph.
+  document
+    .getElementById("reheat")!
+    .addEventListener("click", () => layoutAndReveal(false));
+
+  // Debug/introspection handle: the live graphology graph and Sigma renderer,
+  // handy from the console (e.g. reading node positions) and used by the e2e
+  // tests.
+  (window as unknown as { atlas: unknown }).atlas = { graph, renderer };
 
   const handlers: LiveHandlers = {
     onSnapshot: loadSnapshot,

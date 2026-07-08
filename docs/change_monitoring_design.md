@@ -275,5 +275,3 @@ pushes deltas. This is the server the user asked about.
 - **State on restart** — the server is a live in-memory twin; on restart it
   rehydrates via one full Tier 3 scan before opening the stream. Do we also need
   durable persistence, or is re-scan-on-boot enough?
-</content>
-</invoke>

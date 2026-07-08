@@ -95,9 +95,9 @@ test.describe("cloud-atlas render pipeline (static)", () => {
     });
 
     // Reheat frees the wasm engine and builds a fresh one — a path that has to
-    // survive wasm memory reuse. It must run again and settle a second time.
+    // survive wasm memory reuse. It must lay out again and settle a second time.
     await page.locator("#reheat").click();
-    await expect(page.locator(statusLocator)).toContainText("layout running", {
+    await expect(page.locator(statusLocator)).toContainText("laying out", {
       timeout: 5_000,
     });
     await expect(page.locator(statusLocator)).toContainText("settled", {
@@ -168,6 +168,56 @@ test.describe("cloud-atlas render pipeline (static)", () => {
     await expect(page.locator(statusLocator)).toContainText("nodes ·");
     expect(errors).toEqual([]);
   });
+
+  test("settled graph is rock-still — no per-frame render churn", async ({
+    page,
+  }) => {
+    // The core "shaking" regression. Once settled, with a static camera, the
+    // rendered image must not change frame-to-frame: positions are static and
+    // the coordinate box is pinned, so Sigma does not re-normalize/re-fit.
+    await page.goto(STATIC);
+    await expect(page.locator(statusLocator)).toContainText("settled", {
+      timeout: 30_000,
+    });
+    await page.waitForTimeout(300);
+
+    const pixelDiff: number = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          const host = document.getElementById("graph")!;
+          const canvases = Array.from(
+            host.querySelectorAll("canvas"),
+          ) as HTMLCanvasElement[];
+          const W = 300;
+          const H = 220;
+          const off = document.createElement("canvas");
+          off.width = W;
+          off.height = H;
+          const ctx = off.getContext("2d")!;
+          const grab = (): Uint8ClampedArray => {
+            ctx.clearRect(0, 0, W, H);
+            for (const c of canvases) ctx.drawImage(c, 0, 0, W, H);
+            return ctx.getImageData(0, 0, W, H).data;
+          };
+          let prev = grab();
+          let worst = 0;
+          let f = 0;
+          const tick = () => {
+            const cur = grab();
+            let sum = 0;
+            for (let i = 0; i < cur.length; i += 4) sum += Math.abs(cur[i] - prev[i]);
+            worst = Math.max(worst, sum / (W * H));
+            prev = cur;
+            if (++f < 20) requestAnimationFrame(tick);
+            else resolve(worst);
+          };
+          requestAnimationFrame(tick);
+        }),
+    );
+
+    // Perfectly still is 0; allow a hair for AA/rounding noise.
+    expect(pixelDiff).toBeLessThan(0.5);
+  });
 });
 
 test.describe("cloud-atlas live backend (WebSocket)", () => {
@@ -204,5 +254,65 @@ test.describe("cloud-atlas live backend (WebSocket)", () => {
     await expect
       .poll(() => nodeCount(page), { timeout: 20_000 })
       .not.toBe(initial);
+  });
+
+  test("patches pin existing nodes — the cloud does not move at all", async ({
+    page,
+  }) => {
+    // Regression for the "cycling iterations" shake: a live patch pins every
+    // pre-existing node in the engine and lays out only the newcomers, so
+    // persistent nodes must not move (beyond f32 round-tripping noise).
+    await page.goto("/");
+    await page.waitForFunction(
+      () =>
+        ((window as unknown as { atlas?: { graph?: { order: number } } }).atlas
+          ?.graph?.order ?? 0) > 0,
+      undefined,
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(3500); // let the initial layout settle
+
+    const maxMove: number = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          const graph = (window as unknown as { atlas: { graph: any } }).atlas
+            .graph;
+          const posOf = (): Record<string, [number, number]> => {
+            const m: Record<string, [number, number]> = {};
+            graph.forEachNode((k: string, a: { x: number; y: number }) => {
+              m[k] = [a.x, a.y];
+            });
+            return m;
+          };
+          const before = posOf();
+          const startOrder = graph.order;
+          const t0 = Date.now();
+          const wait = () => {
+            if (graph.order !== startOrder) {
+              setTimeout(() => {
+                const after = posOf();
+                let max = 0;
+                for (const k of Object.keys(before)) {
+                  if (after[k]) {
+                    max = Math.max(
+                      max,
+                      Math.hypot(
+                        after[k][0] - before[k][0],
+                        after[k][1] - before[k][1],
+                      ),
+                    );
+                  }
+                }
+                resolve(max);
+              }, 1500);
+            } else if (Date.now() - t0 > 12_000) resolve(Number.POSITIVE_INFINITY);
+            else setTimeout(wait, 100);
+          };
+          wait();
+        }),
+    );
+
+    // Pinned means pinned: only float32 JSON round-tripping noise is allowed.
+    expect(maxMove).toBeLessThan(0.5);
   });
 });

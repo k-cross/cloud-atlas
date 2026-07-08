@@ -63,6 +63,14 @@ pub struct ForceAtlas2 {
     /// and the displacement pass don't each recompute it.
     swings: Vec<f32>,
     masses: Vec<f32>,
+    /// Warm-started nodes are pinned: they exert forces (repulsion mass,
+    /// attraction anchors) but are never displaced, and are excluded from the
+    /// adaptive-speed totals. This is what keeps an incremental update from
+    /// re-flowing the whole layout — FA2 has no equilibrium, so re-running it
+    /// over free nodes always drifts everything; pinning makes "only the
+    /// change moves" a hard guarantee.
+    fixed: Vec<bool>,
+    free_count: usize,
     /// Reused across iterations so the Barnes-Hut tree isn't reallocated every
     /// step; empty until the first tree-based iteration.
     tree: QuadTree,
@@ -73,15 +81,20 @@ pub struct ForceAtlas2 {
 impl ForceAtlas2 {
     pub fn new(graph: LayoutGraph, settings: LayoutSettings) -> Self {
         let n = graph.node_count();
-        // Deterministic phyllotaxis spiral: evenly spread, no two nodes
-        // coincide, and identical input always yields the identical layout.
-        let mut positions = Vec::with_capacity(2 * n);
-        for i in 0..n {
-            let radius = 10.0 * (i as f32).sqrt();
-            let angle = (i as f32) * 2.399_963_2; // golden angle in radians
-            positions.push(radius * angle.cos());
-            positions.push(radius * angle.sin());
-        }
+        let positions = Self::initial_positions(&graph, n);
+
+        // A node that arrived with warm-start coordinates is pinned; only the
+        // engine-placed (fresh) nodes are free to move.
+        let warm = graph.initial_positions();
+        let fixed: Vec<bool> = if warm.len() == 2 * n {
+            (0..n)
+                .map(|i| warm[2 * i].is_finite() && warm[2 * i + 1].is_finite())
+                .collect()
+        } else {
+            vec![false; n]
+        };
+        let free_count = fixed.iter().filter(|f| !**f).count();
+
         let masses = (0..n).map(|i| graph.mass(i)).collect();
         Self {
             graph,
@@ -91,10 +104,70 @@ impl ForceAtlas2 {
             prev_forces: vec![0.0; 2 * n],
             swings: vec![0.0; n],
             masses,
+            fixed,
+            free_count,
             tree: QuadTree::new(),
-            speed: 1.0,
+            // Nothing can move ⇒ already converged; callers polling `speed()`
+            // see "settled" immediately instead of spinning to an iteration cap.
+            speed: if free_count == 0 && n > 0 { 0.0 } else { 1.0 },
             speed_efficiency: 1.0,
         }
+    }
+
+    /// A phyllotaxis-spiral point of the given index around `(cx, cy)`.
+    /// Deterministic, evenly spread, and no two indices coincide.
+    fn spiral_point(index: usize, cx: f32, cy: f32) -> (f32, f32) {
+        let radius = 10.0 * (index as f32).sqrt();
+        let angle = (index as f32) * 2.399_963_2; // golden angle in radians
+        (cx + radius * angle.cos(), cy + radius * angle.sin())
+    }
+
+    /// Starting positions: warm-start coordinates from the graph where present,
+    /// with any unplaced (`NaN`) nodes spiralled around the centroid of the
+    /// placed ones so freshly-added nodes appear inside the existing cloud
+    /// rather than flying in from the origin. With no warm-start data every
+    /// node is spiralled from the origin (the deterministic cold start).
+    fn initial_positions(graph: &LayoutGraph, n: usize) -> Vec<f32> {
+        let warm = graph.initial_positions();
+        if warm.len() != 2 * n {
+            let mut positions = Vec::with_capacity(2 * n);
+            for i in 0..n {
+                let (x, y) = Self::spiral_point(i, 0.0, 0.0);
+                positions.push(x);
+                positions.push(y);
+            }
+            return positions;
+        }
+
+        // Centroid of the already-placed nodes anchors the newcomers.
+        let (mut sx, mut sy, mut count) = (0.0f32, 0.0f32, 0usize);
+        for i in 0..n {
+            let (x, y) = (warm[2 * i], warm[2 * i + 1]);
+            if x.is_finite() && y.is_finite() {
+                sx += x;
+                sy += y;
+                count += 1;
+            }
+        }
+        let (cx, cy) = if count > 0 {
+            (sx / count as f32, sy / count as f32)
+        } else {
+            (0.0, 0.0)
+        };
+
+        let mut positions = Vec::with_capacity(2 * n);
+        for i in 0..n {
+            let (x, y) = (warm[2 * i], warm[2 * i + 1]);
+            if x.is_finite() && y.is_finite() {
+                positions.push(x);
+                positions.push(y);
+            } else {
+                let (px, py) = Self::spiral_point(i, cx, cy);
+                positions.push(px);
+                positions.push(py);
+            }
+        }
+        positions
     }
 
     pub fn graph(&self) -> &LayoutGraph {
@@ -129,7 +202,7 @@ impl ForceAtlas2 {
     /// the force buffer, then adaptive-speed integration.
     pub fn step(&mut self) {
         let n = self.graph.node_count();
-        if n == 0 {
+        if n == 0 || self.free_count == 0 {
             return;
         }
         std::mem::swap(&mut self.forces, &mut self.prev_forces);
@@ -236,6 +309,13 @@ impl ForceAtlas2 {
         let mut total_swinging = 0.0f32;
         let mut total_traction = 0.0f32;
         for i in 0..n {
+            // Pinned nodes don't move, so their (still-changing) forces must
+            // not feed the speed controller — otherwise a mostly-pinned graph
+            // never registers as converged.
+            if self.fixed[i] {
+                self.swings[i] = 0.0;
+                continue;
+            }
             let (fx, fy) = (self.forces[2 * i], self.forces[2 * i + 1]);
             let (px, py) = (self.prev_forces[2 * i], self.prev_forces[2 * i + 1]);
             // Mass-weighted swing is reused verbatim by the displacement pass
@@ -276,6 +356,9 @@ impl ForceAtlas2 {
         self.speed += (target_speed - self.speed).min(0.5 * self.speed);
 
         for i in 0..n {
+            if self.fixed[i] {
+                continue;
+            }
             let (fx, fy) = (self.forces[2 * i], self.forces[2 * i + 1]);
             let swing = self.swings[i];
             let factor = self.speed / (1.0 + (self.speed * swing).sqrt());
@@ -365,6 +448,107 @@ mod tests {
             (0.5..2.0).contains(&ratio),
             "diameters diverged: exact {exact}, barnes-hut {approx}"
         );
+    }
+
+    #[test]
+    fn warm_start_seeds_provided_positions_and_places_newcomers_nearby() {
+        use crate::graph::LayoutGraph;
+        // Two placed nodes far from the origin, one freshly-added node (no x/y).
+        let json = r#"{
+            "version": 2,
+            "nodes": [
+                {"id": 0, "label": "a", "kind": "GenericIpAddress", "x": 100.0, "y": 100.0},
+                {"id": 1, "label": "b", "kind": "GenericIpAddress", "x": 120.0, "y": 100.0},
+                {"id": 2, "label": "c", "kind": "GenericIpAddress"}
+            ],
+            "edges": [{"source": 0, "target": 2, "kind": "RoutesTo"}]
+        }"#;
+        let graph = LayoutGraph::from_json(json).unwrap();
+        let layout = ForceAtlas2::new(graph, LayoutSettings::default());
+        let p = layout.positions();
+        // Placed nodes start exactly where they were.
+        assert_eq!((p[0], p[1]), (100.0, 100.0));
+        assert_eq!((p[2], p[3]), (120.0, 100.0));
+        // The newcomer is spiralled around the centroid (~110, 100), i.e. near
+        // the existing cloud — not back at the origin.
+        assert!(
+            distance(p, 2, 0) < 60.0 && distance(p, 2, 1) < 60.0,
+            "new node landed far from the warm cluster: {:?}",
+            &p[4..6]
+        );
+    }
+
+    #[test]
+    fn warm_started_nodes_are_pinned_through_a_full_run() {
+        use crate::graph::LayoutGraph;
+        // A settled-looking cluster plus one newcomer wired into it. Running
+        // the layout must move ONLY the newcomer: pinned nodes stay
+        // bit-identical, so incremental updates can never re-flow the cloud.
+        let json = r#"{
+            "version": 2,
+            "nodes": [
+                {"id": 0, "label": "a", "kind": "GenericIpAddress", "x": 50.0, "y": 0.0},
+                {"id": 1, "label": "b", "kind": "GenericIpAddress", "x": -50.0, "y": 0.0},
+                {"id": 2, "label": "c", "kind": "GenericIpAddress", "x": 0.0, "y": 80.0},
+                {"id": 3, "label": "new", "kind": "GenericHostname"}
+            ],
+            "edges": [
+                {"source": 0, "target": 1, "kind": "RoutesTo"},
+                {"source": 0, "target": 3, "kind": "ResolvesTo"}
+            ]
+        }"#;
+        let graph = LayoutGraph::from_json(json).unwrap();
+        let mut layout = ForceAtlas2::new(graph, LayoutSettings::default());
+        let newcomer_start = (layout.positions()[6], layout.positions()[7]);
+        layout.run(300);
+        let p = layout.positions();
+        assert_eq!(
+            &p[0..6],
+            &[50.0, 0.0, -50.0, 0.0, 0.0, 80.0],
+            "pinned nodes moved"
+        );
+        assert!(
+            (p[6], p[7]) != newcomer_start,
+            "the free newcomer should have been laid out"
+        );
+        assert!(p.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn fully_pinned_graph_reports_settled_immediately() {
+        use crate::graph::LayoutGraph;
+        // A removal-only update warm-starts every surviving node — nothing can
+        // move, so the engine must present as converged without iterating.
+        let json = r#"{
+            "version": 2,
+            "nodes": [
+                {"id": 0, "label": "a", "kind": "GenericIpAddress", "x": 1.0, "y": 2.0},
+                {"id": 1, "label": "b", "kind": "GenericIpAddress", "x": 3.0, "y": 4.0}
+            ],
+            "edges": [{"source": 0, "target": 1, "kind": "RoutesTo"}]
+        }"#;
+        let graph = LayoutGraph::from_json(json).unwrap();
+        let mut layout = ForceAtlas2::new(graph, LayoutSettings::default());
+        assert_eq!(layout.speed(), 0.0);
+        layout.run(50);
+        assert_eq!(layout.positions(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn cold_start_without_positions_still_spirals_from_origin() {
+        use crate::graph::LayoutGraph;
+        // No x/y anywhere → the first node sits at the spiral origin.
+        let json = r#"{
+            "version": 2,
+            "nodes": [
+                {"id": 0, "label": "a", "kind": "GenericIpAddress"},
+                {"id": 1, "label": "b", "kind": "GenericIpAddress"}
+            ],
+            "edges": []
+        }"#;
+        let graph = LayoutGraph::from_json(json).unwrap();
+        let layout = ForceAtlas2::new(graph, LayoutSettings::default());
+        assert_eq!((layout.positions()[0], layout.positions()[1]), (0.0, 0.0));
     }
 
     #[test]

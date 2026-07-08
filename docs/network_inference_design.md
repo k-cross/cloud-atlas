@@ -9,7 +9,7 @@ Cloud Atlas aims to be a continuous, live digital twin of multi-cloud environmen
 ## 1. Cross-Cloud Connections via Universal Pivot Nodes
 We use the property graph model to organically merge disparate cloud environments by pivoting on universal identifiers.
 - **Node Types**: `Node::GenericIpAddress` and `Node::GenericHostname` act as the common language between clouds.
-- **Mapping**: For instance, Cloudflare DNS connects via `Edge::ResolvesTo -> Node::GenericIpAddress`, while an AWS EC2 Instance connects via `Edge::ConnectsTo -> Node::GenericIpAddress`. 
+- **Mapping**: For instance, Cloudflare DNS connects via `Edge::ResolvesTo -> Node::GenericIpAddress`, while an AWS EC2 Instance connects via `Edge::RoutesTo -> Node::GenericIpAddress`. 
 - **Outcome**: The graph deduplicates identical nodes, seamlessly connecting Cloudflare and AWS without any direct API-level correlation.
 
 ## 2. Inferring External Services

@@ -30,6 +30,15 @@ pub struct SnapshotNode {
     pub key: String,
     pub label: String,
     pub kind: String,
+    /// Optional warm-start position. When the frontend rebuilds the engine
+    /// after a topology patch it sends the nodes' current coordinates here;
+    /// such nodes are **pinned** (they exert forces but never move), so an
+    /// incremental update lays out only the freshly added nodes. Absent (cold
+    /// start) → the engine places the node itself and it is free to move.
+    #[serde(default)]
+    pub x: Option<f32>,
+    #[serde(default)]
+    pub y: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +105,10 @@ pub struct LayoutGraph {
     node_count: usize,
     edges: Vec<(u32, u32)>,
     degrees: Vec<u32>,
+    /// Optional warm-start coordinates, interleaved `[x0, y0, ..]` (len `2n`),
+    /// with `NaN` for nodes to be placed by the engine. Empty = cold start
+    /// (the engine places everything).
+    initial_positions: Vec<f32>,
 }
 
 impl LayoutGraph {
@@ -116,7 +129,13 @@ impl LayoutGraph {
             node_count,
             edges,
             degrees,
+            initial_positions: Vec::new(),
         })
+    }
+
+    /// Warm-start coordinates, or empty for a cold start. See the field docs.
+    pub fn initial_positions(&self) -> &[f32] {
+        &self.initial_positions
     }
 
     /// Snapshot node ids are remapped to dense indices in node-list order, so
@@ -145,7 +164,27 @@ impl LayoutGraph {
             .iter()
             .map(|e| Ok((lookup(e.source)?, lookup(e.target)?)))
             .collect::<Result<Vec<_>, GraphError>>()?;
-        Self::new(snapshot.nodes.len(), edges)
+        let mut graph = Self::new(snapshot.nodes.len(), edges)?;
+
+        // Carry warm-start coordinates through only if at least one node has a
+        // position; a fully cold snapshot leaves `initial_positions` empty so
+        // the engine spirals everything. `NaN` marks the still-to-be-placed
+        // (freshly added) nodes.
+        if snapshot
+            .nodes
+            .iter()
+            .any(|n| n.x.is_some() && n.y.is_some())
+        {
+            graph.initial_positions = snapshot
+                .nodes
+                .iter()
+                .flat_map(|n| match (n.x, n.y) {
+                    (Some(x), Some(y)) => [x, y],
+                    _ => [f32::NAN, f32::NAN],
+                })
+                .collect();
+        }
+        Ok(graph)
     }
 
     pub fn from_json(json: &str) -> Result<Self, GraphError> {

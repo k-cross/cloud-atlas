@@ -144,6 +144,23 @@ describe("applyPatch", () => {
     applyPatch(graph, patch({ added_edges: [edge("a", "missing", "Contains")] }));
     expect(graph.size).toBe(0);
   });
+
+  test("seeds new nodes at the current centroid, not the origin", () => {
+    // Warm-start relies on newcomers spawning inside the existing cloud so the
+    // layout grows them out locally instead of flinging them from (0,0).
+    const graph = buildGraph(
+      snapshot({ nodes: [node("a", "AwsEc2Vpc"), node("b", "AwsEc2Subnet")] }),
+    );
+    graph.setNodeAttribute("a", "x", 100);
+    graph.setNodeAttribute("a", "y", 40);
+    graph.setNodeAttribute("b", "x", 200);
+    graph.setNodeAttribute("b", "y", 60);
+
+    applyPatch(graph, patch({ added_nodes: [node("c", "AwsEc2Subnet")] }));
+
+    expect(graph.getNodeAttribute("c", "x")).toBeCloseTo(150); // centroid of a,b
+    expect(graph.getNodeAttribute("c", "y")).toBeCloseTo(50);
+  });
 });
 
 describe("snapshotFromGraph", () => {
@@ -162,5 +179,18 @@ describe("snapshotFromGraph", () => {
     const again = buildGraph(rebuilt);
     expect(again.order).toBe(2);
     expect(again.size).toBe(1);
+  });
+
+  test("omits positions by default and carries them for a warm start", () => {
+    const graph = buildGraph(snapshot({ nodes: [node("a", "AwsEc2Vpc")] }));
+    graph.setNodeAttribute("a", "x", 12);
+    graph.setNodeAttribute("a", "y", 34);
+
+    const cold = snapshotFromGraph(graph);
+    expect(cold.nodes[0].x).toBeUndefined();
+    expect(cold.nodes[0].y).toBeUndefined();
+
+    const warm = snapshotFromGraph(graph, true);
+    expect(warm.nodes[0]).toMatchObject({ x: 12, y: 34 });
   });
 });

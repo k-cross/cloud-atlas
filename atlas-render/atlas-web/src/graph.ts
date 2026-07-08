@@ -23,6 +23,10 @@ export interface SnapshotNode {
   key: string;
   label: string;
   kind: string;
+  // Optional warm-start coordinates (present when reserializing the live graph
+  // to re-seed the layout engine after a patch); absent on server snapshots.
+  x?: number;
+  y?: number;
 }
 
 export interface SnapshotEdge {
@@ -52,7 +56,7 @@ function edgeColor(kind: string): string {
   return EDGE_COLORS[kind] ?? DEFAULT_EDGE_COLOR;
 }
 
-function addNode(graph: Graph, node: SnapshotNode) {
+function addNode(graph: Graph, node: SnapshotNode, x = 0, y = 0) {
   // Idempotent: patch delivery is at-least-once, so re-adds must not throw.
   if (graph.hasNode(node.key)) return;
   graph.addNode(node.key, {
@@ -60,8 +64,8 @@ function addNode(graph: Graph, node: SnapshotNode) {
     kind: node.kind,
     color: PROVIDER_COLORS[providerOf(node.kind)],
     size: nodeSize(0),
-    x: 0,
-    y: 0,
+    x,
+    y,
   });
 }
 
@@ -119,8 +123,11 @@ export function applyPatch(graph: Graph, patch: GraphPatch) {
     graph.dropNode(key);
     touched.delete(key);
   }
+  // Seed newcomers at the current centroid so the warm-started layout grows
+  // them out from inside the existing cloud rather than from the origin.
+  const [cx, cy] = centroid(graph);
   for (const node of patch.added_nodes) {
-    addNode(graph, node);
+    addNode(graph, node, cx, cy);
     touched.add(node.key);
   }
   for (const edge of patch.added_edges) {
@@ -132,16 +139,47 @@ export function applyPatch(graph: Graph, patch: GraphPatch) {
   resize(graph, touched);
 }
 
+function centroid(graph: Graph): [number, number] {
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  graph.forEachNode((_k, a) => {
+    const x = a.x as number;
+    const y = a.y as number;
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      sx += x;
+      sy += y;
+      n += 1;
+    }
+  });
+  return n > 0 ? [sx / n, sy / n] : [0, 0];
+}
+
 // Serialize the current graphology state back into a snapshot the wasm layout
 // engine can consume. Dense `id` is assigned in graphology iteration order,
 // which is also the order the engine positions nodes in — keeping the position
 // buffer aligned with `updateEachNodeAttributes` in main.ts after a patch.
-export function snapshotFromGraph(graph: Graph): Snapshot {
+//
+// `withPositions` carries each node's current coordinates through as a
+// warm-start seed; the engine PINS those nodes (they exert forces but never
+// move) and lays out only the position-less newcomers. Used for patches so an
+// update can never re-flow the existing cloud; a cold (re)build omits them.
+export function snapshotFromGraph(graph: Graph, withPositions = false): Snapshot {
   const idOf = new Map<string, number>();
   const nodes: SnapshotNode[] = graph.mapNodes((key, attrs) => {
     const id = idOf.size;
     idOf.set(key, id);
-    return { id, key, label: attrs.label as string, kind: attrs.kind as string };
+    const node: SnapshotNode = {
+      id,
+      key,
+      label: attrs.label as string,
+      kind: attrs.kind as string,
+    };
+    if (withPositions) {
+      node.x = attrs.x as number;
+      node.y = attrs.y as number;
+    }
+    return node;
   });
   const edges: SnapshotEdge[] = graph.mapEdges(
     (key, attrs, source, target) => ({
