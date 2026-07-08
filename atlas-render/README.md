@@ -9,22 +9,43 @@ This is a **separate cargo workspace** on purpose. It never depends on
 `atlas-lib` — the cloud SDK dependency tree does not build for
 `wasm32-unknown-unknown` and rendering must not be coupled to graph
 building. The only contract between the two is the **render snapshot**, a
-versioned JSON document:
+versioned JSON document (plus a `GraphPatch` delta of the same node/edge
+shape, used for live incremental updates):
 
 ```json
 {
-  "version": 1,
-  "nodes": [{"id": 0, "label": "Instance(i-1)", "kind": "AwsEc2Instance"}],
-  "edges": [{"source": 0, "target": 1, "kind": "HasIp"}]
+  "version": 2,
+  "nodes": [{"id": 0, "key": "AwsEc2Instance#Instance(i-1)", "label": "Instance(i-1)", "kind": "AwsEc2Instance"}],
+  "edges": [{"source": 0, "target": 1, "key": "HasIp|...", "source_key": "...", "target_key": "...", "kind": "HasIp"}]
 }
 ```
 
-Producers: `atlas` writes `atlas.json` next to `atlas.dot` on every update
-(including each daemon poll); `cargo run --example demo` in the main
-workspace writes `multi_cloud_demo.json` from the credential-free Globex
-fixtures. The version constant is pinned on both sides (`atlas-lib`'s
-`atlas::export::SNAPSHOT_VERSION` and `atlas-layout`'s `SNAPSHOT_VERSION`) —
-bump both together when the shape changes.
+`key` (added in v2) is a stable identity derived from the typed resource, so a
+node or edge can be referenced across full-scan rebuilds — this is what lets
+`atlas-server` (below) push add/remove patches instead of re-sending the whole
+graph. Producers: `atlas` writes `atlas.json` next to `atlas.dot` on every
+update; `atlas-server` serves the live graph at `/snapshot.json` and streams
+patches over WebSocket; `cargo run --example demo` in the main workspace
+writes `multi_cloud_demo.json` from the credential-free Globex fixtures.
+
+The version constant is pinned on **three** sides — `atlas-lib`'s
+`atlas::export::SNAPSHOT_VERSION`, `atlas-layout`'s `SNAPSHOT_VERSION`, and
+`atlas-web`'s `graph.ts` — bump all three together when the shape changes,
+**and rebuild the wasm** (`bun run wasm`, or just `cargo xtask wasm`): the
+compiled layout engine bakes in the version and rejects mismatched snapshots
+at runtime.
+
+## Live backend
+
+[`atlas-server`](../atlas-server/README.md) (in the *root* cargo workspace,
+not this one — it depends on `atlas-lib`) is the long-running counterpart to
+the one-shot `atlas` CLI: it owns a persistent graph, diffs each
+reconciliation scan, and pushes `GraphPatch`es to `atlas-web` over WebSocket.
+`atlas-web` connects to it by default (`ws://<host>:4681/ws`); pass `?static`
+in the URL to force the one-shot `/snapshot.json` fetch instead (what the
+rest of this document, and the e2e static tests, exercise). The unified way
+to run server + renderer together is `cargo xtask dev --demo` from the repo
+root — see the root [`README.md`](../README.md) and `CLAUDE.md`.
 
 ## Crates
 
@@ -64,19 +85,37 @@ bun run wasm       # wasm-pack build → atlas-web/pkg/ (JS glue + .wasm)
 bun dev            # http://localhost:4680
 ```
 
-`bun dev` serves `atlas.json` from the repo root if present, else
-`multi_cloud_demo.json` (generate it with `cargo run --example demo` in the
-root workspace); pass an explicit path with `bun serve.ts path/to.json`.
+By default `bun dev` (i.e. `atlas-web`) connects live to `atlas-server` over
+WebSocket (`ws://<host>:4681/ws`) — start that first, or use `?static` to fall
+back to a one-shot fetch of `atlas.json` from the repo root (or
+`multi_cloud_demo.json` if that's absent; pass an explicit path with
+`bun serve.ts path/to.json`).
 
-End-to-end without credentials:
+Easiest end-to-end path, live and credential-free, from the repo root:
+
+```sh
+cargo xtask dev --demo
+```
+
+Or manually, live:
+
+```sh
+# 1. Live backend (repo root)
+cargo run -p atlas-server -- --demo
+# 2. Frontend, connects to it automatically
+cd atlas-render/atlas-web && bun dev
+```
+
+Or manually, static (no server):
 
 ```sh
 # 1. Generate the demo snapshot (repo root)
 cargo run --example demo
 # 2. Verify layout engine natively
 cargo run --example layout_demo -- ../multi_cloud_demo.json   # inside atlas-render/
-# 3. View in browser
+# 3. View in browser with the static fallback
 cd atlas-web && bun dev
+# then open http://localhost:4680/?static
 ```
 
 ## Concurrency

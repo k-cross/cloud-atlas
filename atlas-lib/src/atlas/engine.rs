@@ -21,9 +21,12 @@ impl AtlasEngine {
         }
     }
 
-    pub async fn update_graph(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Clear graph before update (since we don't have full graph diffing yet)
-        self.builder = GraphBuilder::new();
+    /// Fetch from every configured provider and project into a fresh
+    /// `GraphBuilder`, without mutating `self` or writing any files. This is the
+    /// reusable core: the CLI wraps it with file export, and the live server
+    /// diffs its output against the persistent graph.
+    pub async fn collect(&self) -> GraphBuilder {
+        let mut builder = GraphBuilder::new();
 
         let aws_future = async {
             if !self.settings.regions.is_empty() {
@@ -67,18 +70,26 @@ impl AtlasEngine {
             tokio::join!(aws_future, gcp_future, azure_future, cloudflare_future);
 
         if let Some(aws_provider) = aws_opt {
-            projector::build(&mut self.builder, &aws_provider, &self.settings);
+            projector::build(&mut builder, &aws_provider, &self.settings);
         }
         if let Some(gcp_provider) = gcp_opt {
-            projector::build(&mut self.builder, &gcp_provider, &self.settings);
+            projector::build(&mut builder, &gcp_provider, &self.settings);
         }
         if let Some(azure_provider) = azure_opt {
-            projector::build(&mut self.builder, &azure_provider, &self.settings);
+            projector::build(&mut builder, &azure_provider, &self.settings);
         }
         if let Some(cloudflare_provider) = cloudflare_opt {
-            projector::build(&mut self.builder, &cloudflare_provider, &self.settings);
+            projector::build(&mut builder, &cloudflare_provider, &self.settings);
         }
 
+        builder
+    }
+
+    /// Full point-in-time refresh used by the CLI: re-collect and export to
+    /// disk. Still a wipe-and-rebuild (no diffing) — the live server is the
+    /// incremental path.
+    pub async fn update_graph(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.builder = self.collect().await;
         self.export_graph().await?;
         Ok(())
     }

@@ -4,6 +4,8 @@ resolver = "2"
 members = [
   "atlas-lib",
   "atlas-cli",
+  "atlas-server",
+  "xtask",
 ]
 
 # The rendering stack is its own workspace: it must never pull in the cloud

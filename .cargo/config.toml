@@ -1,0 +1,4 @@
+# `cargo xtask …` — the repo's unified dev/build orchestration entry point.
+# See xtask/src/main.rs.
+[alias]
+xtask = "run -p xtask --"

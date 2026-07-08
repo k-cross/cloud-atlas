@@ -4,9 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-/// Version of the snapshot contract this crate understands. Must stay in
-/// sync with `SNAPSHOT_VERSION` in `atlas-lib`'s `atlas::export` module.
-pub const SNAPSHOT_VERSION: u32 = 1;
+/// Version of the snapshot contract this crate understands. Must stay in sync
+/// with `SNAPSHOT_VERSION` in `atlas-lib`'s `atlas::export` module and
+/// `atlas-web`'s `graph.ts`; a bump also requires rebuilding the wasm
+/// (`bun run wasm`) since this constant is compiled in. v2 added the stable
+/// `key` fields the live backend uses for patches; the layout itself still
+/// positions purely by dense index.
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// The full snapshot as exported by atlas-lib (`atlas.json`). Labels and
 /// kinds ride along for the rendering layer (colors, tooltips); the layout
@@ -21,6 +25,9 @@ pub struct GraphSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotNode {
     pub id: u32,
+    /// Stable identity (v2); unused by layout but part of the contract.
+    #[serde(default)]
+    pub key: String,
     pub label: String,
     pub kind: String,
 }
@@ -29,6 +36,13 @@ pub struct SnapshotNode {
 pub struct SnapshotEdge {
     pub source: u32,
     pub target: u32,
+    /// Stable identity fields (v2); unused by layout but part of the contract.
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub source_key: String,
+    #[serde(default)]
+    pub target_key: String,
     pub kind: String,
 }
 
@@ -167,18 +181,18 @@ mod tests {
     use super::*;
 
     // Pins the wire contract with atlas-lib's exporter. If this test breaks,
-    // the exporter changed shape and SNAPSHOT_VERSION must be bumped on both
-    // sides.
+    // the exporter changed shape and SNAPSHOT_VERSION must be bumped across all
+    // three consumers (export.rs, this crate, atlas-web) plus a wasm rebuild.
     const SAMPLE: &str = r#"{
-        "version": 1,
+        "version": 2,
         "nodes": [
-            {"id": 0, "label": "Instance(i-1)", "kind": "AwsEc2Instance"},
-            {"id": 1, "label": "Eni(eni-1)", "kind": "AwsEc2Eni"},
-            {"id": 2, "label": "Subnet(subnet-1)", "kind": "AwsEc2Subnet"}
+            {"id": 0, "key": "AwsEc2Instance#a", "label": "Instance(i-1)", "kind": "AwsEc2Instance"},
+            {"id": 1, "key": "AwsEc2Eni#b", "label": "Eni(eni-1)", "kind": "AwsEc2Eni"},
+            {"id": 2, "key": "AwsEc2Subnet#c", "label": "Subnet(subnet-1)", "kind": "AwsEc2Subnet"}
         ],
         "edges": [
-            {"source": 0, "target": 1, "kind": "HasIp"},
-            {"source": 1, "target": 2, "kind": "AttachedTo"}
+            {"source": 0, "target": 1, "key": "HasIp|a->b", "source_key": "AwsEc2Instance#a", "target_key": "AwsEc2Eni#b", "kind": "HasIp"},
+            {"source": 1, "target": 2, "key": "AttachedTo|b->c", "source_key": "AwsEc2Eni#b", "target_key": "AwsEc2Subnet#c", "kind": "AttachedTo"}
         ]
     }"#;
 
@@ -194,7 +208,7 @@ mod tests {
     #[test]
     fn remaps_sparse_node_ids() {
         let json = r#"{
-            "version": 1,
+            "version": 2,
             "nodes": [
                 {"id": 10, "label": "a", "kind": "GenericIpAddress"},
                 {"id": 99, "label": "b", "kind": "GenericHostname"}
@@ -209,7 +223,7 @@ mod tests {
     #[test]
     fn rejects_unknown_edge_endpoint() {
         let json = r#"{
-            "version": 1,
+            "version": 2,
             "nodes": [{"id": 0, "label": "a", "kind": "GenericIpAddress"}],
             "edges": [{"source": 0, "target": 5, "kind": "RoutesTo"}]
         }"#;
@@ -221,10 +235,10 @@ mod tests {
 
     #[test]
     fn rejects_future_version() {
-        let json = r#"{"version": 2, "nodes": [], "edges": []}"#;
+        let json = r#"{"version": 3, "nodes": [], "edges": []}"#;
         assert!(matches!(
             LayoutGraph::from_json(json).unwrap_err(),
-            GraphError::UnsupportedVersion { found: 2, .. }
+            GraphError::UnsupportedVersion { found: 3, .. }
         ));
     }
 

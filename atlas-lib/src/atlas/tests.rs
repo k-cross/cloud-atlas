@@ -689,6 +689,92 @@ mod tests {
         // rendering layer can style by resource type.
         let json = crate::atlas::export::snapshot_json(&builder.graph).unwrap();
         assert!(json.contains("\"kind\":\"AwsEc2Eni\""));
-        assert!(json.contains("\"version\":1"));
+        assert!(json.contains("\"version\":2"));
+
+        // Every node carries a stable key (v2), unique across the graph.
+        let keys: std::collections::HashSet<&str> =
+            snapshot.nodes.iter().map(|n| n.key.as_str()).collect();
+        assert_eq!(keys.len(), snapshot.nodes.len(), "node keys must be unique");
+    }
+
+    #[test]
+    fn node_key_is_unique_across_fixture_graph() {
+        use crate::atlas::export::node_key;
+        let builder = fixtures::build_graph();
+        let keys: std::collections::HashSet<String> =
+            builder.graph.node_weights().map(node_key).collect();
+        assert_eq!(
+            keys.len(),
+            builder.graph.node_count(),
+            "node_key must be a unique identity for every node"
+        );
+    }
+
+    #[test]
+    fn diff_of_identical_graphs_is_empty() {
+        let builder = fixtures::build_graph();
+        let patch = crate::atlas::patch::diff(&builder.graph, &builder.graph);
+        assert!(
+            patch.is_empty(),
+            "diffing a graph against itself is a no-op"
+        );
+    }
+
+    #[test]
+    fn diff_detects_added_and_removed_nodes_and_edges() {
+        use crate::atlas::definition::{Edge, Node};
+        use crate::atlas::export::{edge_key, node_key};
+
+        // Start from the full fixture graph, then build a second graph that is
+        // the same minus one node (and its incident edges) plus one brand-new
+        // node + edge. The diff must name exactly those changes.
+        let old = fixtures::build_graph();
+
+        // Pick a stable, always-present node to remove: the AWS ENI pivot.
+        let removed = old
+            .graph
+            .node_weights()
+            .find(|n| matches!(n, Node::AwsEc2Eni(_)))
+            .expect("fixture has an ENI")
+            .clone();
+        let removed_key = node_key(&removed);
+
+        // Reproject a fresh graph, dropping the chosen node, and splice in a new
+        // isolated node + edge that the original does not contain.
+        let mut new = GraphBuilder::new();
+        for node in old.graph.node_weights() {
+            if node != &removed {
+                new.get_or_add_node(node.clone());
+            }
+        }
+        for e in old.graph.edge_indices() {
+            let (a, b) = old.graph.edge_endpoints(e).unwrap();
+            let (na, nb) = (&old.graph[a], &old.graph[b]);
+            if na != &removed && nb != &removed {
+                let ia = new.get_or_add_node(na.clone());
+                let ib = new.get_or_add_node(nb.clone());
+                new.add_edge(ia, ib, old.graph[e].clone());
+            }
+        }
+        let extra_src = Node::GenericHostname("diff-test.example.com".into());
+        let extra_dst = Node::GenericIpAddress("203.0.113.7".into());
+        let src_key = node_key(&extra_src);
+        let dst_key = node_key(&extra_dst);
+        let ia = new.get_or_add_node(extra_src);
+        let ib = new.get_or_add_node(extra_dst);
+        new.add_edge(ia, ib, Edge::ResolvesTo);
+
+        let patch = crate::atlas::patch::diff(&old.graph, &new.graph);
+
+        assert!(patch.removed_nodes.contains(&removed_key));
+        assert!(
+            patch.added_nodes.iter().any(|n| n.key == src_key)
+                && patch.added_nodes.iter().any(|n| n.key == dst_key),
+            "both new nodes appear as additions"
+        );
+        let new_edge_key = edge_key(&src_key, &dst_key, &Edge::ResolvesTo);
+        assert!(patch.added_edges.iter().any(|e| e.key == new_edge_key));
+        // Removing the ENI must drop at least one incident edge.
+        assert!(!patch.removed_edges.is_empty());
     }
 }

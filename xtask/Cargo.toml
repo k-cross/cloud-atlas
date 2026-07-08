@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+description = "Workspace orchestration: run the full dev stack (wasm + server + frontend) and every test suite from one command."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Deliberately minimal: xtask sits on the critical path of every dev loop, so it
+# must build in seconds. It shells out to cargo/bun/wasm-pack rather than
+# linking anything heavy.
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"

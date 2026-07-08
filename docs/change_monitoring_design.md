@@ -245,13 +245,21 @@ pushes deltas. This is the server the user asked about.
 
 ## 9. Phased Implementation Plan
 
-| Phase | Focus | Deliverable |
-|---|---|---|
-| **1** | Incremental graph | Persistent graph + differ; daemon emits `ChangeEvent`s instead of wiping. Unlocks everything else with zero new cloud deps. |
-| **2** | Live backend skeleton | Graph Actor + SSE/WS hub; frontend consumes snapshot-then-patches. Still driven by Tier 3 polling under the hood. |
-| **3** | One real event stream | Wire AWS EventBridge/Config as the first Tier 1 adapter end-to-end; prove the normalized `ChangeEvent` path. |
-| **4** | Flow-log liveness | Tier 2 consumer for VPC Flow Logs → `Edge::TrafficFlow` + node freshness → drives the Phase 3 health overlay in the rendering design. |
-| **5** | Remaining clouds | GCP asset feeds, Azure Event Grid; Cloudflare stays on fast poll. Reconciliation tuned per cloud. |
+| Phase | Focus | Deliverable | Status |
+|---|---|---|---|
+| **1** | Incremental graph | Persistent graph + differ; daemon emits change sets instead of wiping. Unlocks everything else with zero new cloud deps. | **Done** — `atlas-lib/src/atlas/patch.rs` (`GraphPatch` + `diff`, keyed on stable `node_key`/`edge_key`); `AtlasEngine::collect` decouples collection from the wipe-and-export CLI path. |
+| **2** | Live backend skeleton | Graph Actor + WS hub; frontend consumes snapshot-then-patches. Still driven by Tier 3 polling under the hood. | **Done** — `atlas-server/` (single-writer graph behind `RwLock` + `broadcast`, `poll.rs` Tier-3 reconciliation, bidirectional WebSocket `snapshot`/`patch`/`get_neighbors`); `atlas-web` applies patches live. `--demo` exercises the whole path credential-free. |
+| **3** | One real event stream | Wire AWS EventBridge/Config as the first Tier 1 adapter end-to-end; prove the normalized `ChangeEvent` path. | Next |
+| **4** | Flow-log liveness | Tier 2 consumer for VPC Flow Logs → `Edge::TrafficFlow` + node freshness → drives the Phase 3 health overlay in the rendering design. | Planned |
+| **5** | Remaining clouds | GCP asset feeds, Azure Event Grid; Cloudflare stays on fast poll. Reconciliation tuned per cloud. | Planned |
+
+> **Implemented shape vs. this doc:** the live server uses a single-writer
+> `RwLock`-guarded graph + `tokio::sync::broadcast` (not a literal actor/mpsc)
+> and **WebSocket** (not SSE) — chosen so the client can pull specific data
+> (`get_neighbors`) on demand, not just listen. Node *property updates* surface
+> as remove + add of the same key for now; richer update semantics land with the
+> liveness work. The Graph Actor / event-stream adapters of §7 are the Phase 3+
+> build-out on top of this skeleton.
 
 ## 10. Open Questions
 

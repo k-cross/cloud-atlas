@@ -36,14 +36,46 @@ cargo run -- --all --verbose   # include all mappings, verbose output
 
 Output is written to `atlas.dot` plus a render snapshot `atlas.json` in the working directory (both gitignored). Visualize `.dot` with Gephi.
 
+## Dev Orchestration (`cargo xtask`)
+
+The unified way to run and test the whole stack (server + wasm renderer + frontend) — prefer these over hand-running the pieces:
+
+```bash
+cargo xtask dev --demo         # full stack, credential-free: wasm (rebuilt if stale) →
+                               #   atlas-server :4681 → frontend :4680, one Ctrl-C stops all
+cargo xtask dev                # same, real collection (default; add provider flags as needed)
+cargo xtask wasm [--force]     # rebuild pkg/ if atlas-layout sources are newer (do this
+                               #   after any SNAPSHOT_VERSION bump)
+cargo xtask demo               # regenerate multi_cloud_demo.json from fixtures
+cargo xtask test [--e2e]       # every suite in order: cargo (root) → cargo (atlas-render) →
+                               #   bun test → typecheck [→ playwright]
+```
+
+`xtask` (root workspace, alias in `.cargo/config.toml`) only shells out to the same commands listed below — it adds ordering, a readiness gate (frontend waits for `/snapshot.json`), staleness checking for the wasm engine, and teardown of the whole process tree.
+
+## Live Server (`atlas-server/`)
+
+`atlas-cli` is the batch/one-shot path. `atlas-server` is the long-running **live backend** (Phase 2 of `docs/change_monitoring_design.md`): it owns a persistent in-memory graph, reconciles it against the providers on an interval (Tier-3 polling, reusing `AtlasEngine::collect`), diffs each scan (`atlas::patch::diff`), and pushes incremental `GraphPatch`es to the frontend over WebSocket. It never wipes the graph — the differ is the incremental path the daemon lacks.
+
+```bash
+cargo run -p atlas-server -- --demo                  # credential-free: serves Globex fixtures
+                                                     #   with a churning sentinel, port 4681
+cargo run -p atlas-server -- --regions us-east-1     # real collection (same flags as the CLI)
+cargo run -p atlas-server -- --poll-secs 30 --port 8080
+```
+
+- `GET /snapshot.json` — full current snapshot (v2). `GET /ws` — WebSocket hub.
+- WS is **bidirectional**: server pushes `snapshot` then `patch`es; the client can pull `get_snapshot` / `get_neighbors` on demand.
+- Point the frontend at it: run `bun dev` in `atlas-render/atlas-web/` (assets on :4680) which connects by default to `ws://<host>:4681/ws`; override with `?server=ws://…` or force offline with `?static`.
+
 ## Rendering Workspace (`atlas-render/`)
 
-Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate cargo workspace** — `atlas-render/` is `exclude`d from the root workspace and must never depend on `atlas-lib` (the cloud SDK tree doesn't build for wasm, and rendering stays decoupled from graph building). The only contract is the versioned render snapshot JSON: producer in `atlas-lib/src/atlas/export.rs`, consumer in `atlas-render/atlas-layout/src/graph.rs` — bump `SNAPSHOT_VERSION` on **both** sides when the shape changes.
+Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate cargo workspace** — `atlas-render/` is `exclude`d from the root workspace and must never depend on `atlas-lib` (the cloud SDK tree doesn't build for wasm, and rendering stays decoupled from graph building). The only contract is the versioned render snapshot JSON (and the `GraphPatch` delta of the same shape). It now has **three consumers** that pin `SNAPSHOT_VERSION`: the producer `atlas-lib/src/atlas/export.rs`, the Rust layout consumer `atlas-render/atlas-layout/src/graph.rs`, and the TS frontend `atlas-render/atlas-web/src/graph.ts`. When the shape changes, **bump the version in all three and rebuild the wasm** (`bun run wasm` in `atlas-render/atlas-web/`) — the compiled layout engine bakes in the version and rejects mismatched snapshots at runtime.
 
 - `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` position buffer); `parallel` feature enables rayon natively.
 - `atlas-layout-wasm` — wasm-bindgen bridge; builds with `cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`.
-- `atlas-web` — Sigma.js WebGL frontend, a **bun** app (use bun, not node/npm): `bun install && bun run wasm && bun dev` inside `atlas-render/atlas-web/` serves the snapshot at `http://localhost:4680`.
-- Test with `cargo test` **inside `atlas-render/`** (the root `cargo test` does not cover it). End-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (in `atlas-render/atlas-web/`) to view in the browser at `http://localhost:4680`.
+- `atlas-web` — Sigma.js WebGL frontend, a **bun** app (use bun, not node/npm): `bun install && bun run wasm && bun dev` inside `atlas-render/atlas-web/` serves at `http://localhost:4680`. By default it connects to `atlas-server` over WebSocket (`ws://<host>:4681/ws`) for a live snapshot-then-patches feed; with no server it falls back to a static `/snapshot.json` fetch (or force that with `?static`).
+- Test with `cargo test` **inside `atlas-render/`** (the root `cargo test` does not cover it). Static end-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (view at `http://localhost:4680/?static`). Live end-to-end: `cargo run -p atlas-server -- --demo` (root) + `bun dev` (in `atlas-render/atlas-web/`) to watch patches apply as the demo graph churns.
 
 ## Auth (reference only — not available locally)
 

@@ -16,14 +16,17 @@ const fallbacks = ["../../atlas.json", "../../multi_cloud_demo.json"].map((p) =>
 );
 const snapshotPath = arg ? resolve(arg) : fallbacks.find(existsSync);
 
+// A static snapshot is optional: the app is WebSocket-first and only fetches
+// /snapshot.json as the offline (`?static`) fallback. Warn instead of exiting
+// so live-mode dev works before any snapshot file has ever been written.
 if (!snapshotPath || !existsSync(snapshotPath)) {
-  console.error(
-    "no render snapshot found. Generate one first:\n" +
+  console.warn(
+    "no static render snapshot found — /snapshot.json will 404 (live WebSocket mode still works).\n" +
+      "To enable the ?static fallback, generate one:\n" +
       "  cargo run --example demo        (repo root, credential-free)\n" +
       "  cargo run -- --regions ...      (real collection)\n" +
       "or pass a path: bun serve.ts path/to/snapshot.json",
   );
-  process.exit(1);
 }
 
 if (!existsSync(join(import.meta.dir, "pkg", "atlas_layout_wasm.js"))) {
@@ -35,7 +38,10 @@ const port = Number(process.env.PORT ?? 4680);
 
 const routes = {
   "/": index,
-  "/snapshot.json": () => new Response(Bun.file(snapshotPath)),
+  "/snapshot.json": () =>
+    snapshotPath && existsSync(snapshotPath)
+      ? new Response(Bun.file(snapshotPath))
+      : new Response("no static snapshot available", { status: 404 }),
   "/pkg/:file": async (req: Bun.BunRequest<"/pkg/:file">) => {
     const name = req.params.file;
     if (name.includes("/") || name.includes("..")) {
@@ -64,4 +70,6 @@ try {
   throw e;
 }
 
-console.log(`atlas-web: serving ${snapshotPath} at ${server.url}`);
+console.log(
+  `atlas-web: serving ${snapshotPath ?? "(no static snapshot — live mode only)"} at ${server.url}`,
+);

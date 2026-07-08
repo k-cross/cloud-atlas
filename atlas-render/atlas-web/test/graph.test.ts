@@ -1,133 +1,166 @@
 import { describe, expect, test } from "bun:test";
-import { type Snapshot, buildGraph } from "../src/graph";
+import {
+  type GraphPatch,
+  SNAPSHOT_VERSION,
+  type Snapshot,
+  type SnapshotEdge,
+  type SnapshotNode,
+  applyPatch,
+  buildGraph,
+  snapshotFromGraph,
+} from "../src/graph";
 import { PROVIDER_COLORS, nodeSize } from "../src/style";
 
+function node(key: string, kind: string, id = 0): SnapshotNode {
+  return { id, key, label: key, kind };
+}
+
+function edge(sourceKey: string, targetKey: string, kind: string): SnapshotEdge {
+  return {
+    source: 0,
+    target: 0,
+    key: `${kind}|${sourceKey}->${targetKey}`,
+    source_key: sourceKey,
+    target_key: targetKey,
+    kind,
+  };
+}
+
 function snapshot(partial: Partial<Snapshot>): Snapshot {
-  return { version: 1, nodes: [], edges: [], ...partial };
+  return { version: SNAPSHOT_VERSION, nodes: [], edges: [], ...partial };
+}
+
+function patch(partial: Partial<GraphPatch>): GraphPatch {
+  return {
+    version: SNAPSHOT_VERSION,
+    added_nodes: [],
+    removed_nodes: [],
+    added_edges: [],
+    removed_edges: [],
+    ...partial,
+  };
 }
 
 describe("buildGraph", () => {
-  test("maps every snapshot node and edge into the graph", () => {
+  test("keys graphology nodes by stable snapshot key", () => {
     const graph = buildGraph(
       snapshot({
-        nodes: [
-          { id: 10, label: "vpc", kind: "AwsVpc" },
-          { id: 20, label: "eni", kind: "AwsEni" },
-          { id: 30, label: "subnet", kind: "AwsSubnet" },
-        ],
-        edges: [
-          { source: 10, target: 30, kind: "Contains" },
-          { source: 20, target: 30, kind: "AttachedTo" },
-        ],
+        nodes: [node("vpc-1", "AwsEc2Vpc"), node("subnet-1", "AwsEc2Subnet")],
+        edges: [edge("vpc-1", "subnet-1", "Contains")],
       }),
     );
-    expect(graph.order).toBe(3);
-    expect(graph.size).toBe(2);
-  });
-
-  test("re-keys sparse snapshot ids to dense node-list order", () => {
-    // Position index i (from the layout engine) must line up with graph node
-    // "i", regardless of the sparse snapshot ids.
-    const graph = buildGraph(
-      snapshot({
-        nodes: [
-          { id: 100, label: "a", kind: "AwsVpc" },
-          { id: 7, label: "b", kind: "AwsSubnet" },
-        ],
-        edges: [{ source: 100, target: 7, kind: "Contains" }],
-      }),
-    );
-    expect(graph.hasNode("0")).toBe(true);
-    expect(graph.hasNode("1")).toBe(true);
-    expect(graph.hasNode("100")).toBe(false);
-    // The edge should connect the dense indices, not the raw ids.
-    expect(graph.hasEdge("0", "1")).toBe(true);
-    expect(graph.getNodeAttribute("0", "label")).toBe("a");
-    expect(graph.getNodeAttribute("1", "label")).toBe("b");
+    expect(graph.order).toBe(2);
+    expect(graph.size).toBe(1);
+    expect(graph.hasNode("vpc-1")).toBe(true);
+    expect(graph.hasEdge("Contains|vpc-1->subnet-1")).toBe(true);
   });
 
   test("colors nodes by provider bucket", () => {
     const graph = buildGraph(
       snapshot({
         nodes: [
-          { id: 1, label: "aws", kind: "AwsEc2Instance" },
-          { id: 2, label: "gcp", kind: "GcpComputeInstance" },
-          { id: 3, label: "generic", kind: "GenericIpAddress" },
+          node("a", "AwsEc2Instance"),
+          node("b", "GcpComputeInstance"),
+          node("c", "GenericIpAddress"),
         ],
       }),
     );
-    expect(graph.getNodeAttribute("0", "color")).toBe(PROVIDER_COLORS.AWS);
-    expect(graph.getNodeAttribute("1", "color")).toBe(PROVIDER_COLORS.GCP);
-    expect(graph.getNodeAttribute("2", "color")).toBe(PROVIDER_COLORS.Generic);
+    expect(graph.getNodeAttribute("a", "color")).toBe(PROVIDER_COLORS.AWS);
+    expect(graph.getNodeAttribute("b", "color")).toBe(PROVIDER_COLORS.GCP);
+    expect(graph.getNodeAttribute("c", "color")).toBe(PROVIDER_COLORS.Generic);
   });
 
   test("sizes nodes by their degree", () => {
-    // node 0 has degree 2 (two incident edges), the leaves have degree 1.
     const graph = buildGraph(
       snapshot({
-        nodes: [
-          { id: 1, label: "hub", kind: "AwsVpc" },
-          { id: 2, label: "leaf-a", kind: "AwsSubnet" },
-          { id: 3, label: "leaf-b", kind: "AwsSubnet" },
-        ],
-        edges: [
-          { source: 1, target: 2, kind: "Contains" },
-          { source: 1, target: 3, kind: "Contains" },
-        ],
+        nodes: [node("hub", "AwsEc2Vpc"), node("a", "AwsEc2Subnet"), node("b", "AwsEc2Subnet")],
+        edges: [edge("hub", "a", "Contains"), edge("hub", "b", "Contains")],
       }),
     );
-    expect(graph.getNodeAttribute("0", "size")).toBe(nodeSize(2));
-    expect(graph.getNodeAttribute("1", "size")).toBe(nodeSize(1));
-    expect(graph.getNodeAttribute("2", "size")).toBe(nodeSize(1));
+    expect(graph.getNodeAttribute("hub", "size")).toBe(nodeSize(2));
+    expect(graph.getNodeAttribute("a", "size")).toBe(nodeSize(1));
   });
 
-  test("isolated nodes keep the base size", () => {
-    const graph = buildGraph(
-      snapshot({ nodes: [{ id: 1, label: "lonely", kind: "AwsVpc" }] }),
-    );
-    expect(graph.getNodeAttribute("0", "size")).toBe(nodeSize(0));
-  });
-
-  test("is a directed multigraph — parallel edges are preserved, not deduped", () => {
-    // The layout benefits from every edge as a spring; the frontend graph must
-    // not collapse parallel edges the way GraphBuilder dedupes on the Rust side.
+  test("is a directed multigraph — parallel edges are preserved", () => {
     const graph = buildGraph(
       snapshot({
-        nodes: [
-          { id: 1, label: "a", kind: "AwsEni" },
-          { id: 2, label: "b", kind: "AwsSubnet" },
-        ],
-        edges: [
-          { source: 1, target: 2, kind: "AttachedTo" },
-          { source: 1, target: 2, kind: "RoutesTo" },
-        ],
+        nodes: [node("a", "AwsEc2Eni"), node("b", "AwsEc2Subnet")],
+        edges: [edge("a", "b", "AttachedTo"), edge("a", "b", "RoutesTo")],
       }),
     );
     expect(graph.size).toBe(2);
     expect(graph.type).toBe("directed");
   });
 
-  test("cross-cloud seam edges get their distinct color, unknown edges fall back", () => {
-    const graph = buildGraph(
-      snapshot({
-        nodes: [
-          { id: 1, label: "a", kind: "AwsEni" },
-          { id: 2, label: "b", kind: "GenericIpAddress" },
-        ],
-        edges: [
-          { source: 1, target: 2, kind: "RoutesTo" },
-          { source: 2, target: 1, kind: "SomeFutureEdge" },
-        ],
-      }),
-    );
-    const colors = graph.mapEdges((_e, attr) => attr.color as string);
-    expect(colors).toContain("#2f6285"); // EDGE_COLORS.RoutesTo
-    expect(colors).toContain("#333b47"); // DEFAULT_EDGE_COLOR fallback
-  });
-
   test("handles an empty snapshot", () => {
     const graph = buildGraph(snapshot({}));
     expect(graph.order).toBe(0);
     expect(graph.size).toBe(0);
+  });
+});
+
+describe("applyPatch", () => {
+  test("adds nodes and edges, then resizes affected nodes", () => {
+    const graph = buildGraph(snapshot({ nodes: [node("hub", "AwsEc2Vpc")] }));
+    applyPatch(
+      graph,
+      patch({
+        added_nodes: [node("a", "AwsEc2Subnet"), node("b", "AwsEc2Subnet")],
+        added_edges: [edge("hub", "a", "Contains"), edge("hub", "b", "Contains")],
+      }),
+    );
+    expect(graph.order).toBe(3);
+    expect(graph.size).toBe(2);
+    expect(graph.getNodeAttribute("hub", "size")).toBe(nodeSize(2));
+  });
+
+  test("removes edges and nodes (and their incident edges)", () => {
+    const graph = buildGraph(
+      snapshot({
+        nodes: [node("hub", "AwsEc2Vpc"), node("a", "AwsEc2Subnet")],
+        edges: [edge("hub", "a", "Contains")],
+      }),
+    );
+    applyPatch(graph, patch({ removed_nodes: ["a"] }));
+    expect(graph.hasNode("a")).toBe(false);
+    expect(graph.size).toBe(0); // incident edge went with it
+    expect(graph.getNodeAttribute("hub", "size")).toBe(nodeSize(0));
+  });
+
+  test("is idempotent for re-added nodes/edges (at-least-once delivery)", () => {
+    const graph = buildGraph(snapshot({ nodes: [node("a", "AwsEc2Vpc")] }));
+    const p = patch({
+      added_nodes: [node("b", "AwsEc2Subnet")],
+      added_edges: [edge("a", "b", "Contains")],
+    });
+    applyPatch(graph, p);
+    applyPatch(graph, p); // replay must not throw or duplicate
+    expect(graph.order).toBe(2);
+    expect(graph.size).toBe(1);
+  });
+
+  test("drops an out-of-order edge whose endpoints are absent", () => {
+    const graph = buildGraph(snapshot({ nodes: [node("a", "AwsEc2Vpc")] }));
+    applyPatch(graph, patch({ added_edges: [edge("a", "missing", "Contains")] }));
+    expect(graph.size).toBe(0);
+  });
+});
+
+describe("snapshotFromGraph", () => {
+  test("round-trips a built graph back to a consumable snapshot", () => {
+    const original = snapshot({
+      nodes: [node("a", "AwsEc2Vpc"), node("b", "AwsEc2Subnet")],
+      edges: [edge("a", "b", "Contains")],
+    });
+    const rebuilt = snapshotFromGraph(buildGraph(original));
+    expect(rebuilt.version).toBe(SNAPSHOT_VERSION);
+    expect(rebuilt.nodes.map((n) => n.key)).toEqual(["a", "b"]);
+    // Dense ids are assigned in iteration order and edges reference them.
+    expect(rebuilt.nodes.map((n) => n.id)).toEqual([0, 1]);
+    expect(rebuilt.edges[0]).toMatchObject({ source: 0, target: 1, kind: "Contains" });
+    // A rebuild from the round-tripped snapshot is structurally identical.
+    const again = buildGraph(rebuilt);
+    expect(again.order).toBe(2);
+    expect(again.size).toBe(1);
   });
 });

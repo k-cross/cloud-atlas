@@ -1,11 +1,21 @@
-// Phase 2 of docs/graph_rendering_design.md: Sigma.js (WebGL) rendering fed
-// by the Phase 1 wasm layout engine. The engine owns the physics; each
-// animation frame we copy its interleaved position buffer into the
-// graphology node attributes, which Sigma picks up through graph events.
+// Phase 2 of docs/graph_rendering_design.md, now fed live: the frontend opens
+// a WebSocket to atlas-server, renders the initial snapshot, and applies the
+// incremental patches the server pushes as the graph changes. The wasm layout
+// engine (Phase 1) still owns the physics; on every topology change we hand it
+// the updated graph and let it re-converge. Falls back to a static
+// `/snapshot.json` fetch when no server is reachable (bun `serve.ts`).
 
+import Graph from "graphology";
 import Sigma from "sigma";
 import init, { LayoutEngine } from "../pkg/atlas_layout_wasm";
-import { SNAPSHOT_VERSION, type Snapshot, buildGraph } from "./graph";
+import {
+  type GraphPatch,
+  SNAPSHOT_VERSION,
+  type Snapshot,
+  applyPatch,
+  buildGraph,
+  snapshotFromGraph,
+} from "./graph";
 import { PROVIDER_COLORS, type Provider, providerOf } from "./style";
 
 // Physics iterations per animation frame: the budget that keeps a frame
@@ -20,26 +30,45 @@ const statusEl = document.getElementById("status")!;
 const legendEl = document.getElementById("legend")!;
 const errorEl = document.getElementById("error")!;
 
+// Sigma throws "Container has no width" if the element is 0-sized at
+// construction. A full-viewport `position:absolute; inset:0` div reads
+// offsetWidth 0 until the browser lays it out — which it defers for a
+// background tab or a not-yet-shown window. Resolve as soon as the container
+// has real dimensions (immediately in the common case).
+function whenSized(el: HTMLElement): Promise<void> {
+  if (el.offsetWidth > 0 && el.offsetHeight > 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const observer = new ResizeObserver(() => {
+      if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+        observer.disconnect();
+        resolve();
+      }
+    });
+    observer.observe(el);
+  });
+}
+
 function fail(message: string): never {
   errorEl.textContent = message;
   errorEl.style.display = "grid";
   throw new Error(message);
 }
 
-async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    fail(`GET ${url} failed (${response.status}) — did \`bun run wasm\` and the snapshot export run?`);
-  }
-  return response.text();
+// Server URL is overridable (`?server=ws://host:port/ws`); default targets the
+// atlas-server dev port on the same host.
+function serverUrl(): string {
+  const override = new URLSearchParams(location.search).get("server");
+  if (override) return override;
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.hostname}:4681/ws`;
 }
 
-function renderLegend(snapshot: Snapshot) {
+function renderLegend(graph: Graph) {
   const counts = new Map<Provider, number>();
-  for (const node of snapshot.nodes) {
-    const provider = providerOf(node.kind);
+  graph.forEachNode((_key, attrs) => {
+    const provider = providerOf(attrs.kind as string);
     counts.set(provider, (counts.get(provider) ?? 0) + 1);
-  }
+  });
   legendEl.replaceChildren(
     ...[...counts.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -59,34 +88,40 @@ function renderLegend(snapshot: Snapshot) {
   );
 }
 
+function checkVersion(version: number) {
+  if (version !== SNAPSHOT_VERSION) {
+    fail(`snapshot version ${version} != supported ${SNAPSHOT_VERSION}`);
+  }
+}
+
 async function main() {
-  const [snapshotText] = await Promise.all([
-    fetchText("/snapshot.json"),
-    // The pkg/ glue resolves the wasm relative to import.meta.url, which
-    // bundling rewrites — point it at the statically served file instead.
+  const container = document.getElementById("graph")!;
+  // Don't build Sigma into a 0-width container; wait for layout first.
+  await Promise.all([
     init({ module_or_path: "/pkg/atlas_layout_wasm_bg.wasm" }),
+    whenSized(container),
   ]);
 
-  const snapshot: Snapshot = JSON.parse(snapshotText);
-  if (snapshot.version !== SNAPSHOT_VERSION) {
-    fail(`snapshot version ${snapshot.version} != supported ${SNAPSHOT_VERSION}`);
-  }
-
-  const graph = buildGraph(snapshot);
-  renderLegend(snapshot);
-
-  const renderer = new Sigma(graph, document.getElementById("graph")!, {
+  // One long-lived graph instance backs Sigma; snapshots refill it and patches
+  // mutate it in place, so Sigma's WebGL buffers update through graph events.
+  const graph = new Graph({ multi: true, type: "directed" });
+  const renderer = new Sigma(graph, container, {
     labelColor: { color: "#cfd6e4" },
     labelRenderedSizeThreshold: 7,
     minCameraRatio: 0.05,
     maxCameraRatio: 20,
+    // Belt-and-suspenders: if a 0-size container ever slips past whenSized,
+    // Sigma constructs anyway and its own ResizeObserver refreshes on resize.
+    allowInvalidContainer: true,
   });
 
-  let engine = new LayoutEngine(snapshotText);
+  let engine: LayoutEngine | null = null;
   let iterations = 0;
   let running = false;
+  let connection = "connecting";
 
   function syncPositions() {
+    if (!engine) return;
     // Re-acquire the view every frame: wasm memory growth invalidates it.
     const positions = engine.positionsView();
     let i = 0;
@@ -105,10 +140,11 @@ async function main() {
     const state = running ? "layout running" : "settled";
     statusEl.textContent =
       `${graph.order} nodes · ${graph.size} edges · ` +
-      `${iterations} iterations · ${state}`;
+      `${iterations} iterations · ${state} · ${connection}`;
   }
 
   function frame() {
+    if (!engine) return;
     engine.step(STEPS_PER_FRAME);
     iterations += STEPS_PER_FRAME;
     syncPositions();
@@ -124,18 +160,133 @@ async function main() {
     }
   }
 
-  document.getElementById("reheat")!.addEventListener("click", () => {
-    // The engine has no reset; a fresh instance re-runs the layout from the
-    // deterministic initial placement.
-    engine.free();
-    engine = new LayoutEngine(snapshotText);
+  // (Re)build the layout engine from the current graph. The engine has no
+  // incremental API, so any topology change re-runs the layout from the
+  // deterministic initial placement — same mechanism as the reheat button.
+  function restartEngine() {
+    engine?.free();
+    engine = new LayoutEngine(JSON.stringify(snapshotFromGraph(graph)));
     iterations = 0;
+    syncPositions();
     start();
+  }
+
+  function loadSnapshot(snapshot: Snapshot) {
+    checkVersion(snapshot.version);
+    graph.clear();
+    graph.import(buildGraph(snapshot).export());
+    restartEngine();
+    renderLegend(graph);
+  }
+
+  function onPatch(patch: GraphPatch) {
+    checkVersion(patch.version);
+    applyPatch(graph, patch);
+    restartEngine();
+    renderLegend(graph);
+  }
+
+  document.getElementById("reheat")!.addEventListener("click", restartEngine);
+
+  const handlers: LiveHandlers = {
+    onSnapshot: loadSnapshot,
+    onPatch,
+    onStatus: (s) => {
+      connection = s;
+      updateStatus();
+    },
+  };
+
+  // `?static` forces the one-shot snapshot fetch (no server) — used for static
+  // hosting and deterministic tests. Otherwise go live over WebSocket.
+  if (new URLSearchParams(location.search).has("static")) {
+    void fetchStatic(handlers);
+  } else {
+    const live = connectLive(handlers);
+    // Clicking a node pulls its neighborhood from the server — the client
+    // asking for specific data on demand, not just listening. Graphology node
+    // keys are the stable snapshot keys, so `node` is what the server expects.
+    renderer.on("clickNode", ({ node }) => live.requestNeighbors(node));
+  }
+
+  return renderer;
+}
+
+interface LiveHandlers {
+  onSnapshot: (s: Snapshot) => void;
+  onPatch: (p: GraphPatch) => void;
+  onStatus: (s: string) => void;
+}
+
+interface LiveConnection {
+  requestNeighbors: (key: string) => void;
+}
+
+// Connect to atlas-server over WebSocket; on failure, fall back to the static
+// snapshot so `serve.ts`-style static hosting still works.
+function connectLive(handlers: LiveHandlers): LiveConnection {
+  const url = serverUrl();
+  let gotMessage = false;
+
+  const socket = new WebSocket(url);
+
+  socket.addEventListener("open", () => {
+    handlers.onStatus(`live: ${url}`);
+    // Explicit subscribe is optional (the server pushes a snapshot on connect)
+    // but documents intent and re-triggers a snapshot on demand.
+    socket.send(JSON.stringify({ type: "subscribe" }));
   });
 
-  syncPositions();
-  start();
-  return renderer;
+  socket.addEventListener("message", (ev) => {
+    gotMessage = true;
+    const msg = JSON.parse(ev.data);
+    switch (msg.type) {
+      case "snapshot":
+        handlers.onSnapshot(msg as Snapshot);
+        break;
+      case "patch":
+        handlers.onPatch(msg as GraphPatch);
+        break;
+      case "neighbors":
+        console.info(`neighbors of ${msg.key}:`, msg.nodes, msg.edges);
+        break;
+      case "error":
+        console.warn("server error:", msg.message);
+        break;
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    handlers.onStatus(gotMessage ? "disconnected" : "offline");
+    if (!gotMessage) fetchStatic(handlers);
+  });
+
+  // `error` fires just before `close`, which handles the static fallback.
+  socket.addEventListener("error", () => {});
+
+  return {
+    requestNeighbors(key) {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "get_neighbors", key }));
+      }
+    },
+  };
+}
+
+async function fetchStatic(handlers: LiveHandlers) {
+  try {
+    const res = await fetch("/snapshot.json");
+    if (!res.ok) {
+      fail(
+        `no live server and GET /snapshot.json failed (${res.status}) — start ` +
+          `atlas-server (cargo run -p atlas-server -- --demo) or generate a static snapshot.`,
+      );
+    }
+    handlers.onStatus("static");
+    handlers.onSnapshot((await res.json()) as Snapshot);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
 }
 
 main().catch((e) => fail(e instanceof Error ? e.message : String(e)));
