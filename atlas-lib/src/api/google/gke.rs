@@ -22,9 +22,9 @@ pub async fn list_clusters(
     project: &str,
 ) -> Result<Vec<Cluster>, Box<dyn std::error::Error>> {
     // GKE uses location='-' to mean all locations
-    let url = format!(
-        "https://container.googleapis.com/v1/projects/{}/locations/-/clusters",
-        project
+    let url = client.endpoint(
+        "https://container.googleapis.com",
+        &format!("/v1/projects/{}/locations/-/clusters", project),
     );
     client
         .paginated_list(&url, "gke", |r: ClusterListResponse| r.clusters)

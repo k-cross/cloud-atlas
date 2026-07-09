@@ -19,9 +19,9 @@ pub async fn list_managed_zones(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<ManagedZone>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://dns.googleapis.com/dns/v1/projects/{}/managedZones",
-        project
+    let url = client.endpoint(
+        "https://dns.googleapis.com",
+        &format!("/dns/v1/projects/{}/managedZones", project),
     );
     client
         .paginated_list(&url, "dns", |r: ManagedZonesListResponse| r.managed_zones)

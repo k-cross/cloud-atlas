@@ -30,9 +30,9 @@ impl super::client::GoogleApiClient {
         &self,
         project_id: &str,
     ) -> Result<Vec<Topic>, Box<dyn std::error::Error>> {
-        let url = format!(
-            "https://pubsub.googleapis.com/v1/projects/{}/topics",
-            project_id
+        let url = self.endpoint(
+            "https://pubsub.googleapis.com",
+            &format!("/v1/projects/{}/topics", project_id),
         );
         self.paginated_list(&url, "pubsub topics", |r: TopicList| r.topics)
             .await
@@ -42,9 +42,9 @@ impl super::client::GoogleApiClient {
         &self,
         project_id: &str,
     ) -> Result<Vec<Subscription>, Box<dyn std::error::Error>> {
-        let url = format!(
-            "https://pubsub.googleapis.com/v1/projects/{}/subscriptions",
-            project_id
+        let url = self.endpoint(
+            "https://pubsub.googleapis.com",
+            &format!("/v1/projects/{}/subscriptions", project_id),
         );
         self.paginated_list(&url, "pubsub subscriptions", |r: SubscriptionList| {
             r.subscriptions

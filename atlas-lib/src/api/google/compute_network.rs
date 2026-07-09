@@ -63,9 +63,9 @@ pub async fn list_networks(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<Network>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://compute.googleapis.com/compute/v1/projects/{}/global/networks",
-        project
+    let url = client.endpoint(
+        "https://compute.googleapis.com",
+        &format!("/compute/v1/projects/{}/global/networks", project),
     );
     client
         .paginated_list(&url, "networks", |r: NetworkListResponse| r.items)
@@ -76,9 +76,9 @@ pub async fn list_subnetworks(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<Subnetwork>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://compute.googleapis.com/compute/v1/projects/{}/aggregated/subnetworks",
-        project
+    let url = client.endpoint(
+        "https://compute.googleapis.com",
+        &format!("/compute/v1/projects/{}/aggregated/subnetworks", project),
     );
     client
         .paginated_list(
@@ -101,9 +101,12 @@ pub async fn list_forwarding_rules(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<ForwardingRule>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://compute.googleapis.com/compute/v1/projects/{}/aggregated/forwardingRules",
-        project
+    let url = client.endpoint(
+        "https://compute.googleapis.com",
+        &format!(
+            "/compute/v1/projects/{}/aggregated/forwardingRules",
+            project
+        ),
     );
     client
         .paginated_list(

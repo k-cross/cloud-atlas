@@ -16,6 +16,9 @@ pub mod security_group;
 pub mod sns;
 pub mod sqs;
 
+#[cfg(test)]
+mod collector_tests;
+
 /// Load the shared AWS SDK config for a region once, so every collector in
 /// that region reuses it instead of re-resolving the credential chain.
 pub async fn load_config(region: &str) -> aws_config::SdkConfig {

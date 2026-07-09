@@ -27,9 +27,9 @@ pub async fn list_functions(
     project: &str,
 ) -> Result<Vec<CloudFunction>, Box<dyn std::error::Error>> {
     // Cloud Functions v2 uses locations/- for all locations
-    let url = format!(
-        "https://cloudfunctions.googleapis.com/v2/projects/{}/locations/-/functions",
-        project
+    let url = client.endpoint(
+        "https://cloudfunctions.googleapis.com",
+        &format!("/v2/projects/{}/locations/-/functions", project),
     );
     client
         .paginated_list(&url, "functions", |r: FunctionsListResponse| r.functions)

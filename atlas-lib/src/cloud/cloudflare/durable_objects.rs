@@ -9,13 +9,16 @@ pub struct DurableObjectNamespace {
 }
 
 pub async fn get_do_namespaces(
-    client: &reqwest::Client,
+    client: &super::CloudflareApiClient,
     account_id: &str,
-    token: &str,
 ) -> Result<Vec<DurableObjectNamespace>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/workers/durable_objects/namespaces",
-        account_id
-    );
-    super::api_get(client, &url, token, "DO namespaces").await
+    client
+        .get(
+            &format!(
+                "/client/v4/accounts/{}/workers/durable_objects/namespaces",
+                account_id
+            ),
+            "DO namespaces",
+        )
+        .await
 }

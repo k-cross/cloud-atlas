@@ -29,9 +29,9 @@ pub async fn list_instances(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<SqlInstance>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://sqladmin.googleapis.com/sql/v1beta4/projects/{}/instances",
-        project
+    let url = client.endpoint(
+        "https://sqladmin.googleapis.com",
+        &format!("/sql/v1beta4/projects/{}/instances", project),
     );
     client
         .paginated_list(&url, "sql", |r: SqlListResponse| r.items)

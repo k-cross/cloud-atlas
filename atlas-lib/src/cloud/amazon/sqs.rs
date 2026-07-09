@@ -30,3 +30,44 @@ pub mod collector {
         Ok(AmazonCollection::AmazonSqs(queues))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::collector::runner;
+    use crate::cloud::definition::AmazonCollection;
+    use aws_credential_types::Credentials;
+    use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
+    use aws_smithy_types::body::SdkBody;
+
+    // SQS uses the awsJson1.0 protocol (JSON, not the EC2 XML) — this proves the
+    // replay pattern works for JSON-protocol services too.
+    #[tokio::test]
+    async fn list_queues_maps_queue_urls() {
+        let body = r#"{"QueueUrls":["https://sqs.us-east-1.amazonaws.com/111111111111/my-queue"]}"#;
+        let http = StaticReplayClient::new(vec![ReplayEvent::new(
+            http::Request::builder()
+                .uri("https://sqs.us-east-1.amazonaws.com/")
+                .body(SdkBody::empty())
+                .unwrap(),
+            http::Response::builder()
+                .status(200)
+                .header("content-type", "application/x-amz-json-1.0")
+                .body(SdkBody::from(body))
+                .unwrap(),
+        )]);
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .credentials_provider(Credentials::for_tests())
+            .http_client(http)
+            .load()
+            .await;
+
+        let AmazonCollection::AmazonSqs(queues) = runner(&config).await.expect("runner ok") else {
+            panic!("expected AmazonSqs");
+        };
+        assert_eq!(
+            queues,
+            vec!["https://sqs.us-east-1.amazonaws.com/111111111111/my-queue".to_string()]
+        );
+    }
+}

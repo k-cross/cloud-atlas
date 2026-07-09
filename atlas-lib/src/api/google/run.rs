@@ -19,9 +19,9 @@ impl super::client::GoogleApiClient {
         &self,
         project_id: &str,
     ) -> Result<Vec<Service>, Box<dyn std::error::Error>> {
-        let url = format!(
-            "https://run.googleapis.com/v2/projects/{}/locations/-/services",
-            project_id
+        let url = self.endpoint(
+            "https://run.googleapis.com",
+            &format!("/v2/projects/{}/locations/-/services", project_id),
         );
         self.paginated_list(&url, "cloud run", |r: ServiceList| r.services)
             .await

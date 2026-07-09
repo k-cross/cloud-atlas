@@ -23,9 +23,8 @@ pub async fn build_cloudflare(
         Environment::Production,
     )?;
 
-    // Shared HTTP client for the raw REST endpoints not covered by the
-    // `cloudflare` crate.
-    let http = reqwest::Client::new();
+    // Client for the raw REST endpoints not covered by the `cloudflare` crate.
+    let cf = super::CloudflareApiClient::new(token.clone());
 
     if verbose {
         println!("Fetching Cloudflare Zones...");
@@ -59,21 +58,19 @@ pub async fn build_cloudflare(
         }
 
         let (workers_res, kvs_res, r2s_res, dos_res, d1s_res) = tokio::join!(
-            super::worker::get_workers(&http, account_id, &token),
+            super::worker::get_workers(&cf, account_id),
             super::kv::get_kv_namespaces(&client, account_id),
             super::r2::get_r2_buckets(&client, account_id),
-            super::durable_objects::get_do_namespaces(&http, account_id, &token),
-            super::d1::get_d1_databases(&http, account_id, &token),
+            super::durable_objects::get_do_namespaces(&cf, account_id),
+            super::d1::get_d1_databases(&cf, account_id),
         );
 
         if let Ok(workers) = workers_res {
             let bindings_futures = workers.iter().map(|worker| {
-                let http = &http;
-                let token = &token;
+                let cf = &cf;
                 let wid = worker.id.clone();
                 async move {
-                    let res =
-                        super::worker::get_worker_bindings(http, account_id, &wid, token).await;
+                    let res = super::worker::get_worker_bindings(cf, account_id, &wid).await;
                     (wid, res)
                 }
             });

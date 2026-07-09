@@ -22,6 +22,19 @@ No live cloud credentials are available locally. All projection testing runs aga
 
 When adding a resource type: add the `Node` variant + `Display` + `kinds!` entry, the projector mapping, and fixture data — the guard tests enforce all three.
 
+### Collector tests (the HTTP → struct boundary)
+
+Fixtures test **projectors** (they hand-build `Provider` collections), not the **collectors** that fetch and deserialize cloud API responses. Collectors are tested by replaying canned responses — no credentials, no network:
+
+- **reqwest clients (GCP/Cloudflare/Azure):** `wiremock` mock server + a `base_url` seam. Each client has a `with_base_url(token, url)` DI constructor that points every collector at the mock — `GoogleApiClient` (`api/google/compute.rs`), `CloudflareApiClient` (`cloud/cloudflare/worker.rs`), `AzureApiClient` (`api/azure/client.rs`). Each example pairs a Layer-1 contract test (deserialize a realistic body) with a Layer-2 test exercising the real pagination + error path (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare's `{success,result}` envelope).
+- **AWS SDK (`aws-sdk-*`):** `aws_smithy_runtime`'s `StaticReplayClient` injected into a test `SdkConfig` via `.http_client(...)` — replays a canned response through the *real* SDK deserializer (AWS types aren't `serde`, so this is the only way to test them). See `cloud/amazon/instance.rs` tests.
+
+Per-collector fan-out: GCP/Cloudflare/Azure wiremock tests live in `atlas-lib/tests/{gcp,cloudflare,azure}_collectors.rs`; every AWS collector is covered in `cloud/amazon/collector_tests.rs` (a shared `replay_config` helper feeds canned responses, one per request, in order — must be a unit module since `aws-config` is a normal dep unavailable to integration tests). Azure's `provider::map_resources` is split out from the fetch so the ARG-row → typed-model mapping is testable without `az login`.
+
+Still uncovered: the `cloudflare`-crate collectors (zone/dns/kv/r2) — they go through the `cloudflare` crate's own client, not the raw `CloudflareApiClient`, so they need a contract-test-on-result-structs approach rather than wiremock.
+
+Key rule: models are all `Option<T>` and serde ignores unknown fields, so a mismatched struct parses into all-`None` and passes a weak "did it parse?" check. **Assert the specific fields the projector reads are populated**, not just that deserialization succeeded.
+
 ## Build & Run
 
 ```bash

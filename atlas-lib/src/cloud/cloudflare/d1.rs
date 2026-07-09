@@ -8,13 +8,13 @@ pub struct D1Database {
 }
 
 pub async fn get_d1_databases(
-    client: &reqwest::Client,
+    client: &super::CloudflareApiClient,
     account_id: &str,
-    token: &str,
 ) -> Result<Vec<D1Database>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://api.cloudflare.com/client/v4/accounts/{}/d1/database",
-        account_id
-    );
-    super::api_get(client, &url, token, "D1 databases").await
+    client
+        .get(
+            &format!("/client/v4/accounts/{}/d1/database", account_id),
+            "D1 databases",
+        )
+        .await
 }

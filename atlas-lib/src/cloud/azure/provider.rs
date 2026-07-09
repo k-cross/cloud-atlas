@@ -34,7 +34,15 @@ pub async fn build_azure(
     "#;
 
     let raw_resources = client.query_graph(query, &subscriptions).await?;
+    Ok(Provider::Azure(map_resources(raw_resources)?))
+}
 
+/// Map raw Azure Resource Graph rows into the typed collections the projector
+/// consumes. Split out from the fetch so it's testable with canned responses
+/// (no `az login`); see `tests/azure_collectors.rs`.
+pub fn map_resources(
+    raw_resources: Vec<serde_json::Value>,
+) -> Result<Vec<MicrosoftCollection>, Box<dyn std::error::Error>> {
     let mut vms = Vec::new();
     let mut vnets = Vec::new();
     let mut subnets = Vec::new();
@@ -256,5 +264,5 @@ pub async fn build_azure(
         MicrosoftCollection::AzureCdnProfiles(cdns),
     ];
 
-    Ok(Provider::Azure(collections))
+    Ok(collections)
 }

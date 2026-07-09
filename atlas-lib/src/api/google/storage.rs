@@ -20,9 +20,9 @@ impl super::client::GoogleApiClient {
         &self,
         project_id: &str,
     ) -> Result<Vec<Bucket>, Box<dyn std::error::Error>> {
-        let url = format!(
-            "https://storage.googleapis.com/storage/v1/b?project={}",
-            project_id
+        let url = self.endpoint(
+            "https://storage.googleapis.com",
+            &format!("/storage/v1/b?project={}", project_id),
         );
         self.paginated_list(&url, "gcs", |r: BucketList| r.items)
             .await
