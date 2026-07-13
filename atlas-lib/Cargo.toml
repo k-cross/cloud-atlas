@@ -36,9 +36,7 @@ reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.21", features = ["full"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
-uuid = { version = "1.2", features = ["v4"] }
 yup-oauth2 = "11"
 aws-smithy-types = "1.0"
 
