@@ -17,7 +17,7 @@ Cloud Atlas builds a **continuous live property graph** of multi-cloud infrastru
 
 No live cloud credentials are available locally. All projection testing runs against the fake "Globex" environment in `atlas-lib/src/fixtures.rs`, which populates **every collection variant of every provider** plus deliberate cross-cloud seams. Do not write tests that require real cloud API calls.
 
-- `cargo test` — includes exhaustiveness guards: every `Node`/`Edge` kind must appear in the fixture graph. Adding an enum variant forces an update to the `kinds!` list in `definition.rs` (compile error otherwise), and the guard test then fails until fixtures + a projector actually produce it.
+- `cargo nextest run` — includes exhaustiveness guards: every `Node`/`Edge` kind must appear in the fixture graph. Adding an enum variant forces an update to the `kinds!` list in `definition.rs` (compile error otherwise), and the guard test then fails until fixtures + a projector actually produce it.
 - `cargo run --example demo` — credential-free verification simulation: projects the fixtures, writes `multi_cloud_demo.dot`, prints a per-kind coverage table, exits non-zero if any kind is missing.
 
 When adding a resource type: add the `Node` variant + `Display` + `kinds!` entry, the projector mapping, and fixture data — the guard tests enforce all three.
@@ -60,9 +60,26 @@ cargo xtask dev                # same, real collection (default; add provider fl
 cargo xtask wasm [--force]     # rebuild pkg/ if atlas-layout sources are newer (do this
                                #   after any SNAPSHOT_VERSION bump)
 cargo xtask demo               # regenerate multi_cloud_demo.json from fixtures
-cargo xtask test [--e2e]       # every suite in order: cargo (root) → cargo (atlas-render) →
+cargo xtask test [--e2e]       # every suite in order: nextest (root) → nextest (atlas-render) →
                                #   bun test → typecheck [→ playwright]
 ```
+
+**cargo-nextest is the default Rust test runner.** `cargo xtask test` runs
+`cargo nextest run --all-targets` in both workspaces, falling back to
+`cargo test --all-targets` when cargo-nextest isn't installed (`cargo install
+cargo-nextest --locked`). The printed `▶` line shows which runner was used.
+Two things to know:
+
+- `--all-targets` is load-bearing: nextest skips `examples/` by default, and it
+  is what keeps `atlas-lib/examples/demo.rs` and `atlas-layout`'s
+  `layout_demo.rs` compile-checked the way plain `cargo test` did.
+- **nextest never runs doctests.** The repo has none today; if you add one, it
+  needs a separate `cargo test --doc`.
+
+Shared config lives in `.config/nextest.toml` — one per workspace (root and
+`atlas-render/`), since nextest resolves config from the workspace root. The
+`default` profile is fail-fast with a 30s slow-test warning; a `ci` profile
+(`cargo nextest run -P ci`) runs the full suite with one retry.
 
 `xtask` (root workspace, alias in `.cargo/config.toml`) only shells out to the same commands listed below — it adds ordering, a readiness gate (frontend waits for `/snapshot.json`), staleness checking for the wasm engine, and teardown of the whole process tree.
 
@@ -88,7 +105,7 @@ Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate c
 - `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` position buffer); `parallel` feature enables rayon natively.
 - `atlas-layout-wasm` — wasm-bindgen bridge; builds with `cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`.
 - `atlas-web` — Sigma.js WebGL frontend, a **bun** app (use bun, not node/npm): `bun install && bun run wasm && bun dev` inside `atlas-render/atlas-web/` serves at `http://localhost:4680`. By default it connects to `atlas-server` over WebSocket (`ws://<host>:4681/ws`) for a live snapshot-then-patches feed; with no server it falls back to a static `/snapshot.json` fetch (or force that with `?static`).
-- Test with `cargo test` **inside `atlas-render/`** (the root `cargo test` does not cover it). Static end-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (view at `http://localhost:4680/?static`). Live end-to-end: `cargo run -p atlas-server -- --demo` (root) + `bun dev` (in `atlas-render/atlas-web/`) to watch patches apply as the demo graph churns.
+- Test with `cargo nextest run` **inside `atlas-render/`** (the root run does not cover it — it is a separate workspace). Static end-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (view at `http://localhost:4680/?static`). Live end-to-end: `cargo run -p atlas-server -- --demo` (root) + `bun dev` (in `atlas-render/atlas-web/`) to watch patches apply as the demo graph churns.
 
 ## Auth (reference only — not available locally)
 

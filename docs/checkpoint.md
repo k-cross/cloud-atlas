@@ -75,7 +75,7 @@ Coverage: **AWS 15/15**, **GCP 14**, **Azure 8**, **Cloudflare 5**.
 cargo xtask test            # full gate: workspace cargo + render + biome + unit
 cargo xtask test --e2e      # + playwright (static + live WebSocket)
 cargo xtask dev --demo      # run the whole stack, credential-free
-cargo test -p atlas-lib     # collector + projection tests (57)
+cargo nextest run -p atlas-lib   # collector + projection tests (57)
 ```
 
 Deep context: `CLAUDE.md` (architecture, testing rules, collector-test pattern),

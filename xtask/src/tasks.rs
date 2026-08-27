@@ -5,7 +5,8 @@
 //! reimplements.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 /// Repo root, derived from this crate's location (`<root>/xtask`), so xtask
@@ -30,6 +31,29 @@ pub fn run(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
     } else {
         Err(format!("{program} {} failed: {status}", args.join(" ")))
     }
+}
+
+fn nextest_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("cargo")
+            .args(["nextest", "--version"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+pub fn cargo_test(dir: &Path, scope: &[&str]) -> Result<(), String> {
+    let mut args = if nextest_available() {
+        vec!["nextest", "run"]
+    } else {
+        vec!["test"]
+    };
+    args.push("--all-targets");
+    args.extend_from_slice(scope);
+    run(dir, "cargo", &args)
 }
 
 fn web_dir() -> PathBuf {
@@ -111,8 +135,8 @@ pub fn demo_snapshot() -> Result<(), String> {
 /// Every test suite, in dependency order, fail-fast. All credential-free.
 pub fn test(e2e: bool) -> Result<(), String> {
     let root = repo_root();
-    run(&root, "cargo", &["test", "--workspace"])?;
-    run(&render_dir(), "cargo", &["test"])?;
+    cargo_test(&root, &["--workspace"])?;
+    cargo_test(&render_dir(), &[])?;
     // Biome (format + lint) for JS/TS/JSON/CSS, svelte-check for types/.svelte,
     // then the frontend unit tests (pure graph/style logic).
     run(&web_dir(), "bun", &["run", "lint"])?;
