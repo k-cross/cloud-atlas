@@ -31,9 +31,9 @@ Fixtures test **projectors** (they hand-build `Provider` collections), not the *
 
 Per-collector fan-out: GCP/Cloudflare/Azure wiremock tests live in `atlas-lib/tests/{gcp,cloudflare,azure}_collectors.rs`; every AWS collector is covered in `cloud/amazon/collector_tests.rs` (a shared `replay_config` helper feeds canned responses, one per request, in order — must be a unit module since `aws-config` is a normal dep unavailable to integration tests). Azure's `provider::map_resources` is split out from the fetch so the ARG-row → typed-model mapping is testable without `az login`.
 
-Still uncovered: the `cloudflare`-crate collectors (zone/dns/kv/r2) — they go through the `cloudflare` crate's own client, not the raw `CloudflareApiClient`, so they need a contract-test-on-result-structs approach rather than wiremock.
+The `cloudflare`-crate collectors (zone/dns/kv/r2) go through the `cloudflare` crate's own `Client`, not `CloudflareApiClient`, so their seam is `Environment::Custom(format!("{}/client/v4/", server.uri()))` — the crate joins each endpoint's relative `path()` onto that base, so wiremock works there too (same file, `serve_crate`/`crate_client` helpers). Unlike our own all-`Option` models, the crate's result structs are strict (`Zone`, `DnsRecord` have mostly required fields, `DnsContent` is an internally-tagged enum), so a drifted body fails deserialization outright.
 
-Key rule: models are all `Option<T>` and serde ignores unknown fields, so a mismatched struct parses into all-`None` and passes a weak "did it parse?" check. **Assert the specific fields the projector reads are populated**, not just that deserialization succeeded.
+Key rule: our own models are all `Option<T>` and serde ignores unknown fields, so a mismatched struct parses into all-`None` and passes a weak "did it parse?" check. **Assert the specific fields the projector reads are populated**, not just that deserialization succeeded.
 
 ## Build & Run
 
