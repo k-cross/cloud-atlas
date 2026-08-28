@@ -60,7 +60,9 @@ impl GoogleApiClient {
             let url = match &page_token {
                 Some(token) => {
                     let sep = if base_url.contains('?') { '&' } else { '?' };
-                    format!("{}{}pageToken={}", base_url, sep, token)
+                    let encoded: String =
+                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect();
+                    format!("{}{}pageToken={}", base_url, sep, encoded)
                 }
                 None => base_url.to_owned(),
             };

@@ -20,7 +20,7 @@ pub enum Provider {
     AWS(Vec<(String, AmazonCollection)>),
     GCP(Vec<GoogleCollection>),
     Azure(Vec<MicrosoftCollection>),
-    Cloudflare(CloudflareCollection),
+    Cloudflare(Box<CloudflareCollection>),
 }
 
 #[derive(Debug)]
@@ -97,11 +97,11 @@ pub enum MicrosoftCollection {
 #[derive(Debug)]
 pub struct CloudflareCollection {
     pub zones: Vec<cloudflare::endpoints::zones::zone::Zone>,
-    pub dns_records: Vec<(String, Vec<cloudflare::endpoints::dns::dns::DnsRecord>)>,
+    pub dns_records: HashMap<String, Vec<cloudflare::endpoints::dns::dns::DnsRecord>>,
     pub workers: Vec<crate::cloud::cloudflare::worker::WorkerScript>,
     pub kv_namespaces: Vec<cloudflare::endpoints::workerskv::WorkersKvNamespace>,
     pub r2_buckets: Vec<cloudflare::endpoints::r2::r2::Bucket>,
     pub durable_objects: Vec<crate::cloud::cloudflare::durable_objects::DurableObjectNamespace>,
     pub d1_databases: Vec<crate::cloud::cloudflare::d1::D1Database>,
-    pub worker_bindings: Vec<(String, Vec<crate::cloud::cloudflare::worker::WorkerBinding>)>,
+    pub worker_bindings: HashMap<String, Vec<crate::cloud::cloudflare::worker::WorkerBinding>>,
 }

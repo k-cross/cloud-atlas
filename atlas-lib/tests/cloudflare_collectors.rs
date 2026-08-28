@@ -6,7 +6,7 @@
 //! structs are strict (mostly non-`Option`), so a drifted response body fails
 //! to deserialize rather than silently yielding empties -- assertions still
 //! pin the specific fields `provider.rs` and the projector read.
-//! `worker.rs` holds the fuller raw-REST reference (envelope + success:false).
+//! `worker.rs` holds `get_workers` and `get_worker_bindings`.
 
 use atlas_lib::cloud::cloudflare::CloudflareApiClient;
 use atlas_lib::cloud::cloudflare::d1::get_d1_databases;
@@ -21,7 +21,7 @@ use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::client::ClientConfig;
 use cloudflare::framework::client::async_api::Client;
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn serve(p: &str, result: Value) -> (MockServer, CloudflareApiClient) {
@@ -154,6 +154,42 @@ async fn zones() {
     assert_eq!(zones[0].id, "zone-1");
     assert_eq!(zones[0].name, "globex.com");
     assert_eq!(zones[0].account.id, "acct-1");
+}
+
+#[tokio::test]
+async fn zones_follows_pagination_past_the_first_page() {
+    let server = MockServer::start().await;
+
+    let full_page: Vec<Value> = (0..50)
+        .map(|i| zone_json(&format!("zone-{i}"), &format!("z{i}.globex.com"), "acct-1"))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/client/v4/zones"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "errors": [], "messages": [], "result": full_page
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/client/v4/zones"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "errors": [], "messages": [],
+            "result": [zone_json("zone-50", "z50.globex.com", "acct-1")]
+        })))
+        .mount(&server)
+        .await;
+
+    let zones = get_zones(&crate_client(&server)).await.expect("ok");
+
+    assert_eq!(
+        zones.len(),
+        51,
+        "a full first page must not end collection -- zones beyond page 1 were dropped"
+    );
+    assert_eq!(zones[50].id, "zone-50");
 }
 
 #[tokio::test]

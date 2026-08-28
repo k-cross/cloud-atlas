@@ -44,7 +44,7 @@ cargo run -- --gcp-projects my-project
 cargo run -- --cloudflare      # requires CLOUDFLARE_API_TOKEN env var
 cargo run -- --azure-subscriptions sub-id
 cargo run -- --daemon          # polls every 60 seconds
-cargo run -- --all --verbose   # include all mappings, verbose output
+cargo run -- --verbose         # verbose output
 ```
 
 Output is written to `atlas.dot` plus a render snapshot `atlas.json` in the working directory (both gitignored). Visualize `.dot` with Gephi.

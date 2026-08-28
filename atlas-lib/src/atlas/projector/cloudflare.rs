@@ -9,7 +9,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
         let zone_node = builder.get_or_add_node(Node::CloudflareZone(zone.id.as_str().into()));
 
         // Find DNS records for this zone
-        if let Some((_, records)) = data.dns_records.iter().find(|(zid, _)| zid == &zone.id) {
+        if let Some(records) = data.dns_records.get(&zone.id) {
             for record in records {
                 let record_node =
                     builder.get_or_add_node(Node::CloudflareDnsRecord(record.id.as_str().into()));
@@ -70,11 +70,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
             builder.get_or_add_node(Node::CloudflareWorker(worker.id.as_str().into()));
 
         // Find bindings for this worker
-        if let Some((_, bindings)) = data
-            .worker_bindings
-            .iter()
-            .find(|(wid, _)| wid == &worker.id)
-        {
+        if let Some(bindings) = data.worker_bindings.get(&worker.id) {
             for binding in bindings {
                 match binding.binding_type.as_str() {
                     "kv_namespace" => {
@@ -108,7 +104,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                             builder.add_edge(worker_node, d1_node, Edge::ConnectsTo);
                         }
                     }
-                    "secret" | "plain_text" => {
+                    "secret_text" | "plain_text" => {
                         // Attempt to extract external service connections (e.g. Postgres URIs)
                         if let Some(text) = binding.extra.get("text").and_then(|t| t.as_str())
                             && (text.starts_with("postgres://")

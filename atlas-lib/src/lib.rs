@@ -17,9 +17,6 @@ pub struct Settings {
     /// Whether to include Cloudflare resources.
     pub cloudflare: bool,
 
-    /// Include all mappings by default
-    pub all: bool,
-
     /// Whether to display additional information.
     pub verbose: bool,
 

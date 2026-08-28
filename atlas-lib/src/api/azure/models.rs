@@ -7,6 +7,7 @@ pub struct AzureResource {
     pub name: Option<String>,
     pub r#type: Option<String>,
     pub location: Option<String>,
+    pub kind: Option<String>,
     pub properties: Option<serde_json::Value>,
 }
 

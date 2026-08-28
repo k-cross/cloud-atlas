@@ -14,6 +14,8 @@ pub struct AzureApiClient {
 }
 
 impl AzureApiClient {
+    const ARG_PAGE_SIZE: u32 = 1000;
+
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let credential = AzureCliCredential::new(None)?;
         let token_response = credential
@@ -61,6 +63,7 @@ impl AzureApiClient {
             "subscriptions": subscriptions,
             "query": query,
             "options": {
+                "$top": Self::ARG_PAGE_SIZE,
                 "$skipToken": null
             }
         });
@@ -96,6 +99,14 @@ impl AzureApiClient {
             {
                 current_body["options"]["$skipToken"] = skip_token.clone();
                 continue;
+            }
+
+            if parsed.get("resultTruncated").and_then(|t| t.as_str()) == Some("true") {
+                return Err(
+                    "Azure Resource Graph truncated the result set without a continuation token; \
+                     the returned inventory would be incomplete"
+                        .into(),
+                );
             }
             break;
         }

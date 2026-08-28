@@ -8,20 +8,22 @@
 //!                      {"type":"get_neighbors","key"}  subgraph around one node
 //!   server -> client: {"type":"snapshot", version, nodes, edges}
 //!                      {"type":"patch", ...GraphPatch}
-//!                      {"type":"neighbors", key, nodes, edges}
+//!                      {"type":"neighbors", version, key, nodes, edges}
 //!                      {"type":"error", message}
 
 use crate::state::AppState;
 use atlas_lib::atlas::definition::{Edge, Node};
-use atlas_lib::atlas::export::{edge_key, node_key, render_snapshot};
+use atlas_lib::atlas::export::{SNAPSHOT_VERSION, edge_key, node_key, render_snapshot};
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
-use petgraph::graph::Graph;
+use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::broadcast::error::RecvError;
 
 #[derive(Deserialize)]
@@ -128,20 +130,36 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
         return json!({ "type": "error", "message": format!("no node with key {key}") });
     };
 
-    let mut nodes = vec![render_node_value(graph, center)];
+    let mut local_ids: HashMap<NodeIndex, u32> = HashMap::new();
+    let mut nodes = Vec::new();
     let mut edges = Vec::new();
+    let mut seen_edges = HashSet::new();
+
+    local_ids.insert(center, 0);
+    nodes.push(render_node_value(graph, center, 0));
+
     for edge in graph
         .edges(center)
         .chain(graph.edges_directed(center, petgraph::Direction::Incoming))
     {
+        if !seen_edges.insert(edge.id()) {
+            continue;
+        }
+
         let (a, b) = (edge.source(), edge.target());
-        let other = if a == center { b } else { a };
-        nodes.push(render_node_value(graph, other));
+        for endpoint in [a, b] {
+            if let Entry::Vacant(slot) = local_ids.entry(endpoint) {
+                let local_id = nodes.len() as u32;
+                slot.insert(local_id);
+                nodes.push(render_node_value(graph, endpoint, local_id));
+            }
+        }
+
         let sk = node_key(&graph[a]);
         let tk = node_key(&graph[b]);
         edges.push(json!({
-            "source": a.index() as u32,
-            "target": b.index() as u32,
+            "source": local_ids[&a],
+            "target": local_ids[&b],
             "key": edge_key(&sk, &tk, edge.weight()),
             "source_key": sk,
             "target_key": tk,
@@ -149,14 +167,84 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
         }));
     }
 
-    json!({ "type": "neighbors", "key": key, "nodes": nodes, "edges": edges })
+    json!({
+        "type": "neighbors",
+        "version": SNAPSHOT_VERSION,
+        "key": key,
+        "nodes": nodes,
+        "edges": edges,
+    })
 }
 
-fn render_node_value(graph: &Graph<Node, Edge>, i: petgraph::graph::NodeIndex) -> Value {
+fn render_node_value(graph: &Graph<Node, Edge>, i: NodeIndex, id: u32) -> Value {
     json!({
-        "id": i.index() as u32,
+        "id": id,
         "key": node_key(&graph[i]),
         "label": graph[i].to_string(),
         "kind": graph[i].kind(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::neighbors_value;
+    use atlas_lib::atlas::definition::{Edge, Node};
+    use atlas_lib::atlas::export::{SNAPSHOT_VERSION, node_key};
+    use petgraph::graph::Graph;
+
+    #[test]
+    fn neighbors_indices_address_the_payloads_own_node_array() {
+        let mut graph: Graph<Node, Edge> = Graph::new();
+        let center = graph.add_node(Node::GenericHostname("center.example".into()));
+        let filler: Vec<_> = (0..8)
+            .map(|i| graph.add_node(Node::GenericIpAddress(format!("192.0.2.{i}").into())))
+            .collect();
+        let peer = graph.add_node(Node::GenericIpAddress("10.0.0.1".into()));
+
+        graph.add_edge(center, peer, Edge::ResolvesTo);
+        graph.add_edge(center, peer, Edge::RoutesTo);
+        graph.add_edge(peer, center, Edge::RoutesTo);
+        graph.add_edge(center, center, Edge::RoutesTo);
+        graph.add_edge(filler[0], filler[1], Edge::RoutesTo);
+
+        let value = neighbors_value(&graph, &node_key(&graph[center]));
+        let nodes = value["nodes"].as_array().expect("nodes array");
+        let edges = value["edges"].as_array().expect("edges array");
+
+        assert_eq!(
+            nodes.len(),
+            2,
+            "a neighbor reachable by several edges must appear once"
+        );
+        assert_eq!(edges.len(), 4, "the self-loop must not be emitted twice");
+
+        for (position, node) in nodes.iter().enumerate() {
+            assert_eq!(node["id"].as_u64(), Some(position as u64));
+        }
+
+        for edge in edges {
+            for endpoint in ["source", "target"] {
+                let index = edge[endpoint].as_u64().expect("endpoint index");
+                assert!(
+                    (index as usize) < nodes.len(),
+                    "{endpoint} {index} is outside the payload's {} nodes",
+                    nodes.len()
+                );
+                assert_eq!(
+                    nodes[index as usize]["key"].as_str(),
+                    edge[&format!("{endpoint}_key")].as_str(),
+                    "positional index and stable key must name the same node"
+                );
+            }
+        }
+
+        assert_eq!(value["version"].as_u64(), Some(SNAPSHOT_VERSION as u64));
+    }
+
+    #[test]
+    fn neighbors_reports_an_error_for_an_unknown_key() {
+        let graph: Graph<Node, Edge> = Graph::new();
+        let value = neighbors_value(&graph, "nope");
+        assert_eq!(value["type"].as_str(), Some("error"));
+    }
 }

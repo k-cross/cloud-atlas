@@ -20,10 +20,6 @@ pub struct Opt {
     #[clap(long)]
     cloudflare: bool,
 
-    /// Include all mappings by default
-    #[clap(short, long)]
-    all: bool,
-
     /// Whether to display additional information.
     #[clap(short, long)]
     verbose: bool,
@@ -50,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gcp_projects: opts.gcp_projects,
         azure_subscriptions: opts.azure_subscriptions,
         cloudflare: opts.cloudflare,
-        all: opts.all,
         verbose: opts.verbose,
         exclude_by_default: opts.exclude,
     };

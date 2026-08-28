@@ -30,7 +30,7 @@ pub async fn build_azure(
             "microsoft.network/dnszones",
             "microsoft.cdn/profiles"
         )
-        | project id, name, type, location, properties
+        | project id, name, type, location, kind, properties
     "#;
 
     let raw_resources = client.query_graph(query, &subscriptions).await?;
@@ -172,12 +172,7 @@ pub fn map_resources(
                 });
             }
             "microsoft.web/sites" => {
-                let kind = res
-                    .properties
-                    .as_ref()
-                    .and_then(|p| p.get("kind"))
-                    .and_then(|k| k.as_str())
-                    .unwrap_or("");
+                let kind = res.kind.as_deref().unwrap_or("");
                 if kind.contains("functionapp") {
                     funcs.push(FunctionApp {
                         id: res.id,

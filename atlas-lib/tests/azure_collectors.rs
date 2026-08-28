@@ -97,11 +97,11 @@ fn web_site_kind_splits_function_apps_from_app_services() {
     let cols = map(vec![
         json!({
             "id": "/f", "name": "fn-app", "type": "microsoft.web/sites", "location": "eastus",
-            "properties": { "kind": "functionapp,linux" }
+            "kind": "functionapp,linux", "properties": {}
         }),
         json!({
             "id": "/w", "name": "web-app", "type": "microsoft.web/sites", "location": "eastus",
-            "properties": { "kind": "app,linux" }
+            "kind": "app,linux", "properties": {}
         }),
     ]);
     assert_eq!(variant!(cols, AzureFunctionApps).len(), 1);

@@ -798,7 +798,7 @@ pub fn cloudflare() -> Provider {
         version: None,
     };
 
-    let worker_bindings = vec![(
+    let worker_bindings = HashMap::from([(
         "edge-router".to_owned(),
         vec![
             WorkerBinding {
@@ -835,7 +835,7 @@ pub fn cloudflare() -> Provider {
             },
             WorkerBinding {
                 name: "ANALYTICS_DB".to_owned(),
-                binding_type: "secret".to_owned(),
+                binding_type: "secret_text".to_owned(),
                 namespace_id: None,
                 bucket_name: None,
                 id: None,
@@ -845,16 +845,16 @@ pub fn cloudflare() -> Provider {
                 )]),
             },
         ],
-    )];
+    )]);
 
-    Provider::Cloudflare(CloudflareCollection {
+    Provider::Cloudflare(Box::new(CloudflareCollection {
         zones: vec![serde_json::from_value(zone_json).expect("fixture zone must deserialize")],
-        dns_records: vec![("zone-globex".to_owned(), records)],
+        dns_records: HashMap::from([("zone-globex".to_owned(), records)]),
         workers: vec![worker],
         kv_namespaces: vec![kv],
         r2_buckets: vec![r2],
         durable_objects: vec![durable],
         d1_databases: vec![d1],
         worker_bindings,
-    })
+    }))
 }

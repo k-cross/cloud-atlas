@@ -31,13 +31,13 @@ pub async fn build_cloudflare(
     }
     let zones = super::zone::get_zones(&client).await?;
 
-    let mut all_dns_records = Vec::new();
+    let mut all_dns_records = std::collections::HashMap::new();
     let mut all_workers = Vec::new();
     let mut all_kv_namespaces = Vec::new();
     let mut all_r2_buckets = Vec::new();
     let mut all_durable_objects = Vec::new();
     let mut all_d1_databases = Vec::new();
-    let mut all_worker_bindings = Vec::new();
+    let mut all_worker_bindings = std::collections::HashMap::new();
     let mut accounts_seen = std::collections::HashSet::new();
 
     for zone in &zones {
@@ -45,7 +45,7 @@ pub async fn build_cloudflare(
             println!("Fetching DNS records for zone: {}", zone.name);
         }
         if let Ok(records) = super::dns::get_dns_records(&client, &zone.id).await {
-            all_dns_records.push((zone.id.clone(), records));
+            all_dns_records.insert(zone.id.clone(), records);
         }
 
         // Fetch account-level resources only once per account
@@ -76,7 +76,7 @@ pub async fn build_cloudflare(
             });
             for (wid, res) in futures::future::join_all(bindings_futures).await {
                 if let Ok(bindings) = res {
-                    all_worker_bindings.push((wid, bindings));
+                    all_worker_bindings.insert(wid, bindings);
                 }
             }
             all_workers.extend(workers);
@@ -101,7 +101,7 @@ pub async fn build_cloudflare(
         }
     }
 
-    Ok(Provider::Cloudflare(CloudflareCollection {
+    Ok(Provider::Cloudflare(Box::new(CloudflareCollection {
         zones,
         dns_records: all_dns_records,
         workers: all_workers,
@@ -110,5 +110,5 @@ pub async fn build_cloudflare(
         durable_objects: all_durable_objects,
         d1_databases: all_d1_databases,
         worker_bindings: all_worker_bindings,
-    }))
+    })))
 }
