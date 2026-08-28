@@ -1,5 +1,5 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
+    use crate::cloud::definition::{AmazonCollection, QueueUrl};
     use aws_sdk_sqs::Client;
 
     pub async fn runner(
@@ -18,7 +18,7 @@ pub mod collector {
 
             let resp = req.send().await?;
             for q in resp.queue_urls() {
-                queues.push(q.to_string());
+                queues.push(QueueUrl(q.to_string()));
             }
 
             next_token = resp.next_token().map(|s| s.to_string());
@@ -34,7 +34,7 @@ pub mod collector {
 #[cfg(test)]
 mod tests {
     use super::collector::runner;
-    use crate::cloud::definition::AmazonCollection;
+    use crate::cloud::definition::{AmazonCollection, QueueUrl};
     use aws_credential_types::Credentials;
     use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
@@ -67,7 +67,9 @@ mod tests {
         };
         assert_eq!(
             queues,
-            vec!["https://sqs.us-east-1.amazonaws.com/111111111111/my-queue".to_string()]
+            vec![QueueUrl(
+                "https://sqs.us-east-1.amazonaws.com/111111111111/my-queue".to_owned()
+            )]
         );
     }
 }

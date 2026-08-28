@@ -20,6 +20,7 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
     AmazonCollection, CloudflareCollection, GoogleCollection, MicrosoftCollection, Provider,
+    QueueUrl, TableName,
 };
 use std::collections::HashMap;
 
@@ -369,13 +370,13 @@ pub fn aws() -> Provider {
         (r.clone(), AmazonCollection::AmazonRds(vec![rds])),
         (
             r.clone(),
-            AmazonCollection::AmazonDynamoDb(vec!["globex-events".to_owned()]),
+            AmazonCollection::AmazonDynamoDb(vec![TableName("globex-events".to_owned())]),
         ),
         (
             r.clone(),
-            AmazonCollection::AmazonSqs(vec![
+            AmazonCollection::AmazonSqs(vec![QueueUrl(
                 "https://sqs.us-east-1.amazonaws.com/123/globex-jobs".to_owned(),
-            ]),
+            )]),
         ),
         (r.clone(), AmazonCollection::AmazonSns(vec![sns])),
         (

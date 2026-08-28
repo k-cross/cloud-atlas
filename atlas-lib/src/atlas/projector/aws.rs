@@ -347,14 +347,14 @@ fn project_amazon_collection(
         }
         AmazonCollection::AmazonDynamoDb(tables) => {
             for t in tables {
-                let node = Node::AwsDynamoDbTable(t.as_str().into());
+                let node = Node::AwsDynamoDbTable(t.0.as_str().into());
                 let idx = builder.get_or_add_node(node);
                 builder.add_edge(region_idx, idx, Edge::Contains);
             }
         }
         AmazonCollection::AmazonSqs(queues) => {
             for q in queues {
-                let node = Node::AwsSqsQueue(q.as_str().into());
+                let node = Node::AwsSqsQueue(q.0.as_str().into());
                 let idx = builder.get_or_add_node(node);
                 builder.add_edge(region_idx, idx, Edge::Contains);
             }

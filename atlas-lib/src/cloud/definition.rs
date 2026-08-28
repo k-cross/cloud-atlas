@@ -23,6 +23,24 @@ pub enum Provider {
     Cloudflare(Box<CloudflareCollection>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TableName(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct QueueUrl(pub String);
+
+impl std::fmt::Display for TableName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for QueueUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug)]
 pub enum AmazonCollection {
     AmazonInstances(Vec<AWSInstance>),
@@ -43,8 +61,8 @@ pub enum AmazonCollection {
     AmazonEks(Vec<aws_sdk_eks::types::Cluster>),
     AmazonApiGateway(Vec<aws_sdk_apigateway::types::RestApi>),
     AmazonRds(Vec<aws_sdk_rds::types::DbInstance>),
-    AmazonDynamoDb(Vec<String>), // Table names
-    AmazonSqs(Vec<String>),      // Queue URLs
+    AmazonDynamoDb(Vec<TableName>),
+    AmazonSqs(Vec<QueueUrl>),
     AmazonSns(Vec<aws_sdk_sns::types::Topic>),
     AmazonCloudFront(Vec<aws_sdk_cloudfront::types::DistributionSummary>),
     AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),

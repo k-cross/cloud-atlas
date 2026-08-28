@@ -1,5 +1,5 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
+    use crate::cloud::definition::{AmazonCollection, TableName};
     use aws_sdk_dynamodb::Client;
 
     pub async fn runner(
@@ -18,7 +18,7 @@ pub mod collector {
 
             let resp = req.send().await?;
             for t in resp.table_names() {
-                tables.push(t.to_string());
+                tables.push(TableName(t.to_string()));
             }
 
             last_eval = resp.last_evaluated_table_name().map(|s| s.to_string());

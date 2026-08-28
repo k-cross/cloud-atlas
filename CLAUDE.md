@@ -129,7 +129,7 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
 
 ## Established Helpers (use these, don't re-duplicate)
 
-- AWS: `cloud/amazon.rs::load_config(region)` — SDK config is loaded once per region in `provider.rs` and passed as `&SdkConfig` to collectors.
+- AWS: `cloud/amazon.rs::load_config(region)` — SDK config is loaded once per region in `provider.rs` and passed as `&SdkConfig` to collectors. Register a new collector in the `collectors!` list in `amazon/provider.rs` — one `"name" => runner(..)` line, no separate join/destructure to keep in sync, and the name is what a `CollectionFailure` reports as its scope.
 - GCP: `GoogleApiClient::paginated_list` in `api/google/client.rs` — every GCP list endpoint goes through it (handles auth, paging, errors).
 - Cloudflare: `api_get` in `cloud/cloudflare/mod.rs` — for raw REST endpoints not covered by the `cloudflare` crate.
 - Projectors: `project_leaf!` macro in `projector/{azure,gcp}.rs` for resources that only add a standalone node.

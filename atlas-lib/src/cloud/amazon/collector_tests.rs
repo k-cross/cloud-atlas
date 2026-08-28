@@ -5,7 +5,7 @@
 //! The heavily-commented reference examples live in `instance.rs` /
 //! `security_group.rs` / `sqs.rs`.
 
-use crate::cloud::definition::AmazonCollection;
+use crate::cloud::definition::{AmazonCollection, TableName};
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
@@ -92,7 +92,13 @@ async fn dynamodb_tables() {
     else {
         panic!("expected AmazonDynamoDb");
     };
-    assert_eq!(tables, vec!["orders".to_string(), "users".to_string()]);
+    assert_eq!(
+        tables,
+        vec![
+            TableName("orders".to_owned()),
+            TableName("users".to_owned())
+        ]
+    );
 }
 
 #[tokio::test]
