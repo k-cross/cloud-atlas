@@ -11,7 +11,8 @@ Cloud Atlas builds a **continuous live property graph** of multi-cloud infrastru
 1. **Always use strongly typed enums.** The graph is `petgraph::Graph<Node, Edge>`. All node and edge types are defined in `atlas-lib/src/atlas/definition.rs`. Never use raw strings or hashmaps to represent resources.
 2. **ENI is the core networking pivot.** Semantic paths start from the Elastic Network Interface: `Instance -> HasIp -> ENI -> AttachedTo -> Subnet`.
 3. **`Display` is required on every new type.** Every new `Node` or `Edge` variant must implement `std::fmt::Display` for clean `.dot` output. Follow the existing `Type::SubType(id)` format pattern.
-4. **Cross-cloud stitching via generic nodes.** Use `Node::GenericIpAddress` and `Node::GenericHostname` as cross-cloud integration points. Connect to them with `Edge::RoutesTo` (traffic) or `Edge::ResolvesTo` (DNS). Graph deduplication is automatic — `GraphBuilder` merges identical generic nodes from different clouds via its `HashMap<Node, NodeIndex>`.
+4. **Never let a failure look like an absence.** This is a live graph, so "we could not read it" and "it is gone" must stay distinguishable all the way to the differ — see the `CollectionReport` contract under Live Server.
+5. **Cross-cloud stitching via generic nodes.** Use `Node::GenericIpAddress` and `Node::GenericHostname` as cross-cloud integration points. Connect to them with `Edge::RoutesTo` (traffic) or `Edge::ResolvesTo` (DNS). Graph deduplication is automatic — `GraphBuilder` merges identical generic nodes from different clouds via its `HashMap<Node, NodeIndex>`.
 
 ## Testing Without Cloud Credentials
 
@@ -86,6 +87,8 @@ Shared config lives in `.config/nextest.toml` — one per workspace (root and
 ## Live Server (`atlas-server/`)
 
 `atlas-cli` is the batch/one-shot path. `atlas-server` is the long-running **live backend** (Phase 2 of `docs/change_monitoring_design.md`): it owns a persistent in-memory graph, reconciles it against the providers on an interval (Tier-3 polling, reusing `AtlasEngine::collect`), diffs each scan (`atlas::patch::diff`), and pushes incremental `GraphPatch`es to the frontend over WebSocket. It never wipes the graph — the differ is the incremental path the daemon lacks.
+
+**Collection outcomes are part of the contract.** `AtlasEngine::collect` returns a `Scan { builder, report }`, where the `CollectionReport` lists every source that could not be read (`atlas::collection`). A failed fetch must never reach the projector as an empty collection: the differ would read the absence as deletion and broadcast a removal for every node that source owns, which the next healthy tick puts straight back. When `report.is_complete()` is false, `poll::reconcile` folds the live graph forward (`patch::carry_forward`) so the tick is purely additive — new resources still land, unconfirmed ones are retained until a complete scan can speak to them. Providers signal this by returning `ProviderScan { provider, failures }`: `Err` for a source that failed outright, `Ok` with a non-empty `failures` for a partial read (a throttled AWS collector, one unreachable Cloudflare zone). Never swallow a collector error with `.ok()` or `if let Ok(..)` — record it on the scan.
 
 ```bash
 cargo run -p atlas-server -- --demo                  # credential-free: serves Globex fixtures

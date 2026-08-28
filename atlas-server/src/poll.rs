@@ -4,9 +4,10 @@
 //! streams, flow logs) plug in on top of this later.
 
 use crate::state::AppState;
+use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
-use atlas_lib::atlas::patch::diff;
+use atlas_lib::atlas::patch::{GraphPatch, carry_forward, diff};
 use atlas_lib::fixtures;
 use petgraph::graph::Graph;
 use std::time::Duration;
@@ -21,11 +22,16 @@ pub enum Source {
 }
 
 impl Source {
-    /// Produce the graph for tick `n`.
-    async fn scan(&self, tick: u64) -> Graph<Node, Edge> {
+    /// Produce the graph for tick `n`, together with what could not be read
+    /// while producing it. The demo source is always complete -- it never
+    /// leaves the process.
+    async fn scan(&self, tick: u64) -> (Graph<Node, Edge>, CollectionReport) {
         match self {
-            Source::Live(engine) => engine.collect().await.graph,
-            Source::Demo => demo_graph(tick),
+            Source::Live(engine) => {
+                let scan = engine.collect().await;
+                (scan.builder.graph, scan.report)
+            }
+            Source::Demo => (demo_graph(tick), CollectionReport::default()),
         }
     }
 }
@@ -43,6 +49,18 @@ fn demo_graph(tick: u64) -> Graph<Node, Edge> {
     builder.graph
 }
 
+/// Turn a scan into the patch to broadcast. A `complete` scan is authoritative
+/// and diffs straight through, removals included. An incomplete one cannot tell
+/// "deleted" from "unreadable", so the live graph is folded forward first and
+/// the tick becomes purely additive -- `next` is left as the exact graph the
+/// caller should install.
+fn reconcile(live: &Graph<Node, Edge>, next: &mut Graph<Node, Edge>, complete: bool) -> GraphPatch {
+    if !complete {
+        carry_forward(next, live);
+    }
+    diff(live, next)
+}
+
 /// Run forever, reconciling every `interval`. Only non-empty diffs mutate the
 /// live graph or hit the broadcast channel.
 pub async fn run(state: AppState, source: Source, interval: Duration) {
@@ -51,12 +69,22 @@ pub async fn run(state: AppState, source: Source, interval: Duration) {
         tokio::time::sleep(interval).await;
         tick += 1;
 
-        let next = source.scan(tick).await;
+        let (mut next, report) = source.scan(tick).await;
+        let complete = report.is_complete();
+        if !complete {
+            tracing::warn!(
+                tick,
+                failures = report.failures.len(),
+                "collection incomplete, holding unconfirmed resources: {}",
+                report.summary()
+            );
+        }
+
         // Diff under the read lock — no full-graph clone, and the critical
         // section is just the comparison. WebSocket readers share the lock.
         let patch = {
             let live = state.live.read().await;
-            diff(&live, &next)
+            reconcile(&live, &mut next, complete)
         };
         if patch.is_empty() {
             continue;
@@ -79,6 +107,88 @@ pub async fn run(state: AppState, source: Source, interval: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use atlas_lib::atlas::collection::{CollectionReport, CollectionSource};
+
+    fn without_kind(graph: &Graph<Node, Edge>, kind: &str) -> Graph<Node, Edge> {
+        let mut trimmed = graph.clone();
+        trimmed.retain_nodes(|g, i| g[i].kind() != kind);
+        trimmed
+    }
+
+    #[test]
+    fn an_incomplete_scan_never_removes() {
+        let live = demo_graph(1);
+        let dropped = "AwsEc2Instance";
+
+        let mut next = without_kind(&live, dropped);
+        assert!(
+            next.node_count() < live.node_count(),
+            "fixture must contain the kind this test drops"
+        );
+
+        let complete_patch = reconcile(&live, &mut next.clone(), true);
+        assert!(
+            !complete_patch.removed_nodes.is_empty(),
+            "a complete scan is authoritative and must still delete"
+        );
+
+        let patch = reconcile(&live, &mut next, false);
+        assert!(
+            patch.removed_nodes.is_empty() && patch.removed_edges.is_empty(),
+            "an incomplete scan deleted {} nodes / {} edges",
+            patch.removed_nodes.len(),
+            patch.removed_edges.len()
+        );
+        assert_eq!(
+            next.node_count(),
+            live.node_count(),
+            "unconfirmed resources must be carried into the installed graph"
+        );
+    }
+
+    #[test]
+    fn an_incomplete_scan_still_applies_additions() {
+        let live = demo_graph(2);
+        let mut next = without_kind(&demo_graph(3), "AwsEc2Instance");
+
+        let patch = reconcile(&live, &mut next, false);
+
+        assert_eq!(
+            patch.added_nodes.len(),
+            2,
+            "sentinel additions from the sources that did respond must land"
+        );
+        assert_eq!(patch.added_edges.len(), 1);
+        assert!(patch.removed_nodes.is_empty() && patch.removed_edges.is_empty());
+    }
+
+    #[test]
+    fn a_complete_scan_is_unaffected_by_carry_forward() {
+        let live = demo_graph(2);
+        let mut next = demo_graph(3);
+        let same = next.clone();
+
+        let with_policy = reconcile(&live, &mut next, true);
+        let plain = diff(&live, &same);
+
+        assert_eq!(with_policy.added_nodes.len(), plain.added_nodes.len());
+        assert_eq!(with_policy.removed_nodes.len(), plain.removed_nodes.len());
+        assert_eq!(with_policy.added_edges.len(), plain.added_edges.len());
+        assert_eq!(with_policy.removed_edges.len(), plain.removed_edges.len());
+    }
+
+    #[test]
+    fn a_report_distinguishes_failure_from_absence() {
+        let clean = CollectionReport::default();
+        assert!(clean.is_complete());
+
+        let mut partial = CollectionReport::default();
+        partial.record(CollectionSource::Aws, "us-east-1/dynamodb", "throttled");
+        assert!(!partial.is_complete());
+        assert!(partial.summary().contains("AWS"));
+        assert!(partial.summary().contains("us-east-1/dynamodb"));
+    }
 
     #[test]
     fn demo_graph_toggles_sentinel_by_parity() {

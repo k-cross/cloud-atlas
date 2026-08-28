@@ -1,14 +1,16 @@
 use crate::Settings;
 use crate::api::google::client::GoogleApiClient;
 use crate::api::google::{compute, compute_network, dns, functions, gke, sql};
+use crate::atlas::collection::{CollectionFailure, CollectionSource, ProviderScan};
 use crate::cloud::definition::{GoogleCollection, Provider};
 use yup_oauth2::ApplicationSecret;
 
 pub async fn build_gcp(
     _verbose: bool,
     opts: &Settings,
-) -> Result<Provider, Box<dyn std::error::Error>> {
+) -> Result<ProviderScan, Box<dyn std::error::Error>> {
     let mut services = Vec::new();
+    let mut failures = Vec::new();
 
     let secret: ApplicationSecret = Default::default();
 
@@ -62,14 +64,17 @@ pub async fn build_gcp(
                 );
 
                 let mut local_services = Vec::new();
+                let mut local_failures = Vec::new();
 
                 macro_rules! add_if_ok {
                     ($res:expr, $variant:path) => {
                         match $res {
                             Ok(items) => local_services.push($variant(items)),
-                            Err(e) => {
-                                eprintln!("Error fetching GCP resource in project {}: {:?}", p, e)
-                            }
+                            Err(e) => local_failures.push(CollectionFailure {
+                                source: CollectionSource::Gcp,
+                                scope: format!("{}/{}", p, stringify!($variant)),
+                                message: format!("{e:?}"),
+                            }),
                         }
                     };
                 }
@@ -88,15 +93,19 @@ pub async fn build_gcp(
                 add_if_ok!(r_subnets, GoogleCollection::GoogleSubnetworks);
                 add_if_ok!(r_fwrules, GoogleCollection::GoogleForwardingRules);
 
-                Ok::<Vec<GoogleCollection>, Box<dyn std::error::Error>>(local_services)
+                Ok::<_, Box<dyn std::error::Error>>((local_services, local_failures))
             });
         }
     }
 
     let results = futures::future::try_join_all(futures).await?;
-    for mut res in results {
-        services.append(&mut res);
+    for (mut project_services, mut project_failures) in results {
+        services.append(&mut project_services);
+        failures.append(&mut project_failures);
     }
 
-    Ok(Provider::GCP(services))
+    Ok(ProviderScan {
+        provider: Provider::GCP(services),
+        failures,
+    })
 }

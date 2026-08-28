@@ -78,7 +78,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             exclude_by_default: false,
         };
         let engine = AtlasEngine::new(settings);
-        let initial = engine.collect().await.graph;
+        let scan = engine.collect().await;
+        if !scan.report.is_complete() {
+            tracing::warn!(
+                failures = scan.report.failures.len(),
+                "initial collection incomplete: {}",
+                scan.report.summary()
+            );
+        }
+        let initial = scan.builder.graph;
         (initial, Source::Live(engine))
     };
 

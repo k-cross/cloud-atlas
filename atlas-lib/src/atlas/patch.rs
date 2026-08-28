@@ -12,10 +12,10 @@
 
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{RenderEdge, RenderNode, SNAPSHOT_VERSION, edge_key, node_key};
-use petgraph::graph::Graph;
+use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// A minimal set of changes between two graph states. Added items carry their
 /// full render info so the frontend can materialize them; removed items are
@@ -110,5 +110,46 @@ pub fn diff(old: &Graph<Node, Edge>, new: &Graph<Node, Edge>) -> GraphPatch {
         removed_nodes,
         added_edges,
         removed_edges,
+    }
+}
+
+/// Fold everything in `previous` that is missing from `next` back into `next`,
+/// so a diff against `previous` can only add.
+///
+/// This is the reconciliation policy for an *incomplete* scan. When a source
+/// could not be read, its resources are absent from `next` for a reason that
+/// has nothing to do with them being gone, and diffing as-is would broadcast
+/// spurious removals. Carrying the previous state forward makes the tick
+/// purely additive: genuinely new resources from the sources that *did* respond
+/// still land, and anything unconfirmed is retained until a complete scan can
+/// speak to it. Stale resources therefore linger rather than flicker, which is
+/// the safer failure for a graph that is meant to be authoritative.
+pub fn carry_forward(next: &mut Graph<Node, Edge>, previous: &Graph<Node, Edge>) {
+    let mut index: HashMap<Node, NodeIndex> =
+        next.node_indices().map(|i| (next[i].clone(), i)).collect();
+    let mut present: HashSet<(Node, Node, Edge)> = next
+        .edge_references()
+        .map(|e| {
+            (
+                next[e.source()].clone(),
+                next[e.target()].clone(),
+                e.weight().clone(),
+            )
+        })
+        .collect();
+
+    for i in previous.node_indices() {
+        let node = &previous[i];
+        if !index.contains_key(node) {
+            let added = next.add_node(node.clone());
+            index.insert(node.clone(), added);
+        }
+    }
+
+    for e in previous.edge_references() {
+        let (source, target, weight) = (&previous[e.source()], &previous[e.target()], e.weight());
+        if present.insert((source.clone(), target.clone(), weight.clone())) {
+            next.add_edge(index[source], index[target], weight.clone());
+        }
     }
 }

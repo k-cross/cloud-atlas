@@ -1,3 +1,4 @@
+pub mod collection;
 pub mod definition;
 pub mod engine;
 pub mod export;

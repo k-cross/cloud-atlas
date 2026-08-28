@@ -1,4 +1,5 @@
 use crate::Settings;
+use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::amazon::provider::build_aws;
@@ -7,6 +8,13 @@ use crate::cloud::cloudflare::provider::build_cloudflare;
 use crate::cloud::google::provider::build_gcp;
 use petgraph::dot::Dot;
 use std::time::Duration;
+
+/// One collection pass: the projected graph plus what could not be read while
+/// producing it.
+pub struct Scan {
+    pub builder: GraphBuilder,
+    pub report: CollectionReport,
+}
 
 pub struct AtlasEngine {
     settings: Settings,
@@ -25,12 +33,19 @@ impl AtlasEngine {
     /// `GraphBuilder`, without mutating `self` or writing any files. This is the
     /// reusable core: the CLI wraps it with file export, and the live server
     /// diffs its output against the persistent graph.
-    pub async fn collect(&self) -> GraphBuilder {
+    ///
+    /// The returned [`Scan`] carries a [`CollectionReport`] alongside the graph.
+    /// A source that errors is recorded there rather than silently yielding an
+    /// empty collection, so callers can tell "this cloud has no such resources"
+    /// apart from "we could not read this cloud" — the distinction the live
+    /// differ needs to avoid deleting resources on a transient API failure.
+    pub async fn collect(&self) -> Scan {
         let mut builder = GraphBuilder::new();
+        let mut report = CollectionReport::default();
 
         let aws_future = async {
             if !self.settings.regions.is_empty() {
-                build_aws(self.settings.verbose, &self.settings).await.ok()
+                Some(build_aws(self.settings.verbose, &self.settings).await)
             } else {
                 None
             }
@@ -40,7 +55,7 @@ impl AtlasEngine {
             if let Some(projects) = &self.settings.gcp_projects
                 && !projects.is_empty()
             {
-                return build_gcp(self.settings.verbose, &self.settings).await.ok();
+                return Some(build_gcp(self.settings.verbose, &self.settings).await);
             }
             None
         };
@@ -49,47 +64,63 @@ impl AtlasEngine {
             if let Some(subs) = &self.settings.azure_subscriptions
                 && !subs.is_empty()
             {
-                return build_azure(self.settings.verbose, &self.settings)
-                    .await
-                    .ok();
+                return Some(build_azure(self.settings.verbose, &self.settings).await);
             }
             None
         };
 
         let cloudflare_future = async {
             if self.settings.cloudflare {
-                build_cloudflare(self.settings.verbose, &self.settings)
-                    .await
-                    .ok()
+                Some(build_cloudflare(self.settings.verbose, &self.settings).await)
             } else {
                 None
             }
         };
 
-        let (aws_opt, gcp_opt, azure_opt, cloudflare_opt) =
+        let (aws_res, gcp_res, azure_res, cloudflare_res) =
             tokio::join!(aws_future, gcp_future, azure_future, cloudflare_future);
 
-        if let Some(aws_provider) = aws_opt {
-            projector::build(&mut builder, &aws_provider, &self.settings);
-        }
-        if let Some(gcp_provider) = gcp_opt {
-            projector::build(&mut builder, &gcp_provider, &self.settings);
-        }
-        if let Some(azure_provider) = azure_opt {
-            projector::build(&mut builder, &azure_provider, &self.settings);
-        }
-        if let Some(cloudflare_provider) = cloudflare_opt {
-            projector::build(&mut builder, &cloudflare_provider, &self.settings);
+        for (source, result) in [
+            (CollectionSource::Aws, aws_res),
+            (CollectionSource::Gcp, gcp_res),
+            (CollectionSource::Azure, azure_res),
+            (CollectionSource::Cloudflare, cloudflare_res),
+        ] {
+            self.absorb(&mut builder, &mut report, source, result);
         }
 
-        builder
+        Scan { builder, report }
+    }
+
+    fn absorb(
+        &self,
+        builder: &mut GraphBuilder,
+        report: &mut CollectionReport,
+        source: CollectionSource,
+        result: Option<Result<ProviderScan, Box<dyn std::error::Error>>>,
+    ) {
+        match result {
+            None => {}
+            Some(Ok(scan)) => {
+                projector::build(builder, &scan.provider, &self.settings);
+                report.absorb(scan.failures);
+            }
+            Some(Err(e)) => report.record(source, "provider", format!("{e:?}")),
+        }
     }
 
     /// Full point-in-time refresh used by the CLI: re-collect and export to
     /// disk. Still a wipe-and-rebuild (no diffing) — the live server is the
     /// incremental path.
     pub async fn update_graph(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.builder = self.collect().await;
+        let scan = self.collect().await;
+        if !scan.report.is_complete() {
+            eprintln!(
+                "Warning: collection was incomplete, the exported graph is partial -- {}",
+                scan.report.summary()
+            );
+        }
+        self.builder = scan.builder;
         self.export_graph().await?;
         Ok(())
     }

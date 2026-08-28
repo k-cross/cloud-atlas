@@ -1,4 +1,5 @@
 use crate::Settings;
+use crate::atlas::collection::{CollectionFailure, CollectionSource, ProviderScan};
 use crate::cloud::definition::{CloudflareCollection, Provider};
 use cloudflare::framework::Environment;
 use cloudflare::framework::auth::Credentials;
@@ -8,7 +9,7 @@ use std::env;
 pub async fn build_cloudflare(
     verbose: bool,
     _settings: &Settings,
-) -> Result<Provider, Box<dyn std::error::Error>> {
+) -> Result<ProviderScan, Box<dyn std::error::Error>> {
     let token = env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default();
     if token.is_empty() {
         return Err("CLOUDFLARE_API_TOKEN is not set".into());
@@ -39,13 +40,21 @@ pub async fn build_cloudflare(
     let mut all_d1_databases = Vec::new();
     let mut all_worker_bindings = std::collections::HashMap::new();
     let mut accounts_seen = std::collections::HashSet::new();
+    let mut failures: Vec<CollectionFailure> = Vec::new();
 
     for zone in &zones {
         if verbose {
             println!("Fetching DNS records for zone: {}", zone.name);
         }
-        if let Ok(records) = super::dns::get_dns_records(&client, &zone.id).await {
-            all_dns_records.insert(zone.id.clone(), records);
+        match super::dns::get_dns_records(&client, &zone.id).await {
+            Ok(records) => {
+                all_dns_records.insert(zone.id.clone(), records);
+            }
+            Err(e) => failures.push(CollectionFailure {
+                source: CollectionSource::Cloudflare,
+                scope: format!("zone {}/dns", zone.name),
+                message: format!("{e:?}"),
+            }),
         }
 
         // Fetch account-level resources only once per account
@@ -75,33 +84,61 @@ pub async fn build_cloudflare(
                 }
             });
             for (wid, res) in futures::future::join_all(bindings_futures).await {
-                if let Ok(bindings) = res {
-                    all_worker_bindings.insert(wid, bindings);
+                match res {
+                    Ok(bindings) => {
+                        all_worker_bindings.insert(wid, bindings);
+                    }
+                    Err(e) => failures.push(CollectionFailure {
+                        source: CollectionSource::Cloudflare,
+                        scope: format!("account {account_id}/worker {wid}/bindings"),
+                        message: format!("{e:?}"),
+                    }),
                 }
             }
             all_workers.extend(workers);
-        } else if verbose {
-            println!(
-                "Warning: Failed to fetch workers for account {}",
-                account_id
-            );
+        } else if let Err(e) = workers_res {
+            failures.push(CollectionFailure {
+                source: CollectionSource::Cloudflare,
+                scope: format!("account {account_id}/workers"),
+                message: format!("{e:?}"),
+            });
         }
 
-        if let Ok(kvs) = kvs_res {
-            all_kv_namespaces.extend(kvs);
+        match kvs_res {
+            Ok(kvs) => all_kv_namespaces.extend(kvs),
+            Err(e) => failures.push(CollectionFailure {
+                source: CollectionSource::Cloudflare,
+                scope: format!("account {account_id}/kv_namespaces"),
+                message: format!("{e:?}"),
+            }),
         }
-        if let Ok(buckets) = r2s_res {
-            all_r2_buckets.extend(buckets);
+        match r2s_res {
+            Ok(buckets) => all_r2_buckets.extend(buckets),
+            Err(e) => failures.push(CollectionFailure {
+                source: CollectionSource::Cloudflare,
+                scope: format!("account {account_id}/r2_buckets"),
+                message: format!("{e:?}"),
+            }),
         }
-        if let Ok(dos) = dos_res {
-            all_durable_objects.extend(dos);
+        match dos_res {
+            Ok(dos) => all_durable_objects.extend(dos),
+            Err(e) => failures.push(CollectionFailure {
+                source: CollectionSource::Cloudflare,
+                scope: format!("account {account_id}/durable_objects"),
+                message: format!("{e:?}"),
+            }),
         }
-        if let Ok(d1s) = d1s_res {
-            all_d1_databases.extend(d1s);
+        match d1s_res {
+            Ok(d1s) => all_d1_databases.extend(d1s),
+            Err(e) => failures.push(CollectionFailure {
+                source: CollectionSource::Cloudflare,
+                scope: format!("account {account_id}/d1_databases"),
+                message: format!("{e:?}"),
+            }),
         }
     }
 
-    Ok(Provider::Cloudflare(Box::new(CloudflareCollection {
+    let provider = Provider::Cloudflare(Box::new(CloudflareCollection {
         zones,
         dns_records: all_dns_records,
         workers: all_workers,
@@ -110,5 +147,7 @@ pub async fn build_cloudflare(
         durable_objects: all_durable_objects,
         d1_databases: all_d1_databases,
         worker_bindings: all_worker_bindings,
-    })))
+    }));
+
+    Ok(ProviderScan { provider, failures })
 }

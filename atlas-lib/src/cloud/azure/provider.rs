@@ -1,12 +1,13 @@
 use crate::Settings;
 use crate::api::azure::client::AzureApiClient;
 use crate::api::azure::models::*;
+use crate::atlas::collection::ProviderScan;
 use crate::cloud::definition::{MicrosoftCollection, Provider};
 
 pub async fn build_azure(
     _verbose: bool,
     opts: &Settings,
-) -> Result<Provider, Box<dyn std::error::Error>> {
+) -> Result<ProviderScan, Box<dyn std::error::Error>> {
     let client = AzureApiClient::new().await?;
 
     // An empty subscription list makes ARG query the entire tenant.
@@ -34,7 +35,9 @@ pub async fn build_azure(
     "#;
 
     let raw_resources = client.query_graph(query, &subscriptions).await?;
-    Ok(Provider::Azure(map_resources(raw_resources)?))
+    Ok(ProviderScan::complete(Provider::Azure(map_resources(
+        raw_resources,
+    )?)))
 }
 
 /// Map raw Azure Resource Graph rows into the typed collections the projector
