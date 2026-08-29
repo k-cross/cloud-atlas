@@ -1,8 +1,9 @@
 //! Coverage for every Cloudflare collector, replayed against a `wiremock`
 //! server so each runs its real path + envelope unwrap without credentials.
-//! Two client seams are in play: the raw-REST collectors (d1, durable_objects)
-//! use `CloudflareApiClient::with_base_url`, while the `cloudflare`-crate
-//! collectors (zone, dns, kv, r2) use `Environment::Custom`. The crate's result
+//! Two client seams are in play: the raw-REST collectors (d1, durable_objects,
+//! and r2 — whose crate endpoint offers no pagination inputs) use
+//! `CloudflareApiClient::with_base_url`, while the `cloudflare`-crate
+//! collectors (zone, dns, kv) use `Environment::Custom`. The crate's result
 //! structs are strict (mostly non-`Option`), so a drifted response body fails
 //! to deserialize rather than silently yielding empties -- assertions still
 //! pin the specific fields `provider.rs` and the projector read.
@@ -21,7 +22,7 @@ use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::client::ClientConfig;
 use cloudflare::framework::client::async_api::Client;
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn serve(p: &str, result: Value) -> (MockServer, CloudflareApiClient) {
@@ -192,6 +193,52 @@ async fn zones_follows_pagination_past_the_first_page() {
     assert_eq!(zones[50].id, "zone-50");
 }
 
+// The failure this guards: terminating on "the page came back short" ends
+// collection early whenever the API serves fewer records than we asked for,
+// and the differ reads the missing tail as deletions. `result_info` is the
+// authority on whether more pages exist.
+#[tokio::test]
+async fn zones_do_not_stop_early_when_the_api_clamps_per_page() {
+    let server = MockServer::start().await;
+
+    // Asked for 50, served 20 -- but there are two pages.
+    let clamped: Vec<Value> = (0..20)
+        .map(|i| zone_json(&format!("zone-{i}"), &format!("z{i}.globex.com"), "acct-1"))
+        .collect();
+    let info = json!({
+        "page": 1, "per_page": 20, "count": 20, "total_count": 21, "total_pages": 2
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/client/v4/zones"))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "errors": [], "messages": [],
+            "result": clamped, "result_info": info
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/client/v4/zones"))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "errors": [], "messages": [],
+            "result": [zone_json("zone-20", "z20.globex.com", "acct-1")],
+            "result_info": { "page": 2, "per_page": 20, "count": 1, "total_count": 21, "total_pages": 2 }
+        })))
+        .mount(&server)
+        .await;
+
+    let zones = get_zones(&crate_client(&server)).await.expect("ok");
+
+    assert_eq!(
+        zones.len(),
+        21,
+        "a clamped short page must not be mistaken for the last page"
+    );
+}
+
 #[tokio::test]
 async fn zones_surfaces_api_error() {
     let server = MockServer::start().await;
@@ -279,9 +326,11 @@ async fn kv_namespaces() {
     assert_eq!(namespaces[1].supports_url_encoding, None);
 }
 
+// R2 goes through the raw seam, not the crate: `ListBuckets` has no pagination
+// inputs, and R2 pages by cursor rather than page number.
 #[tokio::test]
 async fn r2_buckets() {
-    let (_s, c) = serve_crate(
+    let (_s, c) = serve(
         "/client/v4/accounts/acct-1/r2/buckets",
         json!({
             "buckets": [
@@ -297,4 +346,42 @@ async fn r2_buckets() {
     assert_eq!(buckets.len(), 2);
     assert_eq!(buckets[0].name, "globex-assets");
     assert_eq!(buckets[1].name, "globex-backups");
+}
+
+#[tokio::test]
+async fn r2_buckets_follow_the_cursor_past_the_first_page() {
+    let server = MockServer::start().await;
+    let bucket = |name: &str| json!({ "name": name, "creation_date": "2024-01-01T00:00:00Z" });
+
+    Mock::given(method("GET"))
+        .and(path("/client/v4/accounts/acct-1/r2/buckets"))
+        .and(query_param_is_missing("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "errors": [], "messages": [],
+            "result": { "buckets": [bucket("globex-assets")] },
+            "result_info": { "cursor": "page/2==" }
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/client/v4/accounts/acct-1/r2/buckets"))
+        .and(query_param("cursor", "page/2=="))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true, "errors": [], "messages": [],
+            "result": { "buckets": [bucket("globex-backups")] },
+            "result_info": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let client = CloudflareApiClient::with_base_url("test-token".into(), server.uri());
+    let buckets = get_r2_buckets(&client, "acct-1").await.expect("ok");
+
+    let names: Vec<&str> = buckets.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["globex-assets", "globex-backups"],
+        "buckets past the first cursor page were dropped"
+    );
 }

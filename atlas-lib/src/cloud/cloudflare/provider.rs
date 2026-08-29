@@ -60,19 +60,26 @@ async fn collect(
         }
     }
 
-    let mut accounts_seen = std::collections::HashSet::new();
+    if verbose {
+        println!("Fetching DNS records for {} zones...", data.zones.len());
+    }
+    let dns_futures = data
+        .zones
+        .iter()
+        .map(|zone| async move { (zone, super::dns::get_dns_records(client, &zone.id).await) });
 
-    for zone in &data.zones {
-        if verbose {
-            println!("Fetching DNS records for zone: {}", zone.name);
-        }
-        match super::dns::get_dns_records(client, &zone.id).await {
+    for (zone, result) in futures::future::join_all(dns_futures).await {
+        match result {
             Ok(records) => {
                 data.dns_records.insert(ZoneId(zone.id.clone()), records);
             }
             Err(e) => report.record(SOURCE, format!("zone {}/dns", zone.name), e),
         }
+    }
 
+    let mut accounts_seen = std::collections::HashSet::new();
+
+    for zone in &data.zones {
         // Fetch account-level resources only once per account
         let account_id = &zone.account.id;
         if !accounts_seen.insert(account_id.clone()) {
@@ -85,7 +92,7 @@ async fn collect(
         let (workers_res, kvs_res, r2s_res, dos_res, d1s_res) = tokio::join!(
             super::worker::get_workers(cf, account_id),
             super::kv::get_kv_namespaces(client, account_id),
-            super::r2::get_r2_buckets(client, account_id),
+            super::r2::get_r2_buckets(cf, account_id),
             super::durable_objects::get_do_namespaces(cf, account_id),
             super::d1::get_d1_databases(cf, account_id),
         );

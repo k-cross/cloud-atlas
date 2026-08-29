@@ -795,6 +795,77 @@ mod tests {
             .count()
     }
 
+    fn unreadable(source: CollectionSource) -> crate::atlas::collection::CollectionReport {
+        let mut report = crate::atlas::collection::CollectionReport::default();
+        report.record(source, "scope", "unreachable");
+        report
+    }
+
+    #[test]
+    fn retention_releases_a_source_once_its_budget_is_spent() {
+        use crate::atlas::patch::Retention;
+
+        let mut retention = Retention::new(2);
+
+        assert!(
+            !retention
+                .hold(&unreadable(CollectionSource::Aws))
+                .is_empty()
+        );
+        assert!(
+            !retention
+                .hold(&unreadable(CollectionSource::Aws))
+                .is_empty()
+        );
+        assert!(
+            retention
+                .hold(&unreadable(CollectionSource::Aws))
+                .is_empty(),
+            "a third consecutive failure exhausts a budget of 2"
+        );
+        assert_eq!(retention.streak(CollectionSource::Aws), 3);
+    }
+
+    #[test]
+    fn retention_gives_a_recovered_source_a_full_budget_again() {
+        use crate::atlas::collection::CollectionReport;
+        use crate::atlas::patch::Retention;
+
+        let mut retention = Retention::new(1);
+        retention.hold(&unreadable(CollectionSource::Aws));
+        assert!(
+            retention
+                .hold(&unreadable(CollectionSource::Aws))
+                .is_empty()
+        );
+
+        retention.hold(&CollectionReport::default());
+        assert_eq!(
+            retention.streak(CollectionSource::Aws),
+            0,
+            "a complete scan clears the streak"
+        );
+
+        assert!(
+            !retention
+                .hold(&unreadable(CollectionSource::Aws))
+                .is_empty(),
+            "a source that recovered must be protected again if it fails later"
+        );
+    }
+
+    #[test]
+    fn a_zero_budget_never_holds_anything() {
+        use crate::atlas::patch::Retention;
+
+        let mut retention = Retention::new(0);
+        assert!(
+            retention
+                .hold(&unreadable(CollectionSource::Gcp))
+                .is_empty()
+        );
+    }
+
     /// The failure this guards: one unreadable source used to freeze removals
     /// for the entire graph, so a collector that failed on every tick meant
     /// deletions anywhere never converged.

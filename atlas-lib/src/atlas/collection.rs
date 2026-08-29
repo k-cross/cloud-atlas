@@ -9,11 +9,13 @@
 //! to garbage-collect on incomplete data.
 
 use crate::cloud::definition::Provider;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 
 /// Which provider a collection failure came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CollectionSource {
     Aws,
     Gcp,
@@ -35,7 +37,7 @@ impl fmt::Display for CollectionSource {
 
 /// One source that could not be read on this scan. `scope` narrows it to the
 /// region/project/collector that failed, so a partial scan can be attributed.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CollectionFailure {
     pub source: CollectionSource,
     pub scope: String,
@@ -51,7 +53,7 @@ impl fmt::Display for CollectionFailure {
 /// Everything that went wrong during one scan. An empty report means every
 /// configured source was read end to end, and only then is the scan a
 /// trustworthy basis for removals.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct CollectionReport {
     pub failures: Vec<CollectionFailure>,
 }

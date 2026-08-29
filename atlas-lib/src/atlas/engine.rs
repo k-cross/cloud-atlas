@@ -1,7 +1,7 @@
 use crate::Settings;
 use crate::atlas::collection::CollectionReport;
 use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::patch::carry_forward;
+use crate::atlas::patch::{Retention, carry_forward};
 use crate::atlas::projector;
 use crate::cloud::amazon::provider::build_aws;
 use crate::cloud::azure::provider::build_azure;
@@ -20,6 +20,7 @@ pub struct Scan {
 pub struct AtlasEngine {
     settings: Settings,
     builder: GraphBuilder,
+    retention: Retention,
 }
 
 impl AtlasEngine {
@@ -27,6 +28,7 @@ impl AtlasEngine {
         Self {
             settings,
             builder: GraphBuilder::new(),
+            retention: Retention::default(),
         }
     }
 
@@ -110,13 +112,22 @@ impl AtlasEngine {
     }
 
     fn install(&mut self, mut scan: Scan) {
-        let unreadable = scan.report.unreadable_sources();
-        if !unreadable.is_empty() {
+        let held = self.retention.hold(&scan.report);
+        if !scan.report.is_complete() {
             eprintln!(
                 "Warning: collection was incomplete, retaining unconfirmed resources -- {}",
                 scan.report.summary()
             );
-            carry_forward(&mut scan.builder, &self.builder.graph, &unreadable);
+            for released in scan.report.unreadable_sources().difference(&held) {
+                eprintln!(
+                    "Warning: {released} unreadable for {} consecutive scans, dropping its \
+                     unconfirmed resources",
+                    self.retention.streak(*released)
+                );
+            }
+        }
+        if !held.is_empty() {
+            carry_forward(&mut scan.builder, &self.builder.graph, &held);
         }
 
         self.builder = scan.builder;

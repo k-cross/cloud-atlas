@@ -13,7 +13,9 @@
 
 use crate::state::AppState;
 use atlas_lib::atlas::definition::{Edge, Node};
-use atlas_lib::atlas::export::{SNAPSHOT_VERSION, edge_key, node_key, render_snapshot};
+use atlas_lib::atlas::export::{
+    RenderEdge, RenderNode, SNAPSHOT_VERSION, node_key, render_snapshot,
+};
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
@@ -136,7 +138,7 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
     let mut seen_edges = HashSet::new();
 
     local_ids.insert(center, 0);
-    nodes.push(render_node_value(graph, center, 0));
+    nodes.push(RenderNode::new(&graph[center], 0));
 
     for edge in graph
         .edges(center)
@@ -151,20 +153,17 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
             if let Entry::Vacant(slot) = local_ids.entry(endpoint) {
                 let local_id = nodes.len() as u32;
                 slot.insert(local_id);
-                nodes.push(render_node_value(graph, endpoint, local_id));
+                nodes.push(RenderNode::new(&graph[endpoint], local_id));
             }
         }
 
-        let sk = node_key(&graph[a]);
-        let tk = node_key(&graph[b]);
-        edges.push(json!({
-            "source": local_ids[&a],
-            "target": local_ids[&b],
-            "key": edge_key(&sk, &tk, edge.weight()),
-            "source_key": sk,
-            "target_key": tk,
-            "kind": edge.weight().kind(),
-        }));
+        edges.push(RenderEdge::new(
+            &graph[a],
+            &graph[b],
+            edge.weight(),
+            local_ids[&a],
+            local_ids[&b],
+        ));
     }
 
     json!({
@@ -173,15 +172,6 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
         "key": key,
         "nodes": nodes,
         "edges": edges,
-    })
-}
-
-fn render_node_value(graph: &Graph<Node, Edge>, i: NodeIndex, id: u32) -> Value {
-    json!({
-        "id": id,
-        "key": node_key(&graph[i]),
-        "label": graph[i].to_string(),
-        "kind": graph[i].kind(),
     })
 }
 
@@ -239,6 +229,34 @@ mod tests {
         }
 
         assert_eq!(value["version"].as_u64(), Some(SNAPSHOT_VERSION as u64));
+    }
+
+    /// The frontend renders both payloads through one path, so the neighbors
+    /// subgraph must carry exactly the snapshot's fields. Both build through
+    /// `RenderNode`/`RenderEdge` to make that true by construction; this fails
+    /// if anyone hand-rolls the shape again and a `SNAPSHOT_VERSION` bump then
+    /// reaches only one of them.
+    #[test]
+    fn a_neighbors_payload_has_the_same_shape_as_a_snapshot() {
+        use atlas_lib::atlas::export::render_snapshot;
+
+        let mut graph: Graph<Node, Edge> = Graph::new();
+        let a = graph.add_node(Node::GenericHostname("center.example".into()));
+        let b = graph.add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        graph.add_edge(a, b, Edge::ResolvesTo);
+
+        let neighbors = neighbors_value(&graph, &node_key(&graph[a]));
+        let snapshot = serde_json::to_value(render_snapshot(&graph)).expect("serializes");
+
+        for collection in ["nodes", "edges"] {
+            let from_neighbors = neighbors[collection][0].as_object().expect(collection);
+            let from_snapshot = snapshot[collection][0].as_object().expect(collection);
+            assert_eq!(
+                from_neighbors.keys().collect::<Vec<_>>(),
+                from_snapshot.keys().collect::<Vec<_>>(),
+                "{collection} drifted between the two payloads"
+            );
+        }
     }
 
     #[test]

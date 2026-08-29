@@ -4,19 +4,20 @@
 //! streams, flow logs) plug in on top of this later.
 
 use crate::state::AppState;
-use atlas_lib::atlas::collection::CollectionReport;
+use atlas_lib::atlas::collection::{CollectionReport, CollectionSource};
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::graph_builder::GraphBuilder;
-use atlas_lib::atlas::patch::{GraphPatch, carry_forward, diff};
+use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff};
 use atlas_lib::fixtures;
 use petgraph::graph::Graph;
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Where each reconciliation tick's graph comes from.
 pub enum Source {
     /// Real collection from configured cloud providers.
-    Live(AtlasEngine),
+    Live(Box<AtlasEngine>),
     /// Credential-free fixtures with a sentinel that flips in and out every
     /// other tick, so the live-patch path is exercised without any cloud calls.
     Demo,
@@ -51,32 +52,37 @@ fn demo_graph(tick: u64) -> GraphBuilder {
 }
 
 /// Turn a scan into the patch to broadcast. A complete scan is authoritative
-/// and diffs straight through, removals included. Where the report names a
-/// source the scan could not read, that source's live resources are folded
-/// forward first, so the tick is additive-only *for that source* while every
-/// other provider keeps deleting normally -- `next` is left as the exact graph
-/// the caller should install.
+/// and diffs straight through, removals included. For each source in `held`,
+/// that source's live resources are folded forward first, so the tick is
+/// additive-only *for that source* while every other provider keeps deleting
+/// normally -- `next` is left as the exact graph the caller should install.
+///
+/// `held` is what [`Retention`] decided, not simply what failed: a source that
+/// has been unreadable for too long is no longer held, so the graph converges
+/// instead of waiting forever on a collector that never recovers.
 fn reconcile(
     live: &Graph<Node, Edge>,
     next: &mut GraphBuilder,
-    report: &CollectionReport,
+    held: &HashSet<CollectionSource>,
 ) -> GraphPatch {
-    let unreadable = report.unreadable_sources();
-    if !unreadable.is_empty() {
-        carry_forward(next, live, &unreadable);
+    if !held.is_empty() {
+        carry_forward(next, live, held);
     }
     diff(live, &next.graph)
 }
 
 /// Run forever, reconciling every `interval`. Only non-empty diffs mutate the
 /// live graph or hit the broadcast channel.
-pub async fn run(state: AppState, source: Source, interval: Duration) {
+pub async fn run(state: AppState, source: Source, interval: Duration, retention: Retention) {
+    let mut retention = retention;
     let mut tick: u64 = 0;
     loop {
         tokio::time::sleep(interval).await;
         tick += 1;
 
         let (mut next, report) = source.scan(tick).await;
+        let held = retention.hold(&report);
+
         if !report.is_complete() {
             tracing::warn!(
                 tick,
@@ -84,14 +90,28 @@ pub async fn run(state: AppState, source: Source, interval: Duration) {
                 "collection incomplete, holding unconfirmed resources: {}",
                 report.summary()
             );
+            for released in report.unreadable_sources().difference(&held) {
+                tracing::warn!(
+                    tick,
+                    source = %released,
+                    scans = retention.streak(*released),
+                    "source unreadable for too many consecutive scans; releasing its \
+                     unconfirmed resources to the differ",
+                );
+            }
         }
 
         // Diff under the read lock — no full-graph clone, and the critical
         // section is just the comparison. WebSocket readers share the lock.
         let patch = {
             let live = state.live.read().await;
-            reconcile(&live, &mut next, &report)
+            reconcile(&live, &mut next, &held)
         };
+
+        // Published even when the graph is unchanged: a provider going dark
+        // changes what the snapshot *means* without changing a single node.
+        *state.report.write().await = report;
+
         if patch.is_empty() {
             continue;
         }
@@ -124,12 +144,15 @@ mod tests {
         builder
     }
 
-    fn complete() -> CollectionReport {
-        CollectionReport::default()
+    fn nothing_held() -> HashSet<CollectionSource> {
+        HashSet::new()
     }
 
-    /// A report that cannot speak for AWS -- the source owning the kind these
-    /// tests drop.
+    /// AWS held back -- it owns the kind these tests drop.
+    fn holding_aws() -> HashSet<CollectionSource> {
+        HashSet::from([CollectionSource::Aws])
+    }
+
     fn aws_throttled() -> CollectionReport {
         let mut report = CollectionReport::default();
         report.record(CollectionSource::Aws, "us-east-1/ec2", "throttled");
@@ -147,13 +170,13 @@ mod tests {
             "fixture must contain the kind this test drops"
         );
 
-        let complete_patch = reconcile(&live, &mut without_kind(&live, dropped), &complete());
+        let complete_patch = reconcile(&live, &mut without_kind(&live, dropped), &nothing_held());
         assert!(
             !complete_patch.removed_nodes.is_empty(),
             "a complete scan is authoritative and must still delete"
         );
 
-        let patch = reconcile(&live, &mut next, &aws_throttled());
+        let patch = reconcile(&live, &mut next, &holding_aws());
         assert!(
             patch.removed_nodes.is_empty() && patch.removed_edges.is_empty(),
             "an incomplete scan deleted {} nodes / {} edges",
@@ -167,12 +190,42 @@ mod tests {
         );
     }
 
+    /// Retention protects against a *transient* failure. A collector that fails
+    /// on every tick must not pin its resources in the graph forever, or
+    /// deletions never converge for that provider.
+    #[test]
+    fn a_source_that_never_recovers_stops_blocking_removals() {
+        let live = demo_graph(1).graph;
+        let mut retention = Retention::new(2);
+
+        for scan in 1..=2 {
+            let held = retention.hold(&aws_throttled());
+            let patch = reconcile(&live, &mut without_kind(&live, "AwsEc2Instance"), &held);
+            assert!(
+                patch.removed_nodes.is_empty(),
+                "scan {scan} is still within budget and must not delete"
+            );
+        }
+
+        let held = retention.hold(&aws_throttled());
+        assert!(
+            held.is_empty(),
+            "the budget is spent, AWS is no longer held"
+        );
+
+        let patch = reconcile(&live, &mut without_kind(&live, "AwsEc2Instance"), &held);
+        assert!(
+            !patch.removed_nodes.is_empty(),
+            "past its budget, an unreadable source must stop blocking removals"
+        );
+    }
+
     #[test]
     fn an_incomplete_scan_still_applies_additions() {
         let live = demo_graph(2).graph;
         let mut next = without_kind(&demo_graph(3).graph, "AwsEc2Instance");
 
-        let patch = reconcile(&live, &mut next, &aws_throttled());
+        let patch = reconcile(&live, &mut next, &holding_aws());
 
         assert_eq!(
             patch.added_nodes.len(),
@@ -189,7 +242,7 @@ mod tests {
         let mut next = demo_graph(3);
         let same = next.graph.clone();
 
-        let with_policy = reconcile(&live, &mut next, &complete());
+        let with_policy = reconcile(&live, &mut next, &nothing_held());
         let plain = diff(&live, &same);
 
         assert_eq!(with_policy.added_nodes.len(), plain.added_nodes.len());

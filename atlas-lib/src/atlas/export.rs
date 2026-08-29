@@ -54,6 +54,38 @@ pub struct RenderEdge {
     pub kind: &'static str,
 }
 
+impl RenderNode {
+    /// The one place a `Node` becomes wire format. `id` is positional and the
+    /// caller owns it: a full snapshot uses the petgraph index, while a
+    /// subgraph payload renumbers from zero so its edges can index its own
+    /// node array.
+    pub fn new(node: &Node, id: u32) -> Self {
+        Self {
+            id,
+            key: node_key(node),
+            label: node.to_string(),
+            kind: node.kind(),
+        }
+    }
+}
+
+impl RenderEdge {
+    /// The one place an `Edge` becomes wire format; `source_id`/`target_id`
+    /// index whichever node array this edge is being emitted alongside.
+    pub fn new(source: &Node, target: &Node, edge: &Edge, source_id: u32, target_id: u32) -> Self {
+        let source_key = node_key(source);
+        let target_key = node_key(target);
+        Self {
+            source: source_id,
+            target: target_id,
+            key: edge_key(&source_key, &target_key, edge),
+            source_key,
+            target_key,
+            kind: edge.kind(),
+        }
+    }
+}
+
 /// Stable, human-debuggable identity for a node. `kind` disambiguates variants
 /// whose `Display` forms could otherwise coincide; `Display` carries the
 /// resource id (the `Type::SubType(id)` convention from CLAUDE.md).
@@ -71,26 +103,18 @@ pub fn edge_key(source_key: &str, target_key: &str, edge: &Edge) -> String {
 pub fn render_snapshot(graph: &Graph<Node, Edge>) -> RenderSnapshot {
     let nodes = graph
         .node_indices()
-        .map(|i| RenderNode {
-            id: i.index() as u32,
-            key: node_key(&graph[i]),
-            label: graph[i].to_string(),
-            kind: graph[i].kind(),
-        })
+        .map(|i| RenderNode::new(&graph[i], i.index() as u32))
         .collect();
     let edges = graph
         .edge_references()
         .map(|e| {
-            let source_key = node_key(&graph[e.source()]);
-            let target_key = node_key(&graph[e.target()]);
-            RenderEdge {
-                source: e.source().index() as u32,
-                target: e.target().index() as u32,
-                key: edge_key(&source_key, &target_key, e.weight()),
-                source_key,
-                target_key,
-                kind: e.weight().kind(),
-            }
+            RenderEdge::new(
+                &graph[e.source()],
+                &graph[e.target()],
+                e.weight(),
+                e.source().index() as u32,
+                e.target().index() as u32,
+            )
         })
         .collect();
     RenderSnapshot {

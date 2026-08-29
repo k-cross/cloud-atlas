@@ -8,11 +8,81 @@ pub mod worker;
 pub mod zone;
 
 use serde::Deserialize;
+use std::future::Future;
+
+/// Hard bound on any pagination loop here. An endpoint that ignores the page
+/// parameter and keeps serving full pages would otherwise spin forever and hang
+/// the scan tick; hitting this is reported as a failure rather than quietly
+/// truncating the collection.
+const MAX_PAGES: u32 = 1_000;
 
 #[derive(Deserialize)]
 struct ApiResponse<T> {
     success: bool,
     result: T,
+    #[serde(default)]
+    result_info: Option<serde_json::Value>,
+}
+
+/// Walk a page-numbered `cloudflare`-crate list endpoint to exhaustion.
+///
+/// Termination is driven by the response's own `result_info`, not by "this page
+/// came back short". A short page is not proof of the end — Cloudflare may
+/// clamp `per_page` below what we asked for — and ending there silently
+/// truncates the collection, which the differ then reads as a mass deletion.
+/// The short-page rule survives only as the fallback for endpoints that report
+/// no `result_info` at all.
+pub async fn paginate<T, Fut>(
+    per_page: u32,
+    fetch: impl Fn(u32) -> Fut,
+) -> Result<Vec<T>, Box<dyn std::error::Error>>
+where
+    Fut: Future<
+        Output = Result<
+            cloudflare::framework::response::ApiSuccess<Vec<T>>,
+            cloudflare::framework::response::ApiFailure,
+        >,
+    >,
+{
+    let mut items: Vec<T> = Vec::new();
+    let mut page = 1;
+
+    loop {
+        let response = fetch(page).await?;
+        let short_page = (response.result.len() as u32) < per_page;
+        items.extend(response.result);
+
+        if !more_pages(response.result_info.as_ref(), page, items.len(), short_page) {
+            return Ok(items);
+        }
+        if page == MAX_PAGES {
+            return Err(format!("pagination did not terminate after {MAX_PAGES} pages").into());
+        }
+        page += 1;
+    }
+}
+
+/// Whether a page after `page` is expected, preferring what the API reports
+/// about the totals over the shape of the page we just received.
+fn more_pages(
+    result_info: Option<&serde_json::Value>,
+    page: u32,
+    collected: usize,
+    short_page: bool,
+) -> bool {
+    let count = |name: &str| {
+        result_info
+            .and_then(|info| info.get(name))
+            .and_then(|value| value.as_u64())
+    };
+
+    if let Some(total_pages) = count("total_pages") {
+        return u64::from(page) < total_pages;
+    }
+    if let Some(total_count) = count("total_count") {
+        return (collected as u64) < total_count;
+    }
+    !short_page
 }
 
 /// Client for the raw Cloudflare REST endpoints not covered by the `cloudflare`
@@ -60,6 +130,16 @@ impl CloudflareApiClient {
         path: &str,
         context: &str,
     ) -> Result<T, Box<dyn std::error::Error>> {
+        Ok(self.get_paged(path, context).await?.0)
+    }
+
+    /// `get`, keeping the `result_info` block alongside the payload — the
+    /// cursor-paginated endpoints need it to find their next page.
+    pub async fn get_paged<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        context: &str,
+    ) -> Result<(T, Option<serde_json::Value>), Box<dyn std::error::Error>> {
         let response = self
             .client
             .get(self.url(path))
@@ -76,6 +156,6 @@ impl CloudflareApiClient {
             return Err(format!("Cloudflare API returned success = false for {}", context).into());
         }
 
-        Ok(parsed.result)
+        Ok((parsed.result, parsed.result_info))
     }
 }

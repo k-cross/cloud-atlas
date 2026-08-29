@@ -4,6 +4,7 @@
 //! intent in `docs/change_monitoring_design.md` §7); WebSocket connections are
 //! readers that also subscribe to the broadcast for incremental patches.
 
+use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::patch::GraphPatch;
 use petgraph::graph::Graph;
@@ -22,14 +23,19 @@ pub struct AppState {
     pub live: Arc<RwLock<Graph<Node, Edge>>>,
     /// Fan-out of incremental patches to every connected client.
     pub patches: broadcast::Sender<GraphPatch>,
+    /// What the most recent scan could not read. Without this a client cannot
+    /// tell a small estate from a graph collected during an outage, since both
+    /// look like a snapshot that is simply missing those resources.
+    pub report: Arc<RwLock<CollectionReport>>,
 }
 
 impl AppState {
-    pub fn new(initial: Graph<Node, Edge>) -> Self {
+    pub fn new(initial: Graph<Node, Edge>, report: CollectionReport) -> Self {
         let (patches, _) = broadcast::channel(PATCH_CHANNEL_CAPACITY);
         Self {
             live: Arc::new(RwLock::new(initial)),
             patches,
+            report: Arc::new(RwLock::new(report)),
         }
     }
 }

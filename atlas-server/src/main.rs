@@ -11,7 +11,9 @@ mod ws;
 
 use crate::poll::Source;
 use crate::state::AppState;
+use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::engine::AtlasEngine;
+use atlas_lib::atlas::patch::Retention;
 use atlas_lib::fixtures;
 use clap::Parser;
 use std::time::Duration;
@@ -51,6 +53,13 @@ pub struct Opt {
     /// Seconds between reconciliation scans.
     #[clap(long, default_value_t = 60)]
     poll_secs: u64,
+
+    /// How many consecutive incomplete scans a provider's resources are held
+    /// through before the graph stops waiting and deletes what it cannot
+    /// confirm. 0 deletes unconfirmed resources immediately; a large value
+    /// holds them effectively forever.
+    #[clap(long, default_value_t = Retention::DEFAULT_BUDGET)]
+    retain_scans: u32,
 }
 
 #[tokio::main]
@@ -65,9 +74,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Seed the graph once up front so the very first client gets a populated
     // snapshot, and choose the reconciliation source.
-    let (initial, source) = if opt.demo {
+    let (initial, initial_report, source) = if opt.demo {
         tracing::info!("demo mode: serving credential-free Globex fixtures");
-        (fixtures::build_graph().graph, Source::Demo)
+        (
+            fixtures::build_graph().graph,
+            CollectionReport::default(),
+            Source::Demo,
+        )
     } else {
         let settings = atlas_lib::Settings {
             regions: opt.regions,
@@ -80,17 +93,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let engine = AtlasEngine::new(settings);
         let scan = engine.collect().await;
         if !scan.report.is_complete() {
+            // The baseline every client starts from is this graph, so say
+            // loudly that it is partial and keep the report on the state --
+            // GET /collection.json is how a client tells "nothing there" from
+            // "we could not look".
             tracing::warn!(
                 failures = scan.report.failures.len(),
-                "initial collection incomplete: {}",
+                "initial collection incomplete, serving a partial baseline: {}",
                 scan.report.summary()
             );
         }
-        let initial = scan.builder.graph;
-        (initial, Source::Live(engine))
+        (
+            scan.builder.graph,
+            scan.report,
+            Source::Live(Box::new(engine)),
+        )
     };
 
-    let state = AppState::new(initial);
+    let state = AppState::new(initial, initial_report);
     let app = http::router(state.clone());
     let addr = format!("0.0.0.0:{}", opt.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -100,7 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // this task (not `tokio::spawn`) because provider collection carries
     // non-`Send` errors; `select!` still drives it concurrently with the
     // server, and either finishing tears the process down.
-    let poller = poll::run(state, source, Duration::from_secs(opt.poll_secs));
+    let poller = poll::run(
+        state,
+        source,
+        Duration::from_secs(opt.poll_secs),
+        Retention::new(opt.retain_scans),
+    );
     tokio::select! {
         result = axum::serve(listener, app) => result?,
         _ = poller => {}
