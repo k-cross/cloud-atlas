@@ -3,13 +3,26 @@ use crate::api::azure::client::AzureApiClient;
 use crate::api::azure::models::*;
 use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
 use crate::cloud::definition::{MicrosoftCollection, Provider};
+use serde::Deserialize;
+
+const SOURCE: CollectionSource = CollectionSource::Azure;
+
+/// Rows reported individually before the rest are summarised, so one broken
+/// resource type cannot flood the report (and `summary()`, which is logged
+/// every tick and served over `/collection.json`).
+const MAX_REPORTED_ROWS: usize = 5;
 
 pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
     let mut report = CollectionReport::default();
+
     let collections = match query_tenant(opts).await {
-        Ok(collections) => collections,
+        Ok(rows) => {
+            let (collections, mapping) = map_resources(rows);
+            report.merge(mapping);
+            collections
+        }
         Err(e) => {
-            report.record(CollectionSource::Azure, "resource_graph", e);
+            report.record(SOURCE, "resource_graph", e);
             Vec::new()
         }
     };
@@ -84,22 +97,27 @@ fn arg_query() -> String {
 
 async fn query_tenant(
     opts: &Settings,
-) -> Result<Vec<MicrosoftCollection>, Box<dyn std::error::Error>> {
+) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
     let client = AzureApiClient::new().await?;
 
     // An empty subscription list makes ARG query the entire tenant.
     let subscriptions = opts.azure_subscriptions.clone().unwrap_or_default();
 
-    let raw_resources = client.query_graph(&arg_query(), &subscriptions).await?;
-    map_resources(raw_resources)
+    client.query_graph(&arg_query(), &subscriptions).await
 }
 
 /// Map raw Azure Resource Graph rows into the typed collections the projector
 /// consumes. Split out from the fetch so it's testable with canned responses
 /// (no `az login`); see `tests/azure_collectors.rs`.
+///
+/// A row that will not deserialize is skipped and reported, never fatal. ARG
+/// returns the whole tenant in one response, so failing the batch on a single
+/// drifted row would throw away every other resource in it — an outage's worth
+/// of missing graph caused by one malformed record. The returned report is what
+/// keeps those skips from looking like deletions.
 pub fn map_resources(
     raw_resources: Vec<serde_json::Value>,
-) -> Result<Vec<MicrosoftCollection>, Box<dyn std::error::Error>> {
+) -> (Vec<MicrosoftCollection>, CollectionReport) {
     let mut vms = Vec::new();
     let mut vnets = Vec::new();
     let mut subnets = Vec::new();
@@ -130,8 +148,24 @@ pub fn map_resources(
         }};
     }
 
+    let mut unmapped: Vec<(String, String)> = Vec::new();
+
     for res_val in raw_resources {
-        let res: AzureResource = serde_json::from_value(res_val)?;
+        // Deserialize by reference so the row survives for its id if it fails.
+        let res: AzureResource = match AzureResource::deserialize(&res_val) {
+            Ok(res) => res,
+            Err(e) => {
+                let id = res_val
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .unwrap_or("<unidentified row>");
+                unmapped.push((id.to_owned(), e.to_string()));
+                continue;
+            }
+        };
+
+        // An unlisted type is a filter, not a failure: ARG may return kinds we
+        // deliberately do not model.
         let Some(azure_type) = AzureType::parse(res.r#type.as_deref().unwrap_or("")) else {
             continue;
         };
@@ -272,7 +306,21 @@ pub fn map_resources(
         MicrosoftCollection::AzureCdnProfiles(cdns),
     ];
 
-    Ok(collections)
+    let mut report = CollectionReport::default();
+    for (id, error) in unmapped.iter().take(MAX_REPORTED_ROWS) {
+        report.note(SOURCE, format!("resource_graph/row {id}"), error.clone());
+    }
+    if let Some(remaining) = unmapped.len().checked_sub(MAX_REPORTED_ROWS)
+        && remaining > 0
+    {
+        report.note(
+            SOURCE,
+            "resource_graph/rows",
+            format!("{remaining} further rows could not be mapped"),
+        );
+    }
+
+    (collections, report)
 }
 
 #[cfg(test)]
@@ -283,6 +331,29 @@ mod tests {
 
     /// The exhaustive match makes "queried but unmapped" a compile error; this
     /// covers the rest of the trip — every queried type must reach the graph.
+    /// `summary()` is logged every tick and served over `/collection.json`, so
+    /// a resource type that drifted for the whole tenant must not turn the
+    /// report into thousands of lines.
+    #[test]
+    fn a_flood_of_bad_rows_is_capped_in_the_report() {
+        let malformed: Vec<serde_json::Value> = (0..MAX_REPORTED_ROWS + 2)
+            .map(|i| serde_json::json!({ "id": format!("row-{i}"), "name": i }))
+            .collect();
+
+        let (_collections, report) = map_resources(malformed);
+
+        assert_eq!(
+            report.failures.len(),
+            MAX_REPORTED_ROWS + 1,
+            "expected {MAX_REPORTED_ROWS} rows plus one summary"
+        );
+        assert!(
+            report.summary().contains("2 further rows"),
+            "the tail must be counted: {}",
+            report.summary()
+        );
+    }
+
     #[test]
     fn every_queried_type_reaches_the_graph() {
         for azure_type in AzureType::ALL {
@@ -294,7 +365,7 @@ mod tests {
                 "properties": {}
             });
 
-            let collections = map_resources(vec![row]).expect("mapping succeeds");
+            let (collections, _) = map_resources(vec![row]);
             let mut builder = GraphBuilder::new();
             azure_projector(&mut builder, &collections);
 

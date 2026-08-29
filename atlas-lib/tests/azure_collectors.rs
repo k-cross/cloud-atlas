@@ -22,7 +22,77 @@ macro_rules! variant {
 }
 
 fn map(rows: Vec<Value>) -> Vec<MicrosoftCollection> {
-    map_resources(rows).expect("mapping succeeds")
+    let (collections, report) = map_resources(rows);
+    assert!(
+        report.is_complete(),
+        "unexpected mapping failure: {}",
+        report.summary()
+    );
+    collections
+}
+
+/// ARG returns the whole tenant in one response, so a single drifted row must
+/// not take the batch down with it: that would empty the Azure half of the
+/// graph over one bad record. The skip is reported instead, which keeps the
+/// differ from reading it as a deletion.
+#[test]
+fn a_malformed_row_is_skipped_without_discarding_the_batch() {
+    let good = |id: &str, name: &str| {
+        json!({
+            "id": id,
+            "name": name,
+            "type": "microsoft.storage/storageaccounts",
+            "location": "eastus"
+        })
+    };
+    // `name` must be a string; an integer fails AzureResource deserialization.
+    let malformed = json!({
+        "id": "/subscriptions/s/.../storageAccounts/broken",
+        "name": 12345,
+        "type": "microsoft.storage/storageaccounts",
+        "location": "eastus"
+    });
+
+    let (cols, report) = map_resources(vec![
+        good("/subscriptions/s/.../storageAccounts/a", "sa-a"),
+        malformed,
+        good("/subscriptions/s/.../storageAccounts/b", "sa-b"),
+    ]);
+
+    let accounts = variant!(cols, AzureStorageAccounts);
+    let names: Vec<&str> = accounts
+        .iter()
+        .filter_map(|a| a.name.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        ["sa-a", "sa-b"],
+        "rows either side of the malformed one must survive"
+    );
+
+    assert!(
+        !report.is_complete(),
+        "a skipped row must be reported, or its absence looks like a deletion"
+    );
+    assert!(
+        report.summary().contains("storageAccounts/broken"),
+        "the report must name the offending row: {}",
+        report.summary()
+    );
+}
+
+/// A type we do not model is a deliberate filter, not a failure -- reporting it
+/// would hold Azure's whole estate every single tick.
+#[test]
+fn an_unmodelled_resource_type_is_filtered_without_being_reported() {
+    let (_cols, report) = map_resources(vec![json!({
+        "id": "/subscriptions/s/.../redis/cache1",
+        "name": "cache1",
+        "type": "microsoft.cache/redis",
+        "location": "eastus"
+    })]);
+
+    assert!(report.is_complete(), "got: {}", report.summary());
 }
 
 #[test]

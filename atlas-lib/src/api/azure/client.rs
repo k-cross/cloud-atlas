@@ -71,6 +71,7 @@ impl AzureApiClient {
         // Loop for pagination if needed
         let mut all_results = Vec::new();
         let mut current_body = body.clone();
+        let mut expected_total: Option<u64> = None;
 
         loop {
             let req = self
@@ -89,8 +90,24 @@ impl AzureApiClient {
 
             let mut parsed: Value = serde_json::from_str(&text)?;
 
-            if let Some(data) = parsed.get_mut("data").and_then(|d| d.as_array_mut()) {
-                all_results.append(data);
+            // A response without a `data` array is a failure, never an empty
+            // tenant. Skipping it quietly -- which is what an `if let` here
+            // used to do -- reports success with zero resources, and the differ
+            // deletes every Azure node in the graph. Table-format results, a
+            // missing or null `data`, and an error body delivered with a 2xx
+            // all land here.
+            let Some(data) = parsed.get_mut("data").and_then(|d| d.as_array_mut()) else {
+                return Err(format!(
+                    "Azure Resource Graph returned no `data` array -- the response shape changed, \
+                     or an error was delivered with a success status. Response starts: {}",
+                    preview(&text)
+                )
+                .into());
+            };
+            all_results.append(data);
+
+            if let Some(total) = parsed.get("totalRecords").and_then(|t| t.as_u64()) {
+                expected_total = Some(total);
             }
 
             // Pagination handling for ARG
@@ -111,7 +128,32 @@ impl AzureApiClient {
             break;
         }
 
+        // Only a shortfall matters. If `totalRecords` ever meant something
+        // other than "records matching this query", erring on more-than-claimed
+        // is harmless, while fewer-than-claimed is the silent partial read this
+        // whole guard exists to catch.
+        if let Some(total) = expected_total
+            && (all_results.len() as u64) < total
+        {
+            return Err(format!(
+                "Azure Resource Graph reported {total} matching records but returned {}; the \
+                 collected inventory would be incomplete",
+                all_results.len()
+            )
+            .into());
+        }
+
         Ok(all_results)
+    }
+}
+
+/// A bounded slice of a response body, for error messages — an ARG payload can
+/// be megabytes and the point is only to show what shape came back.
+fn preview(body: &str) -> String {
+    const MAX_CHARS: usize = 200;
+    match body.char_indices().nth(MAX_CHARS) {
+        Some((end, _)) => format!("{}…", &body[..end]),
+        None => body.to_owned(),
     }
 }
 
@@ -174,6 +216,67 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["name"], "vm1");
+    }
+
+    async fn replay(body: serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(ARG_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        AzureApiClient::with_base_url("test-token".into(), server.uri())
+            .query_graph("Resources", &["sub-1".into()])
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    // The failure this guards: every one of these used to return `Ok` with zero
+    // rows, which reports a complete scan of an empty tenant -- and the differ
+    // deletes every Azure resource in the graph.
+    #[tokio::test]
+    async fn a_response_without_a_data_array_is_an_error_not_an_empty_tenant() {
+        let shapes = [
+            (
+                "table format",
+                json!({ "data": { "columns": [{ "name": "id" }], "rows": [["/x"]] } }),
+            ),
+            ("no data field", json!({ "$skipToken": null })),
+            ("null data", json!({ "data": null })),
+            (
+                "error body with a 200",
+                json!({ "error": { "code": "BadRequest", "message": "query invalid" } }),
+            ),
+        ];
+
+        for (label, body) in shapes {
+            let result = replay(body).await;
+            assert!(
+                result.is_err(),
+                "{label} was accepted as an empty tenant: {result:?}"
+            );
+        }
+    }
+
+    // A tenant really can hold nothing, and that must stay a successful scan.
+    #[tokio::test]
+    async fn a_genuinely_empty_result_still_succeeds() {
+        let rows = replay(json!({ "data": [], "totalRecords": 0, "$skipToken": null }))
+            .await
+            .expect("an empty tenant is not a failure");
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fewer_rows_than_the_response_claims_is_an_error() {
+        let result = replay(json!({
+            "data": [vm_resource("vm1")], "totalRecords": 4210, "$skipToken": null
+        }))
+        .await;
+
+        let err = result.expect_err("a short read must not pass as complete");
+        assert!(err.contains("4210"), "got: {err}");
     }
 
     // ARG paginates via `$skipToken`; the loop must fetch page 2 and concatenate.

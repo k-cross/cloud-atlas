@@ -63,16 +63,31 @@ impl CollectionReport {
         self.failures.is_empty()
     }
 
+    /// Record a failure carrying an error value from a fallible call. `Debug`
+    /// rather than `Display` because that is what preserves an SDK error's
+    /// cause chain.
     pub fn record(
         &mut self,
         source: CollectionSource,
         scope: impl Into<String>,
         error: impl fmt::Debug,
     ) {
+        self.note(source, scope, format!("{error:?}"));
+    }
+
+    /// Record a failure whose cause we are describing ourselves rather than
+    /// forwarding from an error value — a row that would not deserialize, a
+    /// count of things skipped.
+    pub fn note(
+        &mut self,
+        source: CollectionSource,
+        scope: impl Into<String>,
+        message: impl Into<String>,
+    ) {
         self.failures.push(CollectionFailure {
             source,
             scope: scope.into(),
-            message: format!("{error:?}"),
+            message: message.into(),
         });
     }
 
