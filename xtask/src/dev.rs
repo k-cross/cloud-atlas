@@ -8,7 +8,7 @@
 //! supervisor's job is the other direction: when one process dies on its own,
 //! take the rest down instead of leaving a half-running stack.
 
-use crate::tasks::{ensure_demo_snapshot, ensure_wasm, repo_root, run};
+use crate::tasks::{ensure_demo_snapshot, ensure_wasm, repo_root, run, strip_inherited_cargo_env};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -128,7 +128,7 @@ fn target_dir(root: &std::path::Path) -> PathBuf {
 /// Spawn with stdout/stderr piped through threads that tag every line, so the
 /// interleaved logs of both processes stay attributable.
 fn spawn_prefixed(cmd: &mut Command, prefix: &'static str) -> Result<Child, String> {
-    let mut child = cmd
+    let mut child = strip_inherited_cargo_env(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

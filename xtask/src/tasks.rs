@@ -18,12 +18,31 @@ pub fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+pub fn strip_inherited_cargo_env(cmd: &mut Command) -> &mut Command {
+    for (key, _) in std::env::vars() {
+        let injected = key.starts_with("CARGO_PKG_")
+            || matches!(
+                key.as_str(),
+                "CARGO"
+                    | "CARGO_BIN_NAME"
+                    | "CARGO_CRATE_NAME"
+                    | "CARGO_MAKEFLAGS"
+                    | "CARGO_MANIFEST_DIR"
+                    | "CARGO_MANIFEST_LINKS"
+                    | "CARGO_MANIFEST_PATH"
+                    | "CARGO_PRIMARY_PACKAGE"
+            );
+        if injected {
+            cmd.env_remove(key);
+        }
+    }
+    cmd
+}
+
 /// Run `program args…` in `dir`, streaming output, failing loudly on non-zero.
 pub fn run(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
     println!("\n▶ {} {} (in {})", program, args.join(" "), dir.display());
-    let status = Command::new(program)
-        .args(args)
-        .current_dir(dir)
+    let status = strip_inherited_cargo_env(Command::new(program).args(args).current_dir(dir))
         .status()
         .map_err(|e| format!("failed to start {program}: {e}"))?;
     if status.success() {
