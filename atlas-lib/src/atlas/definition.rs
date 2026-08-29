@@ -1,3 +1,4 @@
+use crate::atlas::collection::CollectionSource;
 use std::fmt;
 
 /// A node in the property graph, representing a semantic cloud resource.
@@ -222,83 +223,109 @@ macro_rules! kinds {
     };
 }
 
-kinds!(
+/// `kinds!` plus `owner()`, from a variant list grouped by the collection
+/// source whose scan is authoritative for those resources. That grouping is
+/// what lets an incomplete scan carry forward only the failed provider's
+/// territory instead of freezing the whole graph. `None` marks the cross-cloud
+/// stitching nodes no single provider owns — they are never removed on an
+/// incomplete scan, since any provider may be the one that still references
+/// them.
+macro_rules! owned_kinds {
+    ($ty:ident, $($owner:expr => [$($variant:ident),* $(,)?]),+ $(,)?) => {
+        kinds!($ty, $($($variant),*),+);
+
+        impl $ty {
+            pub fn owner(&self) -> Option<CollectionSource> {
+                match self {
+                    $($($ty::$variant { .. } => $owner),*),+
+                }
+            }
+        }
+    };
+}
+
+owned_kinds!(
     Node,
-    // Generic
-    GenericIpAddress,
-    GenericHostname,
-    // AWS
-    AwsRegion,
-    AwsTag,
-    AwsEc2Instance,
-    AwsEc2Vpc,
-    AwsEc2Subnet,
-    AwsEc2AvailabilityZone,
-    AwsEc2SecurityGroup,
-    AwsEc2Eni,
-    AwsEc2RouteTable,
-    AwsEc2InternetGateway,
-    AwsEc2NatGateway,
-    AwsEc2Eip,
-    AwsEcsCluster,
-    AwsLambdaFunction,
-    AwsIamRole,
-    AwsElbLoadBalancer,
-    AwsElbTargetGroup,
-    AwsRoute53HostedZone,
-    AwsRoute53RecordSet,
-    AwsEksCluster,
-    AwsApiGatewayRestApi,
-    AwsRdsDbInstance,
-    AwsDynamoDbTable,
-    AwsSqsQueue,
-    AwsSnsTopic,
-    AwsCloudFrontDistribution,
-    AwsConfigResource,
-    // GCP
-    GcpProject,
-    GcpComputeInstance,
-    GcpComputeNetwork,
-    GcpComputeSubnetwork,
-    GcpComputeFirewall,
-    GcpComputeForwardingRule,
-    GcpComputeZone,
-    GcpSqlInstance,
-    GcpDnsManagedZone,
-    GcpGkeCluster,
-    GcpCloudFunction,
-    GcpStorageBucket,
-    GcpPubSubTopic,
-    GcpPubSubSubscription,
-    GcpCloudRunService,
-    // Azure
-    AzureVirtualMachine,
-    AzureVirtualNetwork,
-    AzureSubnet,
-    AzureNetworkInterface,
-    AzureNetworkSecurityGroup,
-    AzurePublicIpAddress,
-    AzureStorageAccount,
-    AzureManagedCluster,
-    AzureSqlServer,
-    AzureAppService,
-    AzureFunctionApp,
-    AzureApiManagement,
-    AzureCosmosDb,
-    AzureServiceBus,
-    AzureEventGridTopic,
-    AzureDnsZone,
-    AzureCdnProfile,
-    AzureServiceTag,
-    // Cloudflare
-    CloudflareZone,
-    CloudflareDnsRecord,
-    CloudflareWorker,
-    CloudflareDurableObject,
-    CloudflareKvNamespace,
-    CloudflareR2Bucket,
-    CloudflareD1Database,
-    ExternalService,
+    None => [
+        GenericIpAddress,
+        GenericHostname,
+        ExternalService,
+    ],
+    Some(CollectionSource::Aws) => [
+        AwsRegion,
+        AwsTag,
+        AwsEc2Instance,
+        AwsEc2Vpc,
+        AwsEc2Subnet,
+        AwsEc2AvailabilityZone,
+        AwsEc2SecurityGroup,
+        AwsEc2Eni,
+        AwsEc2RouteTable,
+        AwsEc2InternetGateway,
+        AwsEc2NatGateway,
+        AwsEc2Eip,
+        AwsEcsCluster,
+        AwsLambdaFunction,
+        AwsIamRole,
+        AwsElbLoadBalancer,
+        AwsElbTargetGroup,
+        AwsRoute53HostedZone,
+        AwsRoute53RecordSet,
+        AwsEksCluster,
+        AwsApiGatewayRestApi,
+        AwsRdsDbInstance,
+        AwsDynamoDbTable,
+        AwsSqsQueue,
+        AwsSnsTopic,
+        AwsCloudFrontDistribution,
+        AwsConfigResource,
+    ],
+    Some(CollectionSource::Gcp) => [
+        GcpProject,
+        GcpComputeInstance,
+        GcpComputeNetwork,
+        GcpComputeSubnetwork,
+        GcpComputeFirewall,
+        GcpComputeForwardingRule,
+        GcpComputeZone,
+        GcpSqlInstance,
+        GcpDnsManagedZone,
+        GcpGkeCluster,
+        GcpCloudFunction,
+        GcpStorageBucket,
+        GcpPubSubTopic,
+        GcpPubSubSubscription,
+        GcpCloudRunService,
+    ],
+    Some(CollectionSource::Azure) => [
+        AzureVirtualMachine,
+        AzureVirtualNetwork,
+        AzureSubnet,
+        AzureNetworkInterface,
+        AzureNetworkSecurityGroup,
+        AzurePublicIpAddress,
+        AzureStorageAccount,
+        AzureManagedCluster,
+        AzureSqlServer,
+        AzureAppService,
+        AzureFunctionApp,
+        AzureApiManagement,
+        AzureCosmosDb,
+        AzureServiceBus,
+        AzureEventGridTopic,
+        AzureDnsZone,
+        AzureCdnProfile,
+        AzureServiceTag,
+    ],
+    Some(CollectionSource::Cloudflare) => [
+        CloudflareZone,
+        CloudflareDnsRecord,
+        CloudflareWorker,
+        CloudflareDurableObject,
+        CloudflareKvNamespace,
+        CloudflareR2Bucket,
+        CloudflareD1Database,
+    ],
 );
 
 kinds!(

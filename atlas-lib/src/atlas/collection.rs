@@ -9,6 +9,7 @@
 //! to garbage-collect on incomplete data.
 
 use crate::cloud::definition::Provider;
+use std::collections::HashSet;
 use std::fmt;
 
 /// Which provider a collection failure came from.
@@ -75,6 +76,13 @@ impl CollectionReport {
 
     pub fn merge(&mut self, other: CollectionReport) {
         self.failures.extend(other.failures);
+    }
+
+    /// The providers this scan cannot speak for. Removals stay authoritative
+    /// for every source *not* in this set, so one throttled AWS collector must
+    /// not stop the differ from deleting a genuinely gone Cloudflare zone.
+    pub fn unreadable_sources(&self) -> HashSet<CollectionSource> {
+        self.failures.iter().map(|f| f.source).collect()
     }
 
     pub fn summary(&self) -> String {

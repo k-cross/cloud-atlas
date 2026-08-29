@@ -50,14 +50,20 @@ fn demo_graph(tick: u64) -> GraphBuilder {
     builder
 }
 
-/// Turn a scan into the patch to broadcast. A `complete` scan is authoritative
-/// and diffs straight through, removals included. An incomplete one cannot tell
-/// "deleted" from "unreadable", so the live graph is folded forward first and
-/// the tick becomes purely additive -- `next` is left as the exact graph the
-/// caller should install.
-fn reconcile(live: &Graph<Node, Edge>, next: &mut GraphBuilder, complete: bool) -> GraphPatch {
-    if !complete {
-        carry_forward(next, live);
+/// Turn a scan into the patch to broadcast. A complete scan is authoritative
+/// and diffs straight through, removals included. Where the report names a
+/// source the scan could not read, that source's live resources are folded
+/// forward first, so the tick is additive-only *for that source* while every
+/// other provider keeps deleting normally -- `next` is left as the exact graph
+/// the caller should install.
+fn reconcile(
+    live: &Graph<Node, Edge>,
+    next: &mut GraphBuilder,
+    report: &CollectionReport,
+) -> GraphPatch {
+    let unreadable = report.unreadable_sources();
+    if !unreadable.is_empty() {
+        carry_forward(next, live, &unreadable);
     }
     diff(live, &next.graph)
 }
@@ -71,8 +77,7 @@ pub async fn run(state: AppState, source: Source, interval: Duration) {
         tick += 1;
 
         let (mut next, report) = source.scan(tick).await;
-        let complete = report.is_complete();
-        if !complete {
+        if !report.is_complete() {
             tracing::warn!(
                 tick,
                 failures = report.failures.len(),
@@ -85,7 +90,7 @@ pub async fn run(state: AppState, source: Source, interval: Duration) {
         // section is just the comparison. WebSocket readers share the lock.
         let patch = {
             let live = state.live.read().await;
-            reconcile(&live, &mut next, complete)
+            reconcile(&live, &mut next, &report)
         };
         if patch.is_empty() {
             continue;
@@ -119,6 +124,18 @@ mod tests {
         builder
     }
 
+    fn complete() -> CollectionReport {
+        CollectionReport::default()
+    }
+
+    /// A report that cannot speak for AWS -- the source owning the kind these
+    /// tests drop.
+    fn aws_throttled() -> CollectionReport {
+        let mut report = CollectionReport::default();
+        report.record(CollectionSource::Aws, "us-east-1/ec2", "throttled");
+        report
+    }
+
     #[test]
     fn an_incomplete_scan_never_removes() {
         let live = demo_graph(1).graph;
@@ -130,13 +147,13 @@ mod tests {
             "fixture must contain the kind this test drops"
         );
 
-        let complete_patch = reconcile(&live, &mut without_kind(&live, dropped), true);
+        let complete_patch = reconcile(&live, &mut without_kind(&live, dropped), &complete());
         assert!(
             !complete_patch.removed_nodes.is_empty(),
             "a complete scan is authoritative and must still delete"
         );
 
-        let patch = reconcile(&live, &mut next, false);
+        let patch = reconcile(&live, &mut next, &aws_throttled());
         assert!(
             patch.removed_nodes.is_empty() && patch.removed_edges.is_empty(),
             "an incomplete scan deleted {} nodes / {} edges",
@@ -155,7 +172,7 @@ mod tests {
         let live = demo_graph(2).graph;
         let mut next = without_kind(&demo_graph(3).graph, "AwsEc2Instance");
 
-        let patch = reconcile(&live, &mut next, false);
+        let patch = reconcile(&live, &mut next, &aws_throttled());
 
         assert_eq!(
             patch.added_nodes.len(),
@@ -172,7 +189,7 @@ mod tests {
         let mut next = demo_graph(3);
         let same = next.graph.clone();
 
-        let with_policy = reconcile(&live, &mut next, true);
+        let with_policy = reconcile(&live, &mut next, &complete());
         let plain = diff(&live, &same);
 
         assert_eq!(with_policy.added_nodes.len(), plain.added_nodes.len());

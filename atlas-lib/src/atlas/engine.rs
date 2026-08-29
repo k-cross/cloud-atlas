@@ -1,6 +1,7 @@
 use crate::Settings;
 use crate::atlas::collection::CollectionReport;
 use crate::atlas::graph_builder::GraphBuilder;
+use crate::atlas::patch::carry_forward;
 use crate::atlas::projector;
 use crate::cloud::amazon::provider::build_aws;
 use crate::cloud::azure::provider::build_azure;
@@ -92,19 +93,33 @@ impl AtlasEngine {
     }
 
     /// Full point-in-time refresh used by the CLI: re-collect and export to
-    /// disk. Still a wipe-and-rebuild (no diffing) — the live server is the
-    /// incremental path.
+    /// disk. There is no diffing here — the live server is the incremental
+    /// path — but the same retention policy applies, because the exported files
+    /// are somebody's source of truth too. On an incomplete scan the previous
+    /// graph is folded forward for the sources that failed
+    /// (`patch::carry_forward`), so a daemon tick cannot rewrite `atlas.dot`
+    /// with every resource of a throttled collector deleted, only to put them
+    /// all back on the next tick. On a one-shot run the previous graph is empty
+    /// and this is a no-op: there is no prior truth to preserve, so the export
+    /// is partial and the warning is all we can offer.
     pub async fn update_graph(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let scan = self.collect().await;
-        if !scan.report.is_complete() {
-            eprintln!(
-                "Warning: collection was incomplete, the exported graph is partial -- {}",
-                scan.report.summary()
-            );
-        }
-        self.builder = scan.builder;
+        self.install(scan);
         self.export_graph().await?;
         Ok(())
+    }
+
+    fn install(&mut self, mut scan: Scan) {
+        let unreadable = scan.report.unreadable_sources();
+        if !unreadable.is_empty() {
+            eprintln!(
+                "Warning: collection was incomplete, retaining unconfirmed resources -- {}",
+                scan.report.summary()
+            );
+            carry_forward(&mut scan.builder, &self.builder.graph, &unreadable);
+        }
+
+        self.builder = scan.builder;
     }
 
     pub async fn run_once(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -134,5 +149,67 @@ impl AtlasEngine {
         tokio::fs::write("atlas.json", json).await?;
         println!("Graph updated successfully at atlas.dot (render snapshot: atlas.json)");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::atlas::collection::CollectionSource;
+    use crate::atlas::definition::Node;
+
+    fn seeded(nodes: [Node; 2]) -> GraphBuilder {
+        let mut builder = GraphBuilder::new();
+        for node in nodes {
+            builder.get_or_add_node(node);
+        }
+        builder
+    }
+
+    fn instance() -> Node {
+        Node::AwsEc2Instance("i-daemon".into())
+    }
+
+    fn zone() -> Node {
+        Node::CloudflareZone("zone-daemon".into())
+    }
+
+    /// The daemon rewrites atlas.dot/atlas.json every tick, so an incomplete
+    /// scan must not export a graph with a throttled collector's resources
+    /// deleted -- while resources a healthy provider really did lose still go.
+    #[test]
+    fn an_incomplete_scan_does_not_export_phantom_deletions() {
+        let mut engine = AtlasEngine::new(Settings::default());
+        engine.builder = seeded([instance(), zone()]);
+
+        let mut report = CollectionReport::default();
+        report.record(CollectionSource::Aws, "us-east-1/ec2", "throttled");
+        let scan = Scan {
+            builder: GraphBuilder::new(),
+            report,
+        };
+
+        engine.install(scan);
+
+        let kept: Vec<&Node> = engine.builder.graph.node_weights().collect();
+        assert_eq!(
+            kept,
+            vec![&instance()],
+            "AWS was unreadable so its instance is retained; Cloudflare was read \
+             and its zone is genuinely gone"
+        );
+    }
+
+    #[test]
+    fn a_complete_scan_replaces_the_graph_wholesale() {
+        let mut engine = AtlasEngine::new(Settings::default());
+        engine.builder = seeded([instance(), zone()]);
+
+        engine.install(Scan {
+            builder: GraphBuilder::new(),
+            report: CollectionReport::default(),
+        });
+
+        assert_eq!(engine.builder.graph.node_count(), 0);
     }
 }

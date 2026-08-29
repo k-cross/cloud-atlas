@@ -10,6 +10,7 @@
 //! (the typed `Node` encodes its config, so a changed resource is a different
 //! value). Richer update semantics are deferred to the liveness work.
 
+use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{RenderEdge, RenderNode, SNAPSHOT_VERSION, edge_key, node_key};
 use crate::atlas::graph_builder::GraphBuilder;
@@ -114,21 +115,33 @@ pub fn diff(old: &Graph<Node, Edge>, new: &Graph<Node, Edge>) -> GraphPatch {
     }
 }
 
-/// Fold everything in `previous` that is missing from `next` back into `next`,
-/// so a diff against `previous` can only add.
+/// Fold the parts of `previous` that `next` cannot speak for back into `next`,
+/// so a diff against `previous` only adds *within the failed sources'
+/// territory*.
 ///
-/// This is the reconciliation policy for an *incomplete* scan. When a source
+/// This is the reconciliation policy for an incomplete scan. When a source
 /// could not be read, its resources are absent from `next` for a reason that
 /// has nothing to do with them being gone, and diffing as-is would broadcast
-/// spurious removals. Carrying the previous state forward makes the tick
-/// purely additive: genuinely new resources from the sources that *did* respond
-/// still land, and anything unconfirmed is retained until a complete scan can
-/// speak to it. Stale resources therefore linger rather than flicker, which is
-/// the safer failure for a graph that is meant to be authoritative.
+/// spurious removals. Carrying that source's state forward keeps its resources
+/// until a scan can speak to them again — stale rather than flickering, the
+/// safer failure for a graph meant to be authoritative.
 ///
-/// The fold itself is [`GraphBuilder::merge`] — the scan's own builder already
-/// carries the node index this needs, and node/edge duplicate identity stays
-/// defined in exactly one place.
-pub fn carry_forward(next: &mut GraphBuilder, previous: &Graph<Node, Edge>) {
-    next.merge(previous);
+/// Crucially the retention is *scoped*: only nodes owned by an unreadable
+/// source (plus the cross-cloud stitching nodes no source owns, per
+/// [`Node::owner`]) are held. Every healthy provider stays fully authoritative,
+/// including its deletions, so a collector that fails on every tick can no
+/// longer stop the rest of the graph from converging.
+///
+/// The fold itself is [`GraphBuilder::merge_where`] — the scan's own builder
+/// already carries the node index this needs, and node/edge duplicate identity
+/// stays defined in exactly one place.
+pub fn carry_forward(
+    next: &mut GraphBuilder,
+    previous: &Graph<Node, Edge>,
+    unreadable: &HashSet<CollectionSource>,
+) {
+    next.merge_where(previous, |node| match node.owner() {
+        Some(source) => unreadable.contains(&source),
+        None => true,
+    });
 }

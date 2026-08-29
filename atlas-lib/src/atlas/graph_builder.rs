@@ -59,16 +59,32 @@ impl GraphBuilder {
     /// `patch::carry_forward` folds the live graph into an incomplete scan;
     /// merging in a fixed input order keeps the result deterministic.
     pub fn merge(&mut self, other: &Graph<Node, Edge>) {
+        self.merge_where(other, |_| true);
+    }
+
+    /// `merge`, restricted to the nodes `keep` accepts. An edge crosses over
+    /// only when at least one endpoint was kept on purpose *and* both endpoints
+    /// are present here — a rejected node is never resurrected as the endpoint
+    /// of an edge, and no edge is left dangling.
+    pub fn merge_where(&mut self, other: &Graph<Node, Edge>, keep: impl Fn(&Node) -> bool) {
         // Carry over every node first — this covers standalone nodes that never
         // appear as an edge endpoint.
         for node in other.node_weights() {
-            self.get_or_add_ref(node);
+            if keep(node) {
+                self.get_or_add_ref(node);
+            }
         }
         for edge_idx in other.edge_indices() {
             if let Some((a, b)) = other.edge_endpoints(edge_idx) {
-                let a_idx = self.get_or_add_ref(&other[a]);
-                let b_idx = self.get_or_add_ref(&other[b]);
-                self.add_edge(a_idx, b_idx, other[edge_idx].clone());
+                let (source, target) = (&other[a], &other[b]);
+                if !keep(source) && !keep(target) {
+                    continue;
+                }
+                if let (Some(&a_idx), Some(&b_idx)) =
+                    (self.node_map.get(source), self.node_map.get(target))
+                {
+                    self.add_edge(a_idx, b_idx, other[edge_idx].clone());
+                }
             }
         }
     }

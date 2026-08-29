@@ -1,6 +1,7 @@
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod tests {
+    use crate::atlas::collection::CollectionSource;
     use crate::atlas::definition::{Edge, Node};
     use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector;
@@ -778,6 +779,68 @@ mod tests {
         assert!(!patch.removed_edges.is_empty());
     }
 
+    fn all_sources() -> std::collections::HashSet<CollectionSource> {
+        std::collections::HashSet::from([
+            CollectionSource::Aws,
+            CollectionSource::Gcp,
+            CollectionSource::Azure,
+            CollectionSource::Cloudflare,
+        ])
+    }
+
+    fn owned_by(graph: &petgraph::graph::Graph<Node, Edge>, source: CollectionSource) -> usize {
+        graph
+            .node_weights()
+            .filter(|n| n.owner() == Some(source))
+            .count()
+    }
+
+    /// The failure this guards: one unreadable source used to freeze removals
+    /// for the entire graph, so a collector that failed on every tick meant
+    /// deletions anywhere never converged.
+    #[test]
+    fn carry_forward_holds_only_the_unreadable_sources_territory() {
+        use crate::atlas::patch::{carry_forward, diff};
+
+        let live = fixtures::build_graph().graph;
+
+        // A scan where both AWS and Cloudflare came back empty, but only AWS
+        // reported a failure — Cloudflare really is gone.
+        let mut trimmed = live.clone();
+        trimmed.retain_nodes(|g, i| {
+            !matches!(
+                g[i].owner(),
+                Some(CollectionSource::Aws) | Some(CollectionSource::Cloudflare)
+            )
+        });
+        assert!(owned_by(&live, CollectionSource::Aws) > 0);
+        assert!(owned_by(&live, CollectionSource::Cloudflare) > 0);
+
+        let mut next = GraphBuilder::new();
+        next.merge(&trimmed);
+
+        carry_forward(
+            &mut next,
+            &live,
+            &std::collections::HashSet::from([CollectionSource::Aws]),
+        );
+
+        assert_eq!(
+            owned_by(&next.graph, CollectionSource::Aws),
+            owned_by(&live, CollectionSource::Aws),
+            "the unreadable source's resources must be retained"
+        );
+        assert_eq!(
+            owned_by(&next.graph, CollectionSource::Cloudflare),
+            0,
+            "a healthy source's deletions must still go through"
+        );
+        assert!(
+            !diff(&live, &next.graph).removed_nodes.is_empty(),
+            "the graph must still converge for sources that were read"
+        );
+    }
+
     #[test]
     fn carry_forward_restores_only_what_the_scan_is_missing() {
         use crate::atlas::export::{edge_key, node_key};
@@ -799,7 +862,7 @@ mod tests {
         let b = partial.get_or_add_node(fresh_dst.clone());
         partial.add_edge(a, b, Edge::ResolvesTo);
 
-        carry_forward(&mut partial, &live);
+        carry_forward(&mut partial, &live, &all_sources());
 
         assert_eq!(partial.graph.node_count(), live.node_count() + 2);
 
@@ -827,7 +890,7 @@ mod tests {
         let before_nodes = next.graph.node_count();
         let before_edges = next.graph.edge_count();
 
-        carry_forward(&mut next, &live);
+        carry_forward(&mut next, &live, &all_sources());
 
         assert_eq!(next.graph.node_count(), before_nodes);
         assert_eq!(next.graph.edge_count(), before_edges);
