@@ -39,37 +39,35 @@ fn project_amazon_collection(
     match x {
         AmazonCollection::AmazonInstances(instance_data) => {
             for inst in instance_data {
-                let mut vpc_idx = None;
-                if let Some(vpc_id) = inst.vpc_id.as_ref() {
-                    let node = Node::AwsEc2Vpc(vpc_id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::Contains);
-                    vpc_idx = Some(idx);
-                }
+                let vpc_idx = inst.vpc_id.as_ref().map(|vpc_id| {
+                    builder.link_to(
+                        region_idx,
+                        Node::AwsEc2Vpc(vpc_id.as_str().into()),
+                        Edge::Contains,
+                    )
+                });
 
-                let mut subnet_idx = None;
-                if let Some(subnet_id) = inst.subnet_id.as_ref() {
-                    let node = Node::AwsEc2Subnet(subnet_id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
-                    if let Some(v_idx) = vpc_idx {
-                        builder.add_edge(v_idx, idx, Edge::Contains);
-                    }
-                    subnet_idx = Some(idx);
-                }
+                let subnet_idx = inst.subnet_id.as_ref().map(|subnet_id| {
+                    builder.link_to(
+                        vpc_idx,
+                        Node::AwsEc2Subnet(subnet_id.as_str().into()),
+                        Edge::Contains,
+                    )
+                });
 
                 let mut inst_idx = None;
                 if let Some(instance_id) = inst.instance_id.as_ref() {
-                    let node = Node::AwsEc2Instance(instance_id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx =
+                        builder.get_or_add_node(Node::AwsEc2Instance(instance_id.as_str().into()));
                     inst_idx = Some(idx);
 
                     if let Some(subnet_idx) = subnet_idx {
-                        let eni_node = Node::AwsEc2Eni(instance_id.as_str().into());
-                        let eni_idx = builder.get_or_add_node(eni_node);
-
-                        // Instance -> HasIp -> ENI
-                        builder.add_edge(idx, eni_idx, Edge::HasIp);
-                        // ENI -> AttachedTo -> Subnet
+                        // Instance -> HasIp -> ENI -> AttachedTo -> Subnet
+                        let eni_idx = builder.link_to(
+                            idx,
+                            Node::AwsEc2Eni(instance_id.as_str().into()),
+                            Edge::HasIp,
+                        );
                         builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
                     }
                 }
@@ -77,44 +75,43 @@ fn project_amazon_collection(
                 if let Some(place) = inst.placement.as_ref()
                     && let Some(az_name) = place.availability_zone.as_ref()
                 {
-                    let node = Node::AwsEc2AvailabilityZone(az_name.as_str().into());
-                    let az_idx = builder.get_or_add_node(node);
-
-                    if let Some(i_idx) = inst_idx {
-                        builder.add_edge(az_idx, i_idx, Edge::Contains);
-                    }
+                    builder.link_from(
+                        inst_idx,
+                        Node::AwsEc2AvailabilityZone(az_name.as_str().into()),
+                        Edge::Contains,
+                    );
                 }
 
                 if let Some(private_ip) = inst.private_ip_address.as_ref() {
-                    let node = Node::GenericIpAddress(private_ip.as_str().into());
-                    let ip_idx = builder.get_or_add_node(node);
-                    if let Some(i_idx) = inst_idx {
-                        builder.add_edge(i_idx, ip_idx, Edge::ConnectsTo);
-                    }
+                    builder.link_to(
+                        inst_idx,
+                        Node::GenericIpAddress(private_ip.as_str().into()),
+                        Edge::ConnectsTo,
+                    );
                 }
 
                 if let Some(tags) = inst.tags.as_ref() {
                     for tag in tags {
                         if let (Some(k), Some(v)) = (tag.key.as_ref(), tag.value.as_ref()) {
-                            let node = Node::AwsTag {
-                                key: k.as_str().into(),
-                                value: v.as_str().into(),
-                            };
-                            let tag_idx = builder.get_or_add_node(node);
-                            if let Some(i_idx) = inst_idx {
-                                builder.add_edge(i_idx, tag_idx, Edge::DependsOn);
-                            }
+                            builder.link_to(
+                                inst_idx,
+                                Node::AwsTag {
+                                    key: k.as_str().into(),
+                                    value: v.as_str().into(),
+                                },
+                                Edge::DependsOn,
+                            );
                         }
                     }
                 }
 
                 for sg in inst.security_groups() {
                     if let Some(sg_id) = sg.group_id() {
-                        let sg_node = Node::AwsEc2SecurityGroup(sg_id.into());
-                        let sg_idx = builder.get_or_add_node(sg_node);
-                        if let Some(i_idx) = inst_idx {
-                            builder.add_edge(i_idx, sg_idx, Edge::ConnectsTo);
-                        }
+                        builder.link_to(
+                            inst_idx,
+                            Node::AwsEc2SecurityGroup(sg_id.into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -124,19 +121,19 @@ fn project_amazon_collection(
                 if use_aws_resource(res_name.as_str(), opts.exclude_by_default) {
                     for r in rs {
                         if let Some(id) = r.resource_id() {
-                            let node = Node::AwsConfigResource {
-                                resource_type: res_name.as_str().into(),
-                                id: id.into(),
-                            };
-                            let idx = builder.get_or_add_node(node);
-
-                            if use_global(res_name.as_str()) {
-                                let global_node = Node::AwsRegion("global".into());
-                                let g_idx = builder.get_or_add_node(global_node);
-                                builder.add_edge(g_idx, idx, Edge::Contains);
+                            let parent_idx = if use_global(res_name.as_str()) {
+                                builder.get_or_add_node(Node::AwsRegion("global".into()))
                             } else {
-                                builder.add_edge(region_idx, idx, Edge::Contains);
-                            }
+                                region_idx
+                            };
+                            builder.link_to(
+                                parent_idx,
+                                Node::AwsConfigResource {
+                                    resource_type: res_name.as_str().into(),
+                                    id: id.into(),
+                                },
+                                Edge::Contains,
+                            );
                         }
                     }
                 }
@@ -145,30 +142,30 @@ fn project_amazon_collection(
         AmazonCollection::AmazonClusters(clusters) => {
             for cluster in clusters {
                 if let Some(arn) = cluster.cluster_arn() {
-                    let node = Node::AwsEcsCluster(arn.into());
-                    let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::Contains);
+                    builder.link_to(region_idx, Node::AwsEcsCluster(arn.into()), Edge::Contains);
                 }
             }
         }
         AmazonCollection::AmazonLambdas(lambdas) => {
             for lambda in lambdas {
                 if let Some(name) = lambda.function_name() {
-                    let node = Node::AwsLambdaFunction(name.into());
-                    let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::Contains);
+                    let idx = builder.link_to(
+                        region_idx,
+                        Node::AwsLambdaFunction(name.into()),
+                        Edge::Contains,
+                    );
 
                     if let Some(role) = lambda.role() {
-                        let role_node = Node::AwsIamRole(role.into());
-                        let r_idx = builder.get_or_add_node(role_node);
-                        builder.add_edge(idx, r_idx, Edge::DependsOn);
+                        builder.link_to(idx, Node::AwsIamRole(role.into()), Edge::DependsOn);
                     }
 
                     if let Some(vpc_config) = lambda.vpc_config() {
                         for sg_id in vpc_config.security_group_ids() {
-                            let sg_node = Node::AwsEc2SecurityGroup(sg_id.as_str().into());
-                            let sg_idx = builder.get_or_add_node(sg_node);
-                            builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                            builder.link_to(
+                                idx,
+                                Node::AwsEc2SecurityGroup(sg_id.as_str().into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                 }
@@ -191,28 +188,24 @@ fn project_amazon_collection(
         } => {
             for lb in load_balancers {
                 if let Some(arn) = lb.load_balancer_arn() {
-                    let lb_node = Node::AwsElbLoadBalancer(arn.into());
-                    let lb_idx = builder.get_or_add_node(lb_node);
-
-                    if let Some(vpc_id) = lb.vpc_id() {
-                        let vpc_node = Node::AwsEc2Vpc(vpc_id.into());
-                        let v_idx = builder.get_or_add_node(vpc_node);
-                        builder.add_edge(v_idx, lb_idx, Edge::Contains);
-                    } else {
-                        builder.add_edge(region_idx, lb_idx, Edge::Contains);
-                    }
+                    let parent_idx = match lb.vpc_id() {
+                        Some(vpc_id) => builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into())),
+                        None => region_idx,
+                    };
+                    builder.link_to(
+                        parent_idx,
+                        Node::AwsElbLoadBalancer(arn.into()),
+                        Edge::Contains,
+                    );
                 }
             }
 
             for tg in target_groups {
                 if let Some(arn) = tg.target_group_arn() {
-                    let tg_node = Node::AwsElbTargetGroup(arn.into());
-                    let tg_idx = builder.get_or_add_node(tg_node);
+                    let tg_idx = builder.get_or_add_node(Node::AwsElbTargetGroup(arn.into()));
 
                     if let Some(vpc_id) = tg.vpc_id() {
-                        let vpc_node = Node::AwsEc2Vpc(vpc_id.into());
-                        let v_idx = builder.get_or_add_node(vpc_node);
-                        builder.add_edge(v_idx, tg_idx, Edge::Contains);
+                        builder.link_from(tg_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
                     }
 
                     if let Some(health_descriptions) = target_health.get(arn) {
@@ -221,9 +214,11 @@ fn project_amazon_collection(
                             .filter_map(|h| h.target())
                             .filter_map(|t| t.id())
                         {
-                            let inst_node = Node::AwsEc2Instance(target_id.into());
-                            let i_idx = builder.get_or_add_node(inst_node);
-                            builder.add_edge(tg_idx, i_idx, Edge::ConnectsTo);
+                            builder.link_to(
+                                tg_idx,
+                                Node::AwsEc2Instance(target_id.into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                 }
@@ -236,11 +231,13 @@ fn project_amazon_collection(
                         .iter()
                         .filter_map(|a| a.target_group_arn())
                     {
-                        let lb_node = Node::AwsElbLoadBalancer(lb_arn.into());
-                        let tg_node = Node::AwsElbTargetGroup(tg_arn.into());
-                        let lb_idx = builder.get_or_add_node(lb_node);
-                        let tg_idx = builder.get_or_add_node(tg_node);
-                        builder.add_edge(lb_idx, tg_idx, Edge::ConnectsTo);
+                        let lb_idx =
+                            builder.get_or_add_node(Node::AwsElbLoadBalancer(lb_arn.into()));
+                        builder.link_to(
+                            lb_idx,
+                            Node::AwsElbTargetGroup(tg_arn.into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -249,61 +246,59 @@ fn project_amazon_collection(
             hosted_zones,
             record_sets,
         } => {
-            let global_node = Node::AwsRegion("global".into());
-            let g_idx = builder.get_or_add_node(global_node);
+            let g_idx = builder.get_or_add_node(Node::AwsRegion("global".into()));
 
             for hz in hosted_zones {
-                let id = hz.id();
-                let hz_node = Node::AwsRoute53HostedZone(id.into());
-                let hz_idx = builder.get_or_add_node(hz_node);
-                builder.add_edge(g_idx, hz_idx, Edge::Contains);
+                builder.link_to(
+                    g_idx,
+                    Node::AwsRoute53HostedZone(hz.id().into()),
+                    Edge::Contains,
+                );
             }
 
             for rs in record_sets {
-                let name = rs.name();
-                let rs_node = Node::AwsRoute53RecordSet(name.into());
-                let rs_idx = builder.get_or_add_node(rs_node);
-
-                builder.add_edge(g_idx, rs_idx, Edge::Contains);
+                let rs_idx = builder.link_to(
+                    g_idx,
+                    Node::AwsRoute53RecordSet(rs.name().into()),
+                    Edge::Contains,
+                );
 
                 let is_ip = rs.r#type() == &aws_sdk_route53::types::RrType::A
                     || rs.r#type() == &aws_sdk_route53::types::RrType::Aaaa;
 
-                let records = rs.resource_records();
-                for r in records {
+                for r in rs.resource_records() {
                     let val = r.value();
                     let pivot_node = if is_ip {
                         Node::GenericIpAddress(val.into())
                     } else {
                         Node::GenericHostname(val.into())
                     };
-                    let pivot_idx = builder.get_or_add_node(pivot_node);
-                    builder.add_edge(rs_idx, pivot_idx, Edge::ConnectsTo);
+                    builder.link_to(rs_idx, pivot_node, Edge::ConnectsTo);
                 }
             }
         }
         AmazonCollection::AmazonEks(clusters) => {
             for cluster in clusters {
                 if let Some(name) = cluster.name() {
-                    let node = Node::AwsEksCluster(name.into());
-                    let idx = builder.get_or_add_node(node);
+                    let vpc_config = cluster.resources_vpc_config();
+                    let parent_idx = match vpc_config.and_then(|c| c.vpc_id()) {
+                        Some(vpc_id) => builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into())),
+                        None => region_idx,
+                    };
+                    let idx = builder.link_to(
+                        parent_idx,
+                        Node::AwsEksCluster(name.into()),
+                        Edge::Contains,
+                    );
 
-                    if let Some(vpc_config) = cluster.resources_vpc_config() {
-                        if let Some(vpc_id) = vpc_config.vpc_id() {
-                            let vpc_node = Node::AwsEc2Vpc(vpc_id.into());
-                            let vpc_idx = builder.get_or_add_node(vpc_node);
-                            builder.add_edge(vpc_idx, idx, Edge::Contains);
-                        } else {
-                            builder.add_edge(region_idx, idx, Edge::Contains);
-                        }
-
+                    if let Some(vpc_config) = vpc_config {
                         for sg_id in vpc_config.security_group_ids() {
-                            let sg_node = Node::AwsEc2SecurityGroup(sg_id.as_str().into());
-                            let sg_idx = builder.get_or_add_node(sg_node);
-                            builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                            builder.link_to(
+                                idx,
+                                Node::AwsEc2SecurityGroup(sg_id.as_str().into()),
+                                Edge::ConnectsTo,
+                            );
                         }
-                    } else {
-                        builder.add_edge(region_idx, idx, Edge::Contains);
                     }
                 }
             }
@@ -311,35 +306,34 @@ fn project_amazon_collection(
         AmazonCollection::AmazonApiGateway(apis) => {
             for api in apis {
                 if let Some(id) = api.id() {
-                    let node = Node::AwsApiGatewayRestApi(id.into());
-                    let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::Contains);
+                    builder.link_to(
+                        region_idx,
+                        Node::AwsApiGatewayRestApi(id.into()),
+                        Edge::Contains,
+                    );
                 }
             }
         }
         AmazonCollection::AmazonRds(dbs) => {
             for db in dbs {
                 if let Some(id) = db.db_instance_identifier() {
-                    let node = Node::AwsRdsDbInstance(id.into());
-                    let idx = builder.get_or_add_node(node);
-
-                    if let Some(subnet_group) = db.db_subnet_group() {
-                        if let Some(vpc_id) = subnet_group.vpc_id() {
-                            let vpc_node = Node::AwsEc2Vpc(vpc_id.into());
-                            let vpc_idx = builder.get_or_add_node(vpc_node);
-                            builder.add_edge(vpc_idx, idx, Edge::Contains);
-                        } else {
-                            builder.add_edge(region_idx, idx, Edge::Contains);
-                        }
-                    } else {
-                        builder.add_edge(region_idx, idx, Edge::Contains);
-                    }
+                    let parent_idx = match db.db_subnet_group().and_then(|g| g.vpc_id()) {
+                        Some(vpc_id) => builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into())),
+                        None => region_idx,
+                    };
+                    let idx = builder.link_to(
+                        parent_idx,
+                        Node::AwsRdsDbInstance(id.into()),
+                        Edge::Contains,
+                    );
 
                     for sg in db.vpc_security_groups() {
                         if let Some(sg_id) = sg.vpc_security_group_id() {
-                            let sg_node = Node::AwsEc2SecurityGroup(sg_id.into());
-                            let sg_idx = builder.get_or_add_node(sg_node);
-                            builder.add_edge(idx, sg_idx, Edge::ConnectsTo);
+                            builder.link_to(
+                                idx,
+                                Node::AwsEc2SecurityGroup(sg_id.into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                 }
@@ -347,36 +341,38 @@ fn project_amazon_collection(
         }
         AmazonCollection::AmazonDynamoDb(tables) => {
             for t in tables {
-                let node = Node::AwsDynamoDbTable(t.0.as_str().into());
-                let idx = builder.get_or_add_node(node);
-                builder.add_edge(region_idx, idx, Edge::Contains);
+                builder.link_to(
+                    region_idx,
+                    Node::AwsDynamoDbTable(t.0.as_str().into()),
+                    Edge::Contains,
+                );
             }
         }
         AmazonCollection::AmazonSqs(queues) => {
             for q in queues {
-                let node = Node::AwsSqsQueue(q.0.as_str().into());
-                let idx = builder.get_or_add_node(node);
-                builder.add_edge(region_idx, idx, Edge::Contains);
+                builder.link_to(
+                    region_idx,
+                    Node::AwsSqsQueue(q.0.as_str().into()),
+                    Edge::Contains,
+                );
             }
         }
         AmazonCollection::AmazonSns(topics) => {
             for t in topics {
                 if let Some(arn) = t.topic_arn() {
-                    let node = Node::AwsSnsTopic(arn.into());
-                    let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::Contains);
+                    builder.link_to(region_idx, Node::AwsSnsTopic(arn.into()), Edge::Contains);
                 }
             }
         }
         AmazonCollection::AmazonCloudFront(dists) => {
-            let global_node = Node::AwsRegion("global".into());
-            let g_idx = builder.get_or_add_node(global_node);
+            let g_idx = builder.get_or_add_node(Node::AwsRegion("global".into()));
 
             for d in dists {
-                let id = d.id();
-                let node = Node::AwsCloudFrontDistribution(id.into());
-                let idx = builder.get_or_add_node(node);
-                builder.add_edge(g_idx, idx, Edge::Contains);
+                builder.link_to(
+                    g_idx,
+                    Node::AwsCloudFrontDistribution(d.id().into()),
+                    Edge::Contains,
+                );
             }
         }
         AmazonCollection::AmazonNetworking {
@@ -392,9 +388,11 @@ fn project_amazon_collection(
                 if let Some(alloc) = addr.allocation_id().or_else(|| addr.public_ip()) {
                     let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
                     if let Some(public_ip) = addr.public_ip() {
-                        let ip_idx =
-                            builder.get_or_add_node(Node::GenericIpAddress(public_ip.into()));
-                        builder.add_edge(eip_idx, ip_idx, Edge::ConnectsTo);
+                        builder.link_to(
+                            eip_idx,
+                            Node::GenericIpAddress(public_ip.into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -406,8 +404,11 @@ fn project_amazon_collection(
                         builder.get_or_add_node(Node::AwsEc2InternetGateway(igw_id.into()));
                     for att in igw.attachments() {
                         if let Some(vpc_id) = att.vpc_id() {
-                            let vpc_idx = builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into()));
-                            builder.add_edge(igw_idx, vpc_idx, Edge::AttachedTo);
+                            builder.link_to(
+                                igw_idx,
+                                Node::AwsEc2Vpc(vpc_id.into()),
+                                Edge::AttachedTo,
+                            );
                         }
                     }
                 }
@@ -419,16 +420,17 @@ fn project_amazon_collection(
                 if let Some(nat_id) = nat.nat_gateway_id() {
                     let nat_idx = builder.get_or_add_node(Node::AwsEc2NatGateway(nat_id.into()));
                     if let Some(subnet_id) = nat.subnet_id() {
-                        let subnet_idx =
-                            builder.get_or_add_node(Node::AwsEc2Subnet(subnet_id.into()));
-                        builder.add_edge(nat_idx, subnet_idx, Edge::AttachedTo);
+                        builder.link_to(
+                            nat_idx,
+                            Node::AwsEc2Subnet(subnet_id.into()),
+                            Edge::AttachedTo,
+                        );
                     }
                     for nat_addr in nat.nat_gateway_addresses() {
                         if let Some(alloc) =
                             nat_addr.allocation_id().or_else(|| nat_addr.public_ip())
                         {
-                            let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
-                            builder.add_edge(nat_idx, eip_idx, Edge::HasIp);
+                            builder.link_to(nat_idx, Node::AwsEc2Eip(alloc.into()), Edge::HasIp);
                         }
                     }
                 }
@@ -441,29 +443,34 @@ fn project_amazon_collection(
                     let rt_idx = builder.get_or_add_node(Node::AwsEc2RouteTable(rt_id.into()));
 
                     if let Some(vpc_id) = rt.vpc_id() {
-                        let vpc_idx = builder.get_or_add_node(Node::AwsEc2Vpc(vpc_id.into()));
-                        builder.add_edge(vpc_idx, rt_idx, Edge::Contains);
+                        builder.link_from(rt_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
                     }
 
                     for assoc in rt.associations() {
                         if let Some(subnet_id) = assoc.subnet_id() {
-                            let subnet_idx =
-                                builder.get_or_add_node(Node::AwsEc2Subnet(subnet_id.into()));
-                            builder.add_edge(subnet_idx, rt_idx, Edge::AttachedTo);
+                            builder.link_from(
+                                rt_idx,
+                                Node::AwsEc2Subnet(subnet_id.into()),
+                                Edge::AttachedTo,
+                            );
                         }
                     }
 
                     for route in rt.routes() {
                         if let Some(nat_id) = route.nat_gateway_id() {
-                            let nat_idx =
-                                builder.get_or_add_node(Node::AwsEc2NatGateway(nat_id.into()));
-                            builder.add_edge(rt_idx, nat_idx, Edge::RoutesTo);
+                            builder.link_to(
+                                rt_idx,
+                                Node::AwsEc2NatGateway(nat_id.into()),
+                                Edge::RoutesTo,
+                            );
                         } else if let Some(gw_id) = route.gateway_id()
                             && gw_id.starts_with("igw-")
                         {
-                            let igw_idx =
-                                builder.get_or_add_node(Node::AwsEc2InternetGateway(gw_id.into()));
-                            builder.add_edge(rt_idx, igw_idx, Edge::RoutesTo);
+                            builder.link_to(
+                                rt_idx,
+                                Node::AwsEc2InternetGateway(gw_id.into()),
+                                Edge::RoutesTo,
+                            );
                         }
                     }
                 }
@@ -472,18 +479,21 @@ fn project_amazon_collection(
         AmazonCollection::AmazonSecurityGroups(groups) => {
             for sg in groups {
                 if let Some(id) = sg.group_id() {
-                    let node = Node::AwsEc2SecurityGroup(id.into());
-                    let idx = builder.get_or_add_node(node);
-                    builder.add_edge(region_idx, idx, Edge::Contains);
+                    let idx = builder.link_to(
+                        region_idx,
+                        Node::AwsEc2SecurityGroup(id.into()),
+                        Edge::Contains,
+                    );
 
                     for perm in sg.ip_permissions() {
                         for pair in perm.user_id_group_pairs() {
                             if let Some(referenced_group_id) = pair.group_id() {
-                                let ref_node =
-                                    Node::AwsEc2SecurityGroup(referenced_group_id.into());
-                                let ref_idx = builder.get_or_add_node(ref_node);
                                 // The referenced group allows traffic TO this group
-                                builder.add_edge(ref_idx, idx, Edge::ConnectsTo);
+                                builder.link_from(
+                                    idx,
+                                    Node::AwsEc2SecurityGroup(referenced_group_id.into()),
+                                    Edge::ConnectsTo,
+                                );
                             }
                         }
                     }
@@ -493,18 +503,22 @@ fn project_amazon_collection(
                             if let Some(cidr) = ip_range.cidr_ip()
                                 && !is_large_cidr(cidr)
                             {
-                                let ip_node = Node::GenericIpAddress(cidr.into());
-                                let ip_idx = builder.get_or_add_node(ip_node);
-                                builder.add_edge(idx, ip_idx, Edge::RoutesTo);
+                                builder.link_to(
+                                    idx,
+                                    Node::GenericIpAddress(cidr.into()),
+                                    Edge::RoutesTo,
+                                );
                             }
                         }
                         for ipv6_range in perm.ipv6_ranges() {
                             if let Some(cidr) = ipv6_range.cidr_ipv6()
                                 && !is_large_cidr(cidr)
                             {
-                                let ip_node = Node::GenericIpAddress(cidr.into());
-                                let ip_idx = builder.get_or_add_node(ip_node);
-                                builder.add_edge(idx, ip_idx, Edge::RoutesTo);
+                                builder.link_to(
+                                    idx,
+                                    Node::GenericIpAddress(cidr.into()),
+                                    Edge::RoutesTo,
+                                );
                             }
                         }
                     }

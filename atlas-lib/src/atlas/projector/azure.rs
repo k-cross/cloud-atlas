@@ -38,13 +38,15 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureVirtualMachines(vms) => {
             for vm in vms {
                 if let Some(id) = &vm.id {
-                    let node = Node::AzureVirtualMachine(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx =
+                        builder.get_or_add_node(Node::AzureVirtualMachine(id.as_str().into()));
 
                     for nic_id in &vm.network_interfaces {
-                        let nic_node = Node::AzureNetworkInterface(nic_id.as_str().into());
-                        let nic_idx = builder.get_or_add_node(nic_node);
-                        builder.add_edge(idx, nic_idx, Edge::ConnectsTo);
+                        builder.link_to(
+                            idx,
+                            Node::AzureNetworkInterface(nic_id.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -52,13 +54,15 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureVirtualNetworks(vnets) => {
             for vnet in vnets {
                 if let Some(id) = &vnet.id {
-                    let node = Node::AzureVirtualNetwork(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx =
+                        builder.get_or_add_node(Node::AzureVirtualNetwork(id.as_str().into()));
 
                     for subnet_id in &vnet.subnets {
-                        let subnet_node = Node::AzureSubnet(subnet_id.as_str().into());
-                        let subnet_idx = builder.get_or_add_node(subnet_node);
-                        builder.add_edge(idx, subnet_idx, Edge::Contains);
+                        builder.link_to(
+                            idx,
+                            Node::AzureSubnet(subnet_id.as_str().into()),
+                            Edge::Contains,
+                        );
                     }
                 }
             }
@@ -66,19 +70,22 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureSubnets(subnets) => {
             for subnet in subnets {
                 if let Some(id) = &subnet.id {
-                    let node = Node::AzureSubnet(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx = builder.get_or_add_node(Node::AzureSubnet(id.as_str().into()));
 
                     if let Some(vnet_id) = &subnet.vnet_id {
-                        let vnet_node = Node::AzureVirtualNetwork(vnet_id.as_str().into());
-                        let v_idx = builder.get_or_add_node(vnet_node);
-                        builder.add_edge(v_idx, idx, Edge::Contains);
+                        builder.link_from(
+                            idx,
+                            Node::AzureVirtualNetwork(vnet_id.as_str().into()),
+                            Edge::Contains,
+                        );
                     }
 
                     if let Some(nsg_id) = &subnet.network_security_group_id {
-                        let nsg_node = Node::AzureNetworkSecurityGroup(nsg_id.as_str().into());
-                        let nsg_idx = builder.get_or_add_node(nsg_node);
-                        builder.add_edge(idx, nsg_idx, Edge::ConnectsTo);
+                        builder.link_to(
+                            idx,
+                            Node::AzureNetworkSecurityGroup(nsg_id.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -86,8 +93,8 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureNetworkSecurityGroups(nsgs) => {
             for nsg in nsgs {
                 if let Some(id) = &nsg.id {
-                    let node = Node::AzureNetworkSecurityGroup(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx = builder
+                        .get_or_add_node(Node::AzureNetworkSecurityGroup(id.as_str().into()));
 
                     if let Some(props) = &nsg.properties
                         && let Some(rules) = &props.security_rules
@@ -107,13 +114,17 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
 
                                 for dest in destinations {
                                     if is_service_tag(&dest) {
-                                        let tag_node = Node::AzureServiceTag(dest.into());
-                                        let tag_idx = builder.get_or_add_node(tag_node);
-                                        builder.add_edge(idx, tag_idx, Edge::RoutesTo);
+                                        builder.link_to(
+                                            idx,
+                                            Node::AzureServiceTag(dest.into()),
+                                            Edge::RoutesTo,
+                                        );
                                     } else if !is_large_cidr(&dest) {
-                                        let ip_node = Node::GenericIpAddress(dest.into());
-                                        let ip_idx = builder.get_or_add_node(ip_node);
-                                        builder.add_edge(idx, ip_idx, Edge::RoutesTo);
+                                        builder.link_to(
+                                            idx,
+                                            Node::GenericIpAddress(dest.into()),
+                                            Edge::RoutesTo,
+                                        );
                                     }
                                 }
                             }
@@ -125,13 +136,15 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzurePublicIpAddresses(pips) => {
             for pip in pips {
                 if let Some(id) = &pip.id {
-                    let node = Node::AzurePublicIpAddress(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx =
+                        builder.get_or_add_node(Node::AzurePublicIpAddress(id.as_str().into()));
 
                     if let Some(ip) = &pip.ip_address {
-                        let ip_node = Node::GenericIpAddress(ip.as_str().into());
-                        let ip_idx = builder.get_or_add_node(ip_node);
-                        builder.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                        builder.link_to(
+                            idx,
+                            Node::GenericIpAddress(ip.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -148,15 +161,17 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureAppServices(apps) => {
             for app in apps {
                 if let Some(id) = &app.id {
-                    let node = Node::AzureAppService(id.as_str().into());
-                    let app_idx = builder.get_or_add_node(node);
+                    let app_idx =
+                        builder.get_or_add_node(Node::AzureAppService(id.as_str().into()));
 
                     if let Some(props) = &app.properties
                         && let Some(hostname) = &props.default_host_name
                     {
-                        let pivot_node = Node::GenericHostname(hostname.as_str().into());
-                        let pivot_idx = builder.get_or_add_node(pivot_node);
-                        builder.add_edge(pivot_idx, app_idx, Edge::RoutesTo);
+                        builder.link_from(
+                            app_idx,
+                            Node::GenericHostname(hostname.as_str().into()),
+                            Edge::RoutesTo,
+                        );
                     }
                 }
             }

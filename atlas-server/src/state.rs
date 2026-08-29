@@ -14,7 +14,7 @@ use tokio::sync::{RwLock, broadcast};
 /// How many patches a slow WebSocket client may fall behind before the
 /// broadcast channel drops the oldest. On lag we resync the client with a fresh
 /// snapshot rather than trying to replay, so a modest buffer is fine.
-const PATCH_CHANNEL_CAPACITY: usize = 256;
+pub const PATCH_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct AppState {

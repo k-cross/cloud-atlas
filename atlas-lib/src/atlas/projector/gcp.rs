@@ -60,11 +60,11 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
                 }
 
                 if let Some(id) = &inst.id {
-                    let node = Node::GcpComputeInstance(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
-                    if let Some(p_idx) = project_idx {
-                        builder.add_edge(p_idx, idx, Edge::DependsOn);
-                    }
+                    let idx = builder.link_to(
+                        project_idx,
+                        Node::GcpComputeInstance(id.as_str().into()),
+                        Edge::DependsOn,
+                    );
                     if let Some(z_idx) = zone_idx {
                         builder.add_edge(z_idx, idx, Edge::Contains);
                     }
@@ -72,9 +72,11 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
                     if let Some(network_interfaces) = &inst.network_interfaces {
                         for net in network_interfaces {
                             if let Some(network) = &net.network {
-                                let net_node = Node::GcpComputeNetwork(network.as_str().into());
-                                let n_idx = builder.get_or_add_node(net_node);
-                                builder.add_edge(n_idx, idx, Edge::Contains);
+                                builder.link_from(
+                                    idx,
+                                    Node::GcpComputeNetwork(network.as_str().into()),
+                                    Edge::Contains,
+                                );
                             }
                         }
                     }
@@ -84,13 +86,14 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GoogleFirewalls(firewalls) => {
             for fw in firewalls {
                 if let Some(id) = &fw.id {
-                    let node = Node::GcpComputeFirewall(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx = builder.get_or_add_node(Node::GcpComputeFirewall(id.as_str().into()));
 
                     if let Some(network) = &fw.network {
-                        let net_node = Node::GcpComputeNetwork(network.as_str().into());
-                        let n_idx = builder.get_or_add_node(net_node);
-                        builder.add_edge(n_idx, idx, Edge::Contains);
+                        builder.link_from(
+                            idx,
+                            Node::GcpComputeNetwork(network.as_str().into()),
+                            Edge::Contains,
+                        );
                     }
 
                     if let Some(direction) = &fw.direction
@@ -99,9 +102,11 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
                     {
                         for range in ranges {
                             if !is_large_cidr(range) {
-                                let ip_node = Node::GenericIpAddress(range.as_str().into());
-                                let ip_idx = builder.get_or_add_node(ip_node);
-                                builder.add_edge(idx, ip_idx, Edge::RoutesTo);
+                                builder.link_to(
+                                    idx,
+                                    Node::GenericIpAddress(range.as_str().into()),
+                                    Edge::RoutesTo,
+                                );
                             }
                         }
                     }
@@ -111,15 +116,16 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GoogleSql(instances) => {
             for sql in instances {
                 if let Some(name) = &sql.name {
-                    let node = Node::GcpSqlInstance(name.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx = builder.get_or_add_node(Node::GcpSqlInstance(name.as_str().into()));
 
                     if let Some(ips) = &sql.ip_addresses {
                         for ip in ips {
                             if let Some(ip_addr) = &ip.ip_address {
-                                let ip_node = Node::GenericIpAddress(ip_addr.as_str().into());
-                                let ip_idx = builder.get_or_add_node(ip_node);
-                                builder.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                                builder.link_to(
+                                    idx,
+                                    Node::GenericIpAddress(ip_addr.as_str().into()),
+                                    Edge::ConnectsTo,
+                                );
                             }
                         }
                     }
@@ -132,13 +138,14 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GoogleGke(clusters) => {
             for cluster in clusters {
                 if let Some(name) = &cluster.name {
-                    let node = Node::GcpGkeCluster(name.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx = builder.get_or_add_node(Node::GcpGkeCluster(name.as_str().into()));
 
                     if let Some(network) = &cluster.network {
-                        let net_node = Node::GcpComputeNetwork(network.as_str().into());
-                        let n_idx = builder.get_or_add_node(net_node);
-                        builder.add_edge(n_idx, idx, Edge::Contains);
+                        builder.link_from(
+                            idx,
+                            Node::GcpComputeNetwork(network.as_str().into()),
+                            Edge::Contains,
+                        );
                     }
                 }
             }
@@ -155,13 +162,15 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GooglePubSubSubscriptions(subscriptions) => {
             for sub in subscriptions {
                 if let Some(name) = &sub.name {
-                    let node = Node::GcpPubSubSubscription(name.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx =
+                        builder.get_or_add_node(Node::GcpPubSubSubscription(name.as_str().into()));
 
                     if let Some(topic) = &sub.topic {
-                        let topic_node = Node::GcpPubSubTopic(topic.as_str().into());
-                        let t_idx = builder.get_or_add_node(topic_node);
-                        builder.add_edge(idx, t_idx, Edge::ConnectsTo);
+                        builder.link_to(
+                            idx,
+                            Node::GcpPubSubTopic(topic.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }
@@ -169,16 +178,18 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GoogleRunServices(services) => {
             for service in services {
                 if let Some(name) = &service.name {
-                    let node = Node::GcpCloudRunService(name.as_str().into());
-                    let s_idx = builder.get_or_add_node(node);
+                    let s_idx =
+                        builder.get_or_add_node(Node::GcpCloudRunService(name.as_str().into()));
 
                     if let Some(uri) = &service.uri {
                         let hostname = uri
                             .trim_start_matches("https://")
                             .trim_start_matches("http://");
-                        let pivot_node = Node::GenericHostname(hostname.into());
-                        let pivot_idx = builder.get_or_add_node(pivot_node);
-                        builder.add_edge(pivot_idx, s_idx, Edge::RoutesTo);
+                        builder.link_from(
+                            s_idx,
+                            Node::GenericHostname(hostname.into()),
+                            Edge::RoutesTo,
+                        );
                     }
                 }
             }
@@ -189,13 +200,15 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GoogleSubnetworks(subnetworks) => {
             for subnetwork in subnetworks {
                 if let Some(self_link) = &subnetwork.self_link {
-                    let node = Node::GcpComputeSubnetwork(self_link.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx = builder
+                        .get_or_add_node(Node::GcpComputeSubnetwork(self_link.as_str().into()));
 
                     if let Some(network) = &subnetwork.network {
-                        let net_node = Node::GcpComputeNetwork(network.as_str().into());
-                        let n_idx = builder.get_or_add_node(net_node);
-                        builder.add_edge(n_idx, idx, Edge::Contains);
+                        builder.link_from(
+                            idx,
+                            Node::GcpComputeNetwork(network.as_str().into()),
+                            Edge::Contains,
+                        );
                     }
                 }
             }
@@ -203,13 +216,15 @@ fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
         GoogleCollection::GoogleForwardingRules(rules) => {
             for rule in rules {
                 if let Some(id) = &rule.id {
-                    let node = Node::GcpComputeForwardingRule(id.as_str().into());
-                    let idx = builder.get_or_add_node(node);
+                    let idx =
+                        builder.get_or_add_node(Node::GcpComputeForwardingRule(id.as_str().into()));
 
                     if let Some(ip) = &rule.ip_address {
-                        let ip_node = Node::GenericIpAddress(ip.as_str().into());
-                        let ip_idx = builder.get_or_add_node(ip_node);
-                        builder.add_edge(idx, ip_idx, Edge::ConnectsTo);
+                        builder.link_to(
+                            idx,
+                            Node::GenericIpAddress(ip.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                 }
             }

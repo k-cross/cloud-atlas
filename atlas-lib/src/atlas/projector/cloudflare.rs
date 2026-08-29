@@ -11,17 +11,17 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
         // Find DNS records for this zone
         if let Some(records) = data.dns_records.get(&ZoneId(zone.id.clone())) {
             for record in records {
-                let record_node =
-                    builder.get_or_add_node(Node::CloudflareDnsRecord(record.id.as_str().into()));
+                let record_node = builder.link_to(
+                    zone_node,
+                    Node::CloudflareDnsRecord(record.id.as_str().into()),
+                    Edge::Contains,
+                );
 
-                builder.add_edge(zone_node, record_node, Edge::Contains);
-
-                let hostname_node =
-                    builder.get_or_add_node(Node::GenericHostname(record.name.as_str().into()));
-                builder.add_edge(
+                // Maps to the generic hostname
+                let hostname_node = builder.link_to(
                     record_node,
-                    hostname_node,
-                    Edge::RoutesTo, // Maps to the generic hostname
+                    Node::GenericHostname(record.name.as_str().into()),
+                    Edge::RoutesTo,
                 );
 
                 let target = match &record.content {
@@ -37,8 +37,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                     _ => None,
                 };
                 if let Some(target) = target {
-                    let target_idx = builder.get_or_add_node(target);
-                    builder.add_edge(hostname_node, target_idx, Edge::ResolvesTo);
+                    builder.link_to(hostname_node, target, Edge::ResolvesTo);
                 }
             }
         }
@@ -75,33 +74,38 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                 match binding.binding_type.as_str() {
                     "kv_namespace" => {
                         if let Some(ns_id) = &binding.namespace_id {
-                            let kv_node = builder.get_or_add_node(Node::CloudflareKvNamespace(
-                                ns_id.as_str().into(),
-                            ));
-                            builder.add_edge(worker_node, kv_node, Edge::ConnectsTo);
+                            builder.link_to(
+                                worker_node,
+                                Node::CloudflareKvNamespace(ns_id.as_str().into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                     "r2_bucket" => {
                         if let Some(bucket_name) = &binding.bucket_name {
-                            let r2_node = builder.get_or_add_node(Node::CloudflareR2Bucket(
-                                bucket_name.as_str().into(),
-                            ));
-                            builder.add_edge(worker_node, r2_node, Edge::ConnectsTo);
+                            builder.link_to(
+                                worker_node,
+                                Node::CloudflareR2Bucket(bucket_name.as_str().into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                     "durable_object_namespace" => {
                         if let Some(ns_id) = &binding.namespace_id {
-                            let do_node = builder.get_or_add_node(Node::CloudflareDurableObject(
-                                ns_id.as_str().into(),
-                            ));
-                            builder.add_edge(worker_node, do_node, Edge::ConnectsTo);
+                            builder.link_to(
+                                worker_node,
+                                Node::CloudflareDurableObject(ns_id.as_str().into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                     "d1" => {
                         if let Some(db_id) = &binding.id {
-                            let d1_node = builder
-                                .get_or_add_node(Node::CloudflareD1Database(db_id.as_str().into()));
-                            builder.add_edge(worker_node, d1_node, Edge::ConnectsTo);
+                            builder.link_to(
+                                worker_node,
+                                Node::CloudflareD1Database(db_id.as_str().into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                     "secret_text" | "plain_text" => {
@@ -117,9 +121,11 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                                 && let Some(host) = url.host_str()
                             {
                                 let external_id = format!("{}://{}", url.scheme(), host);
-                                let ext_node = builder
-                                    .get_or_add_node(Node::ExternalService(external_id.into()));
-                                builder.add_edge(worker_node, ext_node, Edge::ConnectsTo);
+                                builder.link_to(
+                                    worker_node,
+                                    Node::ExternalService(external_id.into()),
+                                    Edge::ConnectsTo,
+                                );
                             }
                         }
                     }

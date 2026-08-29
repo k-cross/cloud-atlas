@@ -53,6 +53,32 @@ impl GraphBuilder {
         }
     }
 
+    pub fn link_to(
+        &mut self,
+        source: impl Into<Option<NodeIndex>>,
+        node: Node,
+        edge: Edge,
+    ) -> NodeIndex {
+        let target = self.get_or_add_node(node);
+        if let Some(source) = source.into() {
+            self.add_edge(source, target, edge);
+        }
+        target
+    }
+
+    pub fn link_from(
+        &mut self,
+        target: impl Into<Option<NodeIndex>>,
+        node: Node,
+        edge: Edge,
+    ) -> NodeIndex {
+        let source = self.get_or_add_node(node);
+        if let Some(target) = target.into() {
+            self.add_edge(source, target, edge);
+        }
+        source
+    }
+
     /// Fold another graph's nodes and edges into this one, translating
     /// endpoints by node identity so cross-graph dedup is preserved. This is
     /// how sub-graphs produced in parallel are stitched back together, and how
