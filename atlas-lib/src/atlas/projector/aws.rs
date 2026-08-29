@@ -23,7 +23,7 @@ pub fn aws_projector(
         .collect();
 
     for sub in &sub_graphs {
-        builder.merge(sub);
+        builder.merge(&sub.graph);
     }
 }
 

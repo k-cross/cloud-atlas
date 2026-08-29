@@ -64,17 +64,17 @@ impl CollectionReport {
         &mut self,
         source: CollectionSource,
         scope: impl Into<String>,
-        message: impl fmt::Display,
+        error: impl fmt::Debug,
     ) {
         self.failures.push(CollectionFailure {
             source,
             scope: scope.into(),
-            message: message.to_string(),
+            message: format!("{error:?}"),
         });
     }
 
-    pub fn absorb(&mut self, failures: Vec<CollectionFailure>) {
-        self.failures.extend(failures);
+    pub fn merge(&mut self, other: CollectionReport) {
+        self.failures.extend(other.failures);
     }
 
     pub fn summary(&self) -> String {
@@ -86,21 +86,13 @@ impl CollectionReport {
     }
 }
 
-/// What one provider returned: the collection it managed to build, plus the
-/// sub-scopes it could not reach. A provider that fails outright returns `Err`
-/// instead; a provider that fetched some of its resources returns `Ok` with a
-/// non-empty `failures`, and the caller must treat the result as partial.
+/// What one provider returned: the collection it managed to build, plus every
+/// scope it could not reach. `build_*` is infallible by construction — a
+/// provider that fails outright still returns a scan, with the empty collection
+/// explained by a non-empty `report`. There is no second channel for failure,
+/// so no caller can mistake a dead provider for an empty one.
 #[derive(Debug)]
 pub struct ProviderScan {
     pub provider: Provider,
-    pub failures: Vec<CollectionFailure>,
-}
-
-impl ProviderScan {
-    pub fn complete(provider: Provider) -> Self {
-        Self {
-            provider,
-            failures: Vec::new(),
-        }
-    }
+    pub report: CollectionReport,
 }

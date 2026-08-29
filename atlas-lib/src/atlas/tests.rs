@@ -785,22 +785,25 @@ mod tests {
 
         let live = fixtures::build_graph().graph;
 
-        let mut partial = live.clone();
-        partial.retain_nodes(|g, i| g[i].kind() != "AwsEc2Instance");
-        let missing_nodes = live.node_count() - partial.node_count();
+        let mut trimmed = live.clone();
+        trimmed.retain_nodes(|g, i| g[i].kind() != "AwsEc2Instance");
+        let missing_nodes = live.node_count() - trimmed.node_count();
         assert!(missing_nodes > 0, "fixture must contain the dropped kind");
+
+        let mut partial = GraphBuilder::new();
+        partial.merge(&trimmed);
 
         let fresh_src = Node::GenericHostname("carry-forward.example.com".into());
         let fresh_dst = Node::GenericIpAddress("203.0.113.99".into());
-        let a = partial.add_node(fresh_src.clone());
-        let b = partial.add_node(fresh_dst.clone());
+        let a = partial.get_or_add_node(fresh_src.clone());
+        let b = partial.get_or_add_node(fresh_dst.clone());
         partial.add_edge(a, b, Edge::ResolvesTo);
 
         carry_forward(&mut partial, &live);
 
-        assert_eq!(partial.node_count(), live.node_count() + 2);
+        assert_eq!(partial.graph.node_count(), live.node_count() + 2);
 
-        let patch = diff(&live, &partial);
+        let patch = diff(&live, &partial.graph);
         assert!(
             patch.removed_nodes.is_empty() && patch.removed_edges.is_empty(),
             "carrying forward must make the diff purely additive"
@@ -819,15 +822,15 @@ mod tests {
     fn carry_forward_is_a_no_op_when_the_scan_is_a_superset() {
         use crate::atlas::patch::{carry_forward, diff};
 
-        let live = fixtures::build_graph().graph;
-        let mut next = live.clone();
-        let before_nodes = next.node_count();
-        let before_edges = next.edge_count();
+        let mut next = fixtures::build_graph();
+        let live = next.graph.clone();
+        let before_nodes = next.graph.node_count();
+        let before_edges = next.graph.edge_count();
 
         carry_forward(&mut next, &live);
 
-        assert_eq!(next.node_count(), before_nodes);
-        assert_eq!(next.edge_count(), before_edges);
-        assert!(diff(&live, &next).is_empty());
+        assert_eq!(next.graph.node_count(), before_nodes);
+        assert_eq!(next.graph.edge_count(), before_edges);
+        assert!(diff(&live, &next.graph).is_empty());
     }
 }

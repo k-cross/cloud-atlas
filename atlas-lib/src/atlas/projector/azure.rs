@@ -29,7 +29,7 @@ pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollec
         .collect();
 
     for sub in &sub_graphs {
-        builder.merge(sub);
+        builder.merge(&sub.graph);
     }
 }
 

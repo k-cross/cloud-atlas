@@ -1,60 +1,76 @@
 use crate::Settings;
-use crate::atlas::collection::{CollectionFailure, CollectionSource, ProviderScan};
-use crate::cloud::definition::{CloudflareCollection, Provider};
+use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::cloud::definition::{CloudflareCollection, Provider, ScriptId, ZoneId};
 use cloudflare::framework::Environment;
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::client::async_api::Client;
 use std::env;
 
-pub async fn build_cloudflare(
-    verbose: bool,
-    _settings: &Settings,
-) -> Result<ProviderScan, Box<dyn std::error::Error>> {
+const SOURCE: CollectionSource = CollectionSource::Cloudflare;
+
+pub async fn build_cloudflare(verbose: bool, _settings: &Settings) -> ProviderScan {
+    let mut data = CloudflareCollection::default();
+    let mut report = CollectionReport::default();
+
+    match clients() {
+        Ok((client, cf)) => collect(&client, &cf, verbose, &mut data, &mut report).await,
+        Err(e) => report.record(SOURCE, "credentials", e),
+    }
+
+    ProviderScan {
+        provider: Provider::Cloudflare(Box::new(data)),
+        report,
+    }
+}
+
+/// The `cloudflare` crate's client, plus ours for the raw REST endpoints the
+/// crate does not cover. Both need the same token, so they are built together.
+fn clients() -> Result<(Client, super::CloudflareApiClient), Box<dyn std::error::Error>> {
     let token = env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default();
     if token.is_empty() {
         return Err("CLOUDFLARE_API_TOKEN is not set".into());
     }
 
-    let credentials = Credentials::UserAuthToken {
-        token: token.clone(),
-    };
     let client = Client::new(
-        credentials,
+        Credentials::UserAuthToken {
+            token: token.clone(),
+        },
         cloudflare::framework::client::ClientConfig::default(),
         Environment::Production,
     )?;
 
-    // Client for the raw REST endpoints not covered by the `cloudflare` crate.
-    let cf = super::CloudflareApiClient::new(token.clone());
+    Ok((client, super::CloudflareApiClient::new(token)))
+}
 
+async fn collect(
+    client: &Client,
+    cf: &super::CloudflareApiClient,
+    verbose: bool,
+    data: &mut CloudflareCollection,
+    report: &mut CollectionReport,
+) {
     if verbose {
         println!("Fetching Cloudflare Zones...");
     }
-    let zones = super::zone::get_zones(&client).await?;
+    match super::zone::get_zones(client).await {
+        Ok(zones) => data.zones = zones,
+        Err(e) => {
+            report.record(SOURCE, "zones", e);
+            return;
+        }
+    }
 
-    let mut all_dns_records = std::collections::HashMap::new();
-    let mut all_workers = Vec::new();
-    let mut all_kv_namespaces = Vec::new();
-    let mut all_r2_buckets = Vec::new();
-    let mut all_durable_objects = Vec::new();
-    let mut all_d1_databases = Vec::new();
-    let mut all_worker_bindings = std::collections::HashMap::new();
     let mut accounts_seen = std::collections::HashSet::new();
-    let mut failures: Vec<CollectionFailure> = Vec::new();
 
-    for zone in &zones {
+    for zone in &data.zones {
         if verbose {
             println!("Fetching DNS records for zone: {}", zone.name);
         }
-        match super::dns::get_dns_records(&client, &zone.id).await {
+        match super::dns::get_dns_records(client, &zone.id).await {
             Ok(records) => {
-                all_dns_records.insert(zone.id.clone(), records);
+                data.dns_records.insert(ZoneId(zone.id.clone()), records);
             }
-            Err(e) => failures.push(CollectionFailure {
-                source: CollectionSource::Cloudflare,
-                scope: format!("zone {}/dns", zone.name),
-                message: format!("{e:?}"),
-            }),
+            Err(e) => report.record(SOURCE, format!("zone {}/dns", zone.name), e),
         }
 
         // Fetch account-level resources only once per account
@@ -67,87 +83,58 @@ pub async fn build_cloudflare(
         }
 
         let (workers_res, kvs_res, r2s_res, dos_res, d1s_res) = tokio::join!(
-            super::worker::get_workers(&cf, account_id),
-            super::kv::get_kv_namespaces(&client, account_id),
-            super::r2::get_r2_buckets(&client, account_id),
-            super::durable_objects::get_do_namespaces(&cf, account_id),
-            super::d1::get_d1_databases(&cf, account_id),
+            super::worker::get_workers(cf, account_id),
+            super::kv::get_kv_namespaces(client, account_id),
+            super::r2::get_r2_buckets(client, account_id),
+            super::durable_objects::get_do_namespaces(cf, account_id),
+            super::d1::get_d1_databases(cf, account_id),
         );
 
-        if let Ok(workers) = workers_res {
-            let bindings_futures = workers.iter().map(|worker| {
-                let cf = &cf;
-                let wid = worker.id.clone();
-                async move {
-                    let res = super::worker::get_worker_bindings(cf, account_id, &wid).await;
-                    (wid, res)
-                }
-            });
-            for (wid, res) in futures::future::join_all(bindings_futures).await {
-                match res {
-                    Ok(bindings) => {
-                        all_worker_bindings.insert(wid, bindings);
+        match workers_res {
+            Ok(workers) => {
+                let bindings_futures = workers.into_iter().map(|worker| {
+                    let id = ScriptId {
+                        account: account_id.clone(),
+                        script: worker.id,
+                    };
+                    async move {
+                        let res =
+                            super::worker::get_worker_bindings(cf, account_id, &id.script).await;
+                        (id, res)
                     }
-                    Err(e) => failures.push(CollectionFailure {
-                        source: CollectionSource::Cloudflare,
-                        scope: format!("account {account_id}/worker {wid}/bindings"),
-                        message: format!("{e:?}"),
-                    }),
+                });
+                for (id, res) in futures::future::join_all(bindings_futures).await {
+                    match res {
+                        Ok(bindings) => {
+                            data.worker_bindings.insert(id.clone(), bindings);
+                        }
+                        Err(e) => report.record(
+                            SOURCE,
+                            format!("account {account_id}/worker {}/bindings", id.script),
+                            e,
+                        ),
+                    }
+                    data.workers.push(id);
                 }
             }
-            all_workers.extend(workers);
-        } else if let Err(e) = workers_res {
-            failures.push(CollectionFailure {
-                source: CollectionSource::Cloudflare,
-                scope: format!("account {account_id}/workers"),
-                message: format!("{e:?}"),
-            });
+            Err(e) => report.record(SOURCE, format!("account {account_id}/workers"), e),
         }
 
-        match kvs_res {
-            Ok(kvs) => all_kv_namespaces.extend(kvs),
-            Err(e) => failures.push(CollectionFailure {
-                source: CollectionSource::Cloudflare,
-                scope: format!("account {account_id}/kv_namespaces"),
-                message: format!("{e:?}"),
-            }),
+        macro_rules! extend_or_record {
+            ($field:ident, $result:expr) => {
+                match $result {
+                    Ok(items) => data.$field.extend(items),
+                    Err(e) => {
+                        let scope = format!("account {account_id}/{}", stringify!($field));
+                        report.record(SOURCE, scope, e)
+                    }
+                }
+            };
         }
-        match r2s_res {
-            Ok(buckets) => all_r2_buckets.extend(buckets),
-            Err(e) => failures.push(CollectionFailure {
-                source: CollectionSource::Cloudflare,
-                scope: format!("account {account_id}/r2_buckets"),
-                message: format!("{e:?}"),
-            }),
-        }
-        match dos_res {
-            Ok(dos) => all_durable_objects.extend(dos),
-            Err(e) => failures.push(CollectionFailure {
-                source: CollectionSource::Cloudflare,
-                scope: format!("account {account_id}/durable_objects"),
-                message: format!("{e:?}"),
-            }),
-        }
-        match d1s_res {
-            Ok(d1s) => all_d1_databases.extend(d1s),
-            Err(e) => failures.push(CollectionFailure {
-                source: CollectionSource::Cloudflare,
-                scope: format!("account {account_id}/d1_databases"),
-                message: format!("{e:?}"),
-            }),
-        }
+
+        extend_or_record!(kv_namespaces, kvs_res);
+        extend_or_record!(r2_buckets, r2s_res);
+        extend_or_record!(durable_objects, dos_res);
+        extend_or_record!(d1_databases, d1s_res);
     }
-
-    let provider = Provider::Cloudflare(Box::new(CloudflareCollection {
-        zones,
-        dns_records: all_dns_records,
-        workers: all_workers,
-        kv_namespaces: all_kv_namespaces,
-        r2_buckets: all_r2_buckets,
-        durable_objects: all_durable_objects,
-        d1_databases: all_d1_databases,
-        worker_bindings: all_worker_bindings,
-    }));
-
-    Ok(ProviderScan { provider, failures })
 }

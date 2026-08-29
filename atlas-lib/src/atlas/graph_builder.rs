@@ -31,6 +31,16 @@ impl GraphBuilder {
         }
     }
 
+    /// [`get_or_add_node`](Self::get_or_add_node) for a node you only have by
+    /// reference: it clones only when the node is genuinely new. This is the
+    /// shape `merge` folds with, where most nodes are already present.
+    pub fn get_or_add_ref(&mut self, node: &Node) -> NodeIndex {
+        match self.node_map.get(node) {
+            Some(&idx) => idx,
+            None => self.get_or_add_node(node.clone()),
+        }
+    }
+
     /// Add an edge unless an identical one already connects the two nodes,
     /// keeping the exported .dot output free of duplicates.
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, edge: Edge) {
@@ -43,21 +53,22 @@ impl GraphBuilder {
         }
     }
 
-    /// Fold another builder's nodes and edges into this one, translating
-    /// endpoints by node identity so cross-builder dedup is preserved. This is
-    /// how sub-graphs produced in parallel are stitched back together; merging
-    /// in a fixed input order keeps the result deterministic.
-    pub fn merge(&mut self, other: &GraphBuilder) {
+    /// Fold another graph's nodes and edges into this one, translating
+    /// endpoints by node identity so cross-graph dedup is preserved. This is
+    /// how sub-graphs produced in parallel are stitched back together, and how
+    /// `patch::carry_forward` folds the live graph into an incomplete scan;
+    /// merging in a fixed input order keeps the result deterministic.
+    pub fn merge(&mut self, other: &Graph<Node, Edge>) {
         // Carry over every node first — this covers standalone nodes that never
         // appear as an edge endpoint.
-        for node in other.graph.node_weights() {
-            self.get_or_add_node(node.clone());
+        for node in other.node_weights() {
+            self.get_or_add_ref(node);
         }
-        for edge_idx in other.graph.edge_indices() {
-            if let Some((a, b)) = other.graph.edge_endpoints(edge_idx) {
-                let a_idx = self.get_or_add_node(other.graph[a].clone());
-                let b_idx = self.get_or_add_node(other.graph[b].clone());
-                self.add_edge(a_idx, b_idx, other.graph[edge_idx].clone());
+        for edge_idx in other.edge_indices() {
+            if let Some((a, b)) = other.edge_endpoints(edge_idx) {
+                let a_idx = self.get_or_add_ref(&other[a]);
+                let b_idx = self.get_or_add_ref(&other[b]);
+                self.add_edge(a_idx, b_idx, other[edge_idx].clone());
             }
         }
     }

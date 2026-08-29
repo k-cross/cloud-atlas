@@ -1,5 +1,5 @@
 use crate::Settings;
-use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::atlas::collection::CollectionReport;
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::amazon::provider::build_aws;
@@ -80,33 +80,15 @@ impl AtlasEngine {
         let (aws_res, gcp_res, azure_res, cloudflare_res) =
             tokio::join!(aws_future, gcp_future, azure_future, cloudflare_future);
 
-        for (source, result) in [
-            (CollectionSource::Aws, aws_res),
-            (CollectionSource::Gcp, gcp_res),
-            (CollectionSource::Azure, azure_res),
-            (CollectionSource::Cloudflare, cloudflare_res),
-        ] {
-            self.absorb(&mut builder, &mut report, source, result);
+        for scan in [aws_res, gcp_res, azure_res, cloudflare_res]
+            .into_iter()
+            .flatten()
+        {
+            projector::build(&mut builder, &scan.provider, &self.settings);
+            report.merge(scan.report);
         }
 
         Scan { builder, report }
-    }
-
-    fn absorb(
-        &self,
-        builder: &mut GraphBuilder,
-        report: &mut CollectionReport,
-        source: CollectionSource,
-        result: Option<Result<ProviderScan, Box<dyn std::error::Error>>>,
-    ) {
-        match result {
-            None => {}
-            Some(Ok(scan)) => {
-                projector::build(builder, &scan.provider, &self.settings);
-                report.absorb(scan.failures);
-            }
-            Some(Err(e)) => report.record(source, "provider", format!("{e:?}")),
-        }
     }
 
     /// Full point-in-time refresh used by the CLI: re-collect and export to

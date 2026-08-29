@@ -704,7 +704,8 @@ pub fn azure() -> Provider {
 pub fn cloudflare() -> Provider {
     use crate::cloud::cloudflare::d1::D1Database;
     use crate::cloud::cloudflare::durable_objects::DurableObjectNamespace;
-    use crate::cloud::cloudflare::worker::{WorkerBinding, WorkerScript};
+    use crate::cloud::cloudflare::worker::WorkerBinding;
+    use crate::cloud::definition::{ScriptId, ZoneId};
     use serde_json::json;
 
     let zone_json = json!({
@@ -771,10 +772,9 @@ pub fn cloudflare() -> Provider {
         dns_record("rec-v6", "v6.globex.io", "AAAA", "2001:db8::10"),
     ];
 
-    let worker = WorkerScript {
-        id: "edge-router".to_owned(),
-        created_on: None,
-        modified_on: None,
+    let worker = ScriptId {
+        account: "acc-globex".to_owned(),
+        script: "edge-router".to_owned(),
     };
 
     let kv: cloudflare::endpoints::workerskv::WorkersKvNamespace =
@@ -800,7 +800,7 @@ pub fn cloudflare() -> Provider {
     };
 
     let worker_bindings = HashMap::from([(
-        "edge-router".to_owned(),
+        worker.clone(),
         vec![
             WorkerBinding {
                 name: "SESSIONS".to_owned(),
@@ -850,7 +850,7 @@ pub fn cloudflare() -> Provider {
 
     Provider::Cloudflare(Box::new(CloudflareCollection {
         zones: vec![serde_json::from_value(zone_json).expect("fixture zone must deserialize")],
-        dns_records: HashMap::from([("zone-globex".to_owned(), records)]),
+        dns_records: HashMap::from([(ZoneId("zone-globex".to_owned()), records)]),
         workers: vec![worker],
         kv_namespaces: vec![kv],
         r2_buckets: vec![r2],

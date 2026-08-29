@@ -7,6 +7,7 @@ use crate::state::AppState;
 use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
+use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::{GraphPatch, carry_forward, diff};
 use atlas_lib::fixtures;
 use petgraph::graph::Graph;
@@ -25,11 +26,11 @@ impl Source {
     /// Produce the graph for tick `n`, together with what could not be read
     /// while producing it. The demo source is always complete -- it never
     /// leaves the process.
-    async fn scan(&self, tick: u64) -> (Graph<Node, Edge>, CollectionReport) {
+    async fn scan(&self, tick: u64) -> (GraphBuilder, CollectionReport) {
         match self {
             Source::Live(engine) => {
                 let scan = engine.collect().await;
-                (scan.builder.graph, scan.report)
+                (scan.builder, scan.report)
             }
             Source::Demo => (demo_graph(tick), CollectionReport::default()),
         }
@@ -39,14 +40,14 @@ impl Source {
 /// The fixtures graph, plus a small connected sentinel pair on odd ticks. The
 /// resulting alternation (add on odd, remove on even) makes every kind of patch
 /// — added/removed nodes and edges — flow past a connected frontend.
-fn demo_graph(tick: u64) -> Graph<Node, Edge> {
+fn demo_graph(tick: u64) -> GraphBuilder {
     let mut builder = fixtures::build_graph();
     if tick % 2 == 1 {
         let host = builder.get_or_add_node(Node::GenericHostname("live-demo.internal".into()));
         let ip = builder.get_or_add_node(Node::GenericIpAddress("198.51.100.42".into()));
         builder.add_edge(host, ip, Edge::ResolvesTo);
     }
-    builder.graph
+    builder
 }
 
 /// Turn a scan into the patch to broadcast. A `complete` scan is authoritative
@@ -54,11 +55,11 @@ fn demo_graph(tick: u64) -> Graph<Node, Edge> {
 /// "deleted" from "unreadable", so the live graph is folded forward first and
 /// the tick becomes purely additive -- `next` is left as the exact graph the
 /// caller should install.
-fn reconcile(live: &Graph<Node, Edge>, next: &mut Graph<Node, Edge>, complete: bool) -> GraphPatch {
+fn reconcile(live: &Graph<Node, Edge>, next: &mut GraphBuilder, complete: bool) -> GraphPatch {
     if !complete {
         carry_forward(next, live);
     }
-    diff(live, next)
+    diff(live, &next.graph)
 }
 
 /// Run forever, reconciling every `interval`. Only non-empty diffs mutate the
@@ -98,7 +99,7 @@ pub async fn run(state: AppState, source: Source, interval: Duration) {
             removed_edges = patch.removed_edges.len(),
             "graph changed",
         );
-        *state.live.write().await = next;
+        *state.live.write().await = next.graph;
         // Err only means no subscribers are connected — nothing to do.
         let _ = state.patches.send(patch);
     }
@@ -110,24 +111,26 @@ mod tests {
 
     use atlas_lib::atlas::collection::{CollectionReport, CollectionSource};
 
-    fn without_kind(graph: &Graph<Node, Edge>, kind: &str) -> Graph<Node, Edge> {
+    fn without_kind(graph: &Graph<Node, Edge>, kind: &str) -> GraphBuilder {
         let mut trimmed = graph.clone();
         trimmed.retain_nodes(|g, i| g[i].kind() != kind);
-        trimmed
+        let mut builder = GraphBuilder::new();
+        builder.merge(&trimmed);
+        builder
     }
 
     #[test]
     fn an_incomplete_scan_never_removes() {
-        let live = demo_graph(1);
+        let live = demo_graph(1).graph;
         let dropped = "AwsEc2Instance";
 
         let mut next = without_kind(&live, dropped);
         assert!(
-            next.node_count() < live.node_count(),
+            next.graph.node_count() < live.node_count(),
             "fixture must contain the kind this test drops"
         );
 
-        let complete_patch = reconcile(&live, &mut next.clone(), true);
+        let complete_patch = reconcile(&live, &mut without_kind(&live, dropped), true);
         assert!(
             !complete_patch.removed_nodes.is_empty(),
             "a complete scan is authoritative and must still delete"
@@ -141,7 +144,7 @@ mod tests {
             patch.removed_edges.len()
         );
         assert_eq!(
-            next.node_count(),
+            next.graph.node_count(),
             live.node_count(),
             "unconfirmed resources must be carried into the installed graph"
         );
@@ -149,8 +152,8 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_still_applies_additions() {
-        let live = demo_graph(2);
-        let mut next = without_kind(&demo_graph(3), "AwsEc2Instance");
+        let live = demo_graph(2).graph;
+        let mut next = without_kind(&demo_graph(3).graph, "AwsEc2Instance");
 
         let patch = reconcile(&live, &mut next, false);
 
@@ -165,9 +168,9 @@ mod tests {
 
     #[test]
     fn a_complete_scan_is_unaffected_by_carry_forward() {
-        let live = demo_graph(2);
+        let live = demo_graph(2).graph;
         let mut next = demo_graph(3);
-        let same = next.clone();
+        let same = next.graph.clone();
 
         let with_policy = reconcile(&live, &mut next, true);
         let plain = diff(&live, &same);
@@ -192,8 +195,8 @@ mod tests {
 
     #[test]
     fn demo_graph_toggles_sentinel_by_parity() {
-        let even = demo_graph(2);
-        let odd = demo_graph(3);
+        let even = demo_graph(2).graph;
+        let odd = demo_graph(3).graph;
         // The sentinel host+ip and their edge are present only on odd ticks.
         assert_eq!(odd.node_count(), even.node_count() + 2);
 

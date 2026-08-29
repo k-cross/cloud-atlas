@@ -1,17 +1,20 @@
 use crate::Settings;
 use crate::api::google::client::GoogleApiClient;
 use crate::api::google::{compute, compute_network, dns, functions, gke, sql};
-use crate::atlas::collection::{CollectionFailure, CollectionSource, ProviderScan};
+use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::cloud::collector::{NamedCollector, run_all};
 use crate::cloud::definition::{GoogleCollection, Provider};
 use yup_oauth2::ApplicationSecret;
 
-pub async fn build_gcp(
-    _verbose: bool,
-    opts: &Settings,
-) -> Result<ProviderScan, Box<dyn std::error::Error>> {
-    let mut services = Vec::new();
-    let mut failures = Vec::new();
+const SOURCE: CollectionSource = CollectionSource::Gcp;
 
+macro_rules! collectors {
+    ($($name:literal => $variant:path, $run:expr),+ $(,)?) => {
+        vec![$(($name, Box::pin(async { $run.await.map($variant) }) as _)),+]
+    };
+}
+
+async fn authenticate() -> Result<GoogleApiClient, Box<dyn std::error::Error>> {
     let secret: ApplicationSecret = Default::default();
 
     let auth = yup_oauth2::InstalledFlowAuthenticator::builder(
@@ -23,89 +26,58 @@ pub async fn build_gcp(
 
     let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
     let token = auth.token(scopes).await?;
-    let token_str = token.token().unwrap_or("").to_string();
 
-    let client = GoogleApiClient::new(token_str);
+    Ok(GoogleApiClient::new(
+        token.token().unwrap_or("").to_string(),
+    ))
+}
+
+pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
+    let mut services = Vec::new();
+    let mut report = CollectionReport::default();
+
+    let client = match authenticate().await {
+        Ok(client) => client,
+        Err(e) => {
+            report.record(SOURCE, "auth", e);
+            return ProviderScan {
+                provider: Provider::GCP(services),
+                report,
+            };
+        }
+    };
 
     let mut futures = Vec::new();
+    for p in opts.gcp_projects.clone().unwrap_or_default() {
+        let c = client.clone();
+        futures.push(async move {
+            let collectors: Vec<NamedCollector<'_, GoogleCollection>> = collectors![
+                "compute_instances" => GoogleCollection::GoogleInstances, compute::list_instances(&c, &p),
+                "firewalls" => GoogleCollection::GoogleFirewalls, compute::list_firewalls(&c, &p),
+                "sql" => GoogleCollection::GoogleSql, sql::list_instances(&c, &p),
+                "dns" => GoogleCollection::GoogleDns, dns::list_managed_zones(&c, &p),
+                "gke" => GoogleCollection::GoogleGke, gke::list_clusters(&c, &p),
+                "functions" => GoogleCollection::GoogleFunctions, functions::list_functions(&c, &p),
+                "storage" => GoogleCollection::GoogleStorageBuckets, c.list_buckets(&p),
+                "pubsub_topics" => GoogleCollection::GooglePubSubTopics, c.list_topics(&p),
+                "pubsub_subscriptions" => GoogleCollection::GooglePubSubSubscriptions, c.list_subscriptions(&p),
+                "run" => GoogleCollection::GoogleRunServices, c.list_run_services(&p),
+                "networks" => GoogleCollection::GoogleNetworks, compute_network::list_networks(&c, &p),
+                "subnetworks" => GoogleCollection::GoogleSubnetworks, compute_network::list_subnetworks(&c, &p),
+                "forwarding_rules" => GoogleCollection::GoogleForwardingRules, compute_network::list_forwarding_rules(&c, &p),
+            ];
 
-    if let Some(projects) = &opts.gcp_projects {
-        for p in projects.clone() {
-            let client_ref = client.clone();
-            futures.push(async move {
-                let (
-                    r_instances,
-                    r_firewalls,
-                    r_sqls,
-                    r_zones,
-                    r_clusters,
-                    r_funcs,
-                    r_buckets,
-                    r_topics,
-                    r_subs,
-                    r_runs,
-                    r_networks,
-                    r_subnets,
-                    r_fwrules,
-                ) = tokio::join!(
-                    compute::list_instances(&client_ref, &p),
-                    compute::list_firewalls(&client_ref, &p),
-                    sql::list_instances(&client_ref, &p),
-                    dns::list_managed_zones(&client_ref, &p),
-                    gke::list_clusters(&client_ref, &p),
-                    functions::list_functions(&client_ref, &p),
-                    client_ref.list_buckets(&p),
-                    client_ref.list_topics(&p),
-                    client_ref.list_subscriptions(&p),
-                    client_ref.list_run_services(&p),
-                    compute_network::list_networks(&client_ref, &p),
-                    compute_network::list_subnetworks(&client_ref, &p),
-                    compute_network::list_forwarding_rules(&client_ref, &p),
-                );
-
-                let mut local_services = Vec::new();
-                let mut local_failures = Vec::new();
-
-                macro_rules! add_if_ok {
-                    ($res:expr, $variant:path) => {
-                        match $res {
-                            Ok(items) => local_services.push($variant(items)),
-                            Err(e) => local_failures.push(CollectionFailure {
-                                source: CollectionSource::Gcp,
-                                scope: format!("{}/{}", p, stringify!($variant)),
-                                message: format!("{e:?}"),
-                            }),
-                        }
-                    };
-                }
-
-                add_if_ok!(r_instances, GoogleCollection::GoogleInstances);
-                add_if_ok!(r_firewalls, GoogleCollection::GoogleFirewalls);
-                add_if_ok!(r_sqls, GoogleCollection::GoogleSql);
-                add_if_ok!(r_zones, GoogleCollection::GoogleDns);
-                add_if_ok!(r_clusters, GoogleCollection::GoogleGke);
-                add_if_ok!(r_funcs, GoogleCollection::GoogleFunctions);
-                add_if_ok!(r_buckets, GoogleCollection::GoogleStorageBuckets);
-                add_if_ok!(r_topics, GoogleCollection::GooglePubSubTopics);
-                add_if_ok!(r_subs, GoogleCollection::GooglePubSubSubscriptions);
-                add_if_ok!(r_runs, GoogleCollection::GoogleRunServices);
-                add_if_ok!(r_networks, GoogleCollection::GoogleNetworks);
-                add_if_ok!(r_subnets, GoogleCollection::GoogleSubnetworks);
-                add_if_ok!(r_fwrules, GoogleCollection::GoogleForwardingRules);
-
-                Ok::<_, Box<dyn std::error::Error>>((local_services, local_failures))
-            });
-        }
+            run_all(collectors, SOURCE, &p).await
+        });
     }
 
-    let results = futures::future::try_join_all(futures).await?;
-    for (mut project_services, mut project_failures) in results {
+    for (mut project_services, project_report) in futures::future::join_all(futures).await {
         services.append(&mut project_services);
-        failures.append(&mut project_failures);
+        report.merge(project_report);
     }
 
-    Ok(ProviderScan {
+    ProviderScan {
         provider: Provider::GCP(services),
-        failures,
-    })
+        report,
+    }
 }

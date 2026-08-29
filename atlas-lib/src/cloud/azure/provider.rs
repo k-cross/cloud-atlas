@@ -1,43 +1,97 @@
 use crate::Settings;
 use crate::api::azure::client::AzureApiClient;
 use crate::api::azure::models::*;
-use crate::atlas::collection::ProviderScan;
+use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
 use crate::cloud::definition::{MicrosoftCollection, Provider};
 
-pub async fn build_azure(
-    _verbose: bool,
+pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
+    let mut report = CollectionReport::default();
+    let collections = match query_tenant(opts).await {
+        Ok(collections) => collections,
+        Err(e) => {
+            report.record(CollectionSource::Azure, "resource_graph", e);
+            Vec::new()
+        }
+    };
+
+    ProviderScan {
+        provider: Provider::Azure(collections),
+        report,
+    }
+}
+
+/// Generates `AzureType` from one list of ARG type strings, in the spirit of
+/// `definition.rs`'s `kinds!`. That list is the only place a type is named: it
+/// produces both the `where type in~ (..)` filter and the value `map_resources`
+/// dispatches on, and since that dispatch is an exhaustive match, querying a
+/// type without mapping it is a compile error.
+macro_rules! azure_types {
+    ($($variant:ident => $arg_type:literal),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum AzureType {
+            $($variant),+
+        }
+
+        impl AzureType {
+            const ALL: &'static [AzureType] = &[$(AzureType::$variant),+];
+
+            fn arg_type(self) -> &'static str {
+                match self {
+                    $(AzureType::$variant => $arg_type),+
+                }
+            }
+
+            /// ARG reports `type` in the casing the provider registered it
+            /// with, so rows are matched case-insensitively against the table.
+            fn parse(raw: &str) -> Option<Self> {
+                let lowered = raw.to_lowercase();
+                Self::ALL.iter().copied().find(|t| t.arg_type() == lowered)
+            }
+        }
+    };
+}
+
+azure_types! {
+    VirtualMachines => "microsoft.compute/virtualmachines",
+    VirtualNetworks => "microsoft.network/virtualnetworks",
+    NetworkSecurityGroups => "microsoft.network/networksecuritygroups",
+    PublicIpAddresses => "microsoft.network/publicipaddresses",
+    StorageAccounts => "microsoft.storage/storageaccounts",
+    ManagedClusters => "microsoft.containerservice/managedclusters",
+    SqlServers => "microsoft.sql/servers",
+    Sites => "microsoft.web/sites",
+    ApiManagement => "microsoft.apimanagement/service",
+    CosmosDbs => "microsoft.documentdb/databaseaccounts",
+    ServiceBuses => "microsoft.servicebus/namespaces",
+    EventGridTopics => "microsoft.eventgrid/topics",
+    DnsZones => "microsoft.network/dnszones",
+    CdnProfiles => "microsoft.cdn/profiles",
+}
+
+fn arg_query() -> String {
+    let types = AzureType::ALL
+        .iter()
+        .map(|t| format!("\"{}\"", t.arg_type()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    format!(
+        "Resources
+        | where type in~ ({types})
+        | project id, name, type, location, kind, properties"
+    )
+}
+
+async fn query_tenant(
     opts: &Settings,
-) -> Result<ProviderScan, Box<dyn std::error::Error>> {
+) -> Result<Vec<MicrosoftCollection>, Box<dyn std::error::Error>> {
     let client = AzureApiClient::new().await?;
 
     // An empty subscription list makes ARG query the entire tenant.
     let subscriptions = opts.azure_subscriptions.clone().unwrap_or_default();
 
-    let query = r#"
-        Resources
-        | where type in~ (
-            "microsoft.compute/virtualmachines",
-            "microsoft.network/virtualnetworks",
-            "microsoft.network/networksecuritygroups",
-            "microsoft.network/publicipaddresses",
-            "microsoft.storage/storageaccounts",
-            "microsoft.containerservice/managedclusters",
-            "microsoft.sql/servers",
-            "microsoft.web/sites",
-            "microsoft.apimanagement/service",
-            "microsoft.documentdb/databaseaccounts",
-            "microsoft.servicebus/namespaces",
-            "microsoft.eventgrid/topics",
-            "microsoft.network/dnszones",
-            "microsoft.cdn/profiles"
-        )
-        | project id, name, type, location, kind, properties
-    "#;
-
-    let raw_resources = client.query_graph(query, &subscriptions).await?;
-    Ok(ProviderScan::complete(Provider::Azure(map_resources(
-        raw_resources,
-    )?)))
+    let raw_resources = client.query_graph(&arg_query(), &subscriptions).await?;
+    map_resources(raw_resources)
 }
 
 /// Map raw Azure Resource Graph rows into the typed collections the projector
@@ -63,12 +117,27 @@ pub fn map_resources(
     let mut dns = Vec::new();
     let mut cdns = Vec::new();
 
+    /// The `{id, name, location}` mapping shared by every resource whose model
+    /// carries nothing else.
+    macro_rules! leaf {
+        ($list:ident, $ty:ident, $res:expr) => {{
+            let res = $res;
+            $list.push($ty {
+                id: res.id,
+                name: res.name,
+                location: res.location,
+            })
+        }};
+    }
+
     for res_val in raw_resources {
         let res: AzureResource = serde_json::from_value(res_val)?;
-        let r_type = res.r#type.as_deref().unwrap_or("").to_lowercase();
+        let Some(azure_type) = AzureType::parse(res.r#type.as_deref().unwrap_or("")) else {
+            continue;
+        };
 
-        match r_type.as_str() {
-            "microsoft.compute/virtualmachines" => {
+        match azure_type {
+            AzureType::VirtualMachines => {
                 let mut nic_ids = Vec::new();
                 if let Some(props) = &res.properties
                     && let Some(profile) = props.get("networkProfile")
@@ -87,7 +156,7 @@ pub fn map_resources(
                     network_interfaces: nic_ids,
                 });
             }
-            "microsoft.network/virtualnetworks" => {
+            AzureType::VirtualNetworks => {
                 let mut subnet_ids = Vec::new();
                 if let Some(props) = &res.properties
                     && let Some(subnets_arr) = props.get("subnets").and_then(|s| s.as_array())
@@ -126,7 +195,7 @@ pub fn map_resources(
                     subnets: subnet_ids,
                 });
             }
-            "microsoft.network/networksecuritygroups" => {
+            AzureType::NetworkSecurityGroups => {
                 let mut properties = None;
                 if let Some(props_val) = &res.properties
                     && let Ok(p) = serde_json::from_value(props_val.clone())
@@ -140,7 +209,7 @@ pub fn map_resources(
                     properties,
                 });
             }
-            "microsoft.network/publicipaddresses" => {
+            AzureType::PublicIpAddresses => {
                 let ip_addr = res
                     .properties
                     .as_ref()
@@ -153,35 +222,13 @@ pub fn map_resources(
                     ip_address: ip_addr,
                 });
             }
-            "microsoft.storage/storageaccounts" => {
-                storage.push(StorageAccount {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.containerservice/managedclusters" => {
-                aks.push(ManagedCluster {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.sql/servers" => {
-                sql.push(SqlServer {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.web/sites" => {
+            AzureType::StorageAccounts => leaf!(storage, StorageAccount, res),
+            AzureType::ManagedClusters => leaf!(aks, ManagedCluster, res),
+            AzureType::SqlServers => leaf!(sql, SqlServer, res),
+            AzureType::Sites => {
                 let kind = res.kind.as_deref().unwrap_or("");
                 if kind.contains("functionapp") {
-                    funcs.push(FunctionApp {
-                        id: res.id,
-                        name: res.name,
-                        location: res.location,
-                    });
+                    leaf!(funcs, FunctionApp, res);
                 } else {
                     let mut properties = None;
                     if let Some(props_val) = &res.properties
@@ -197,49 +244,12 @@ pub fn map_resources(
                     });
                 }
             }
-            "microsoft.apimanagement/service" => {
-                apims.push(ApiManagement {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.documentdb/databaseaccounts" => {
-                cosmos.push(CosmosDb {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.servicebus/namespaces" => {
-                sbuses.push(ServiceBus {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.eventgrid/topics" => {
-                egrids.push(EventGridTopic {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.network/dnszones" => {
-                dns.push(DnsZone {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            "microsoft.cdn/profiles" => {
-                cdns.push(CdnProfile {
-                    id: res.id,
-                    name: res.name,
-                    location: res.location,
-                });
-            }
-            _ => {}
+            AzureType::ApiManagement => leaf!(apims, ApiManagement, res),
+            AzureType::CosmosDbs => leaf!(cosmos, CosmosDb, res),
+            AzureType::ServiceBuses => leaf!(sbuses, ServiceBus, res),
+            AzureType::EventGridTopics => leaf!(egrids, EventGridTopic, res),
+            AzureType::DnsZones => leaf!(dns, DnsZone, res),
+            AzureType::CdnProfiles => leaf!(cdns, CdnProfile, res),
         }
     }
 
@@ -263,4 +273,36 @@ pub fn map_resources(
     ];
 
     Ok(collections)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::atlas::graph_builder::GraphBuilder;
+    use crate::atlas::projector::azure::azure_projector;
+
+    /// The exhaustive match makes "queried but unmapped" a compile error; this
+    /// covers the rest of the trip — every queried type must reach the graph.
+    #[test]
+    fn every_queried_type_reaches_the_graph() {
+        for azure_type in AzureType::ALL {
+            let row = serde_json::json!({
+                "id": format!("/subscriptions/s/providers/{}/r1", azure_type.arg_type()),
+                "name": "r1",
+                "type": azure_type.arg_type(),
+                "location": "eastus",
+                "properties": {}
+            });
+
+            let collections = map_resources(vec![row]).expect("mapping succeeds");
+            let mut builder = GraphBuilder::new();
+            azure_projector(&mut builder, &collections);
+
+            assert!(
+                builder.graph.node_count() > 0,
+                "{} mapped to no graph nodes",
+                azure_type.arg_type()
+            );
+        }
+    }
 }

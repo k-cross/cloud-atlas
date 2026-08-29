@@ -12,10 +12,11 @@
 
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{RenderEdge, RenderNode, SNAPSHOT_VERSION, edge_key, node_key};
-use petgraph::graph::{Graph, NodeIndex};
+use crate::atlas::graph_builder::GraphBuilder;
+use petgraph::graph::Graph;
 use petgraph::visit::EdgeRef;
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// A minimal set of changes between two graph states. Added items carry their
 /// full render info so the frontend can materialize them; removed items are
@@ -124,32 +125,10 @@ pub fn diff(old: &Graph<Node, Edge>, new: &Graph<Node, Edge>) -> GraphPatch {
 /// still land, and anything unconfirmed is retained until a complete scan can
 /// speak to it. Stale resources therefore linger rather than flicker, which is
 /// the safer failure for a graph that is meant to be authoritative.
-pub fn carry_forward(next: &mut Graph<Node, Edge>, previous: &Graph<Node, Edge>) {
-    let mut index: HashMap<Node, NodeIndex> =
-        next.node_indices().map(|i| (next[i].clone(), i)).collect();
-    let mut present: HashSet<(Node, Node, Edge)> = next
-        .edge_references()
-        .map(|e| {
-            (
-                next[e.source()].clone(),
-                next[e.target()].clone(),
-                e.weight().clone(),
-            )
-        })
-        .collect();
-
-    for i in previous.node_indices() {
-        let node = &previous[i];
-        if !index.contains_key(node) {
-            let added = next.add_node(node.clone());
-            index.insert(node.clone(), added);
-        }
-    }
-
-    for e in previous.edge_references() {
-        let (source, target, weight) = (&previous[e.source()], &previous[e.target()], e.weight());
-        if present.insert((source.clone(), target.clone(), weight.clone())) {
-            next.add_edge(index[source], index[target], weight.clone());
-        }
-    }
+///
+/// The fold itself is [`GraphBuilder::merge`] — the scan's own builder already
+/// carries the node index this needs, and node/edge duplicate identity stays
+/// defined in exactly one place.
+pub fn carry_forward(next: &mut GraphBuilder, previous: &Graph<Node, Edge>) {
+    next.merge(previous);
 }

@@ -29,7 +29,7 @@ pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) 
         .collect();
 
     for sub in &sub_graphs {
-        builder.merge(sub);
+        builder.merge(&sub.graph);
     }
 }
 

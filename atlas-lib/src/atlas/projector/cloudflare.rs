@@ -1,6 +1,6 @@
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::projector::GraphBuilder;
-use crate::cloud::definition::CloudflareCollection;
+use crate::cloud::definition::{CloudflareCollection, ZoneId};
 use cloudflare::endpoints::dns::dns::DnsContent;
 
 pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollection) {
@@ -9,7 +9,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
         let zone_node = builder.get_or_add_node(Node::CloudflareZone(zone.id.as_str().into()));
 
         // Find DNS records for this zone
-        if let Some(records) = data.dns_records.get(&zone.id) {
+        if let Some(records) = data.dns_records.get(&ZoneId(zone.id.clone())) {
             for record in records {
                 let record_node =
                     builder.get_or_add_node(Node::CloudflareDnsRecord(record.id.as_str().into()));
@@ -67,10 +67,10 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
     // Project Workers and their Bindings
     for worker in &data.workers {
         let worker_node =
-            builder.get_or_add_node(Node::CloudflareWorker(worker.id.as_str().into()));
+            builder.get_or_add_node(Node::CloudflareWorker(worker.script.as_str().into()));
 
         // Find bindings for this worker
-        if let Some(bindings) = data.worker_bindings.get(&worker.id) {
+        if let Some(bindings) = data.worker_bindings.get(worker) {
             for binding in bindings {
                 match binding.binding_type.as_str() {
                     "kv_namespace" => {

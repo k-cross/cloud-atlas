@@ -23,6 +23,21 @@ pub enum Provider {
     Cloudflare(Box<CloudflareCollection>),
 }
 
+/// Identity of a Cloudflare zone, as the key of [`CloudflareCollection::dns_records`].
+/// A `Zone` carries both an `id` and a `name` and only the former keys the map,
+/// so the newtype is what stops a projector looking up by the wrong one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ZoneId(pub String);
+
+/// Identity of a Worker script. Script names are unique per *account*, not
+/// globally, so the account travels with the name — two accounts owning an
+/// "api" worker must not collide in [`CloudflareCollection::worker_bindings`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ScriptId {
+    pub account: String,
+    pub script: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableName(pub String);
 
@@ -112,14 +127,14 @@ pub enum MicrosoftCollection {
     AzureCdnProfiles(Vec<crate::api::azure::models::CdnProfile>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct CloudflareCollection {
     pub zones: Vec<cloudflare::endpoints::zones::zone::Zone>,
-    pub dns_records: HashMap<String, Vec<cloudflare::endpoints::dns::dns::DnsRecord>>,
-    pub workers: Vec<crate::cloud::cloudflare::worker::WorkerScript>,
+    pub dns_records: HashMap<ZoneId, Vec<cloudflare::endpoints::dns::dns::DnsRecord>>,
+    pub workers: Vec<ScriptId>,
     pub kv_namespaces: Vec<cloudflare::endpoints::workerskv::WorkersKvNamespace>,
     pub r2_buckets: Vec<cloudflare::endpoints::r2::r2::Bucket>,
     pub durable_objects: Vec<crate::cloud::cloudflare::durable_objects::DurableObjectNamespace>,
     pub d1_databases: Vec<crate::cloud::cloudflare::d1::D1Database>,
-    pub worker_bindings: HashMap<String, Vec<crate::cloud::cloudflare::worker::WorkerBinding>>,
+    pub worker_bindings: HashMap<ScriptId, Vec<crate::cloud::cloudflare::worker::WorkerBinding>>,
 }
