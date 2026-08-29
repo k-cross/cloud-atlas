@@ -1,12 +1,12 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_lambda::Client;
+    use aws_sdk_lambda::types::FunctionConfiguration;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<FunctionConfiguration>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
         let resp = client.list_functions().send().await?;
-        Ok(AmazonCollection::AmazonLambdas(resp.functions().to_owned()))
+        Ok(resp.functions().to_owned())
     }
 }

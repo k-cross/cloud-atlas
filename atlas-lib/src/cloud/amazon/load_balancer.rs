@@ -1,11 +1,11 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
+    use crate::cloud::definition::AWSLoadBalancing;
     use aws_sdk_elasticloadbalancingv2::Client;
     use std::collections::HashMap;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<AWSLoadBalancing, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         // Fetch Load Balancers
@@ -45,7 +45,7 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonLoadBalancers {
+        Ok(AWSLoadBalancing {
             load_balancers,
             target_groups,
             listeners,

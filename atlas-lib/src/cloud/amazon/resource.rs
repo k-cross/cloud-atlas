@@ -1,5 +1,4 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_config::types::{ResourceIdentifier, ResourceType};
     use aws_sdk_config::{Client, Error};
     use std::collections::HashMap;
@@ -41,15 +40,12 @@ pub mod collector {
     pub async fn runner(
         verbose: bool,
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Box<dyn std::error::Error>> {
         if verbose && let Some(region) = config.region() {
             println!("Region: {}\n", region);
         }
 
         let client = Client::new(config);
-        match scan_resources(&client).await {
-            Ok(res) => Ok(AmazonCollection::AmazonResources(res)),
-            Err(e) => Err(e.into()),
-        }
+        scan_resources(&client).await.map_err(Into::into)
     }
 }

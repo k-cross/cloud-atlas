@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_cloudfront::Client;
+    use aws_sdk_cloudfront::types::DistributionSummary;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<DistributionSummary>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut distributions = Vec::new();
@@ -27,6 +27,6 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonCloudFront(distributions))
+        Ok(distributions)
     }
 }

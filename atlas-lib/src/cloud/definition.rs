@@ -18,7 +18,11 @@ pub enum CloudError {
 #[derive(Debug)]
 pub enum Provider {
     AWS(Vec<(String, AmazonCollection)>),
-    GCP(Vec<GoogleCollection>),
+    /// Paired with the project each collection was read from. The scope has to
+    /// survive collection: without it the projector can only recover the
+    /// project by string-splitting a resource's `self_link`, which silently
+    /// yields no `GcpProject` node whenever that field is absent.
+    GCP(Vec<(String, GoogleCollection)>),
     Azure(Vec<MicrosoftCollection>),
     Cloudflare(Box<CloudflareCollection>),
 }
@@ -63,16 +67,8 @@ pub enum AmazonCollection {
     AmazonLambdas(Vec<AWSLambda>),
     AmazonEventbridge(Vec<AWSEventbridge>),
     AmazonResources(HashMap<String, Vec<AWSResource>>),
-    AmazonLoadBalancers {
-        load_balancers: Vec<AWSLoadBalancer>,
-        target_groups: Vec<AWSTargetGroup>,
-        listeners: Vec<AWSListener>,
-        target_health: HashMap<String, Vec<AWSTargetHealthDescription>>,
-    },
-    AmazonRoute53 {
-        hosted_zones: Vec<aws_sdk_route53::types::HostedZone>,
-        record_sets: Vec<aws_sdk_route53::types::ResourceRecordSet>,
-    },
+    AmazonLoadBalancers(AWSLoadBalancing),
+    AmazonRoute53(AWSRoute53),
     AmazonEks(Vec<aws_sdk_eks::types::Cluster>),
     AmazonApiGateway(Vec<aws_sdk_apigateway::types::RestApi>),
     AmazonRds(Vec<aws_sdk_rds::types::DbInstance>),
@@ -82,12 +78,34 @@ pub enum AmazonCollection {
     AmazonCloudFront(Vec<aws_sdk_cloudfront::types::DistributionSummary>),
     AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),
     // L3 routing / egress plane: how a subnet actually reaches the internet.
-    AmazonNetworking {
-        route_tables: Vec<aws_sdk_ec2::types::RouteTable>,
-        internet_gateways: Vec<aws_sdk_ec2::types::InternetGateway>,
-        nat_gateways: Vec<aws_sdk_ec2::types::NatGateway>,
-        addresses: Vec<aws_sdk_ec2::types::Address>, // Elastic IPs
-    },
+    AmazonNetworking(AWSNetworking),
+}
+
+/// The payload of a multi-API collector. Each is a named struct rather than an
+/// inline struct variant so that the variant is a *path*, which is what lets
+/// `amazon/provider.rs`'s `collectors!` list apply it to the collector's return
+/// value at the registration site. A collector that returns the wrong payload
+/// then fails to compile instead of registering under the wrong name.
+#[derive(Debug)]
+pub struct AWSLoadBalancing {
+    pub load_balancers: Vec<AWSLoadBalancer>,
+    pub target_groups: Vec<AWSTargetGroup>,
+    pub listeners: Vec<AWSListener>,
+    pub target_health: HashMap<String, Vec<AWSTargetHealthDescription>>,
+}
+
+#[derive(Debug)]
+pub struct AWSRoute53 {
+    pub hosted_zones: Vec<aws_sdk_route53::types::HostedZone>,
+    pub record_sets: Vec<aws_sdk_route53::types::ResourceRecordSet>,
+}
+
+#[derive(Debug)]
+pub struct AWSNetworking {
+    pub route_tables: Vec<aws_sdk_ec2::types::RouteTable>,
+    pub internet_gateways: Vec<aws_sdk_ec2::types::InternetGateway>,
+    pub nat_gateways: Vec<aws_sdk_ec2::types::NatGateway>,
+    pub addresses: Vec<aws_sdk_ec2::types::Address>,
 }
 
 #[derive(Debug)]

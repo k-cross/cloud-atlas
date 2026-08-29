@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
+    use crate::cloud::definition::AWSRoute53;
     use aws_sdk_route53::Client;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<AWSRoute53, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut hosted_zones = Vec::new();
@@ -38,7 +38,7 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonRoute53 {
+        Ok(AWSRoute53 {
             hosted_zones,
             record_sets,
         })

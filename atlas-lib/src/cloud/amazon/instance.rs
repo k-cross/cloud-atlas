@@ -1,9 +1,8 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
-    use aws_sdk_ec2::types::Filter;
+    use aws_sdk_ec2::types::{Filter, Instance};
     use aws_sdk_ec2::{Client, Error};
 
-    async fn match_instances(client: &Client) -> Result<AmazonCollection, Error> {
+    async fn match_instances(client: &Client) -> Result<Vec<Instance>, Error> {
         // ["running", "pending", "shutting-down", "terminated", "stopped", "stopping"] are all the
         // instance states, only grab active or soon to be active ones.
         let filter = Filter::builder()
@@ -19,12 +18,12 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonInstances(running_insts))
+        Ok(running_insts)
     }
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Instance>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
         match_instances(&client).await.map_err(Into::into)
     }
@@ -33,7 +32,6 @@ pub mod collector {
 #[cfg(test)]
 mod tests {
     use super::collector::runner;
-    use crate::cloud::definition::AmazonCollection;
     use aws_credential_types::Credentials;
     use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
@@ -87,10 +85,7 @@ mod tests {
             .load()
             .await;
 
-        let collection = runner(&config).await.expect("runner succeeds");
-        let AmazonCollection::AmazonInstances(instances) = collection else {
-            panic!("expected AmazonInstances");
-        };
+        let instances = runner(&config).await.expect("runner succeeds");
 
         assert_eq!(instances.len(), 1);
         let inst = &instances[0];

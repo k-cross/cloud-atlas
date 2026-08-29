@@ -67,7 +67,13 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
                 "forwarding_rules" => GoogleCollection::GoogleForwardingRules, compute_network::list_forwarding_rules(&c, &p),
             ];
 
-            run_all(collectors, SOURCE, &p).await
+            let (collections, local_report) = run_all(collectors, SOURCE, &p).await;
+            let local_services: Vec<_> = collections
+                .into_iter()
+                .map(|collection| (p.to_owned(), collection))
+                .collect();
+
+            (local_services, local_report)
         });
     }
 

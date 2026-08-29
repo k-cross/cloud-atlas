@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_ec2::Client;
+    use aws_sdk_ec2::types::SecurityGroup;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<SecurityGroup>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut groups = Vec::new();
@@ -25,14 +25,13 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonSecurityGroups(groups))
+        Ok(groups)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::collector::runner;
-    use crate::cloud::definition::AmazonCollection;
     use aws_credential_types::Credentials;
     use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
@@ -71,11 +70,7 @@ mod tests {
             .load()
             .await;
 
-        let AmazonCollection::AmazonSecurityGroups(groups) =
-            runner(&config).await.expect("runner ok")
-        else {
-            panic!("expected AmazonSecurityGroups");
-        };
+        let groups = runner(&config).await.expect("runner ok");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].group_id(), Some("sg-123"));
         assert_eq!(groups[0].group_name(), Some("web-sg"));

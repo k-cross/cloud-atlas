@@ -19,8 +19,8 @@ use crate::Settings;
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
-    AmazonCollection, CloudflareCollection, GoogleCollection, MicrosoftCollection, Provider,
-    QueueUrl, TableName,
+    AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection, CloudflareCollection,
+    GoogleCollection, MicrosoftCollection, Provider, QueueUrl, TableName,
 };
 use std::collections::HashMap;
 
@@ -351,19 +351,19 @@ pub fn aws() -> Provider {
         (r.clone(), AmazonCollection::AmazonResources(resources)),
         (
             r.clone(),
-            AmazonCollection::AmazonLoadBalancers {
+            AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
                 load_balancers: vec![lb],
                 target_groups: vec![tg],
                 listeners: vec![listener],
                 target_health,
-            },
+            }),
         ),
         (
             r.clone(),
-            AmazonCollection::AmazonRoute53 {
+            AmazonCollection::AmazonRoute53(AWSRoute53 {
                 hosted_zones: vec![hosted_zone],
                 record_sets: vec![record_a, record_cname],
-            },
+            }),
         ),
         (r.clone(), AmazonCollection::AmazonEks(vec![eks])),
         (r.clone(), AmazonCollection::AmazonApiGateway(vec![api])),
@@ -386,12 +386,12 @@ pub fn aws() -> Provider {
         (r.clone(), AmazonCollection::AmazonSecurityGroups(vec![sg])),
         (
             r,
-            AmazonCollection::AmazonNetworking {
+            AmazonCollection::AmazonNetworking(AWSNetworking {
                 route_tables: vec![public_rt, private_rt],
                 internet_gateways: vec![igw],
                 nat_gateways: vec![nat],
                 addresses: vec![eip],
-            },
+            }),
         ),
     ])
 }
@@ -508,20 +508,30 @@ pub fn gcp() -> Provider {
         ..Default::default()
     };
 
+    let p = GCP_PROJECT.to_owned();
     Provider::GCP(vec![
-        GoogleCollection::GoogleInstances(vec![instance]),
-        GoogleCollection::GoogleFirewalls(vec![firewall]),
-        GoogleCollection::GoogleSql(vec![sql]),
-        GoogleCollection::GoogleDns(vec![dns]),
-        GoogleCollection::GoogleGke(vec![gke]),
-        GoogleCollection::GoogleFunctions(vec![func]),
-        GoogleCollection::GoogleStorageBuckets(vec![bucket]),
-        GoogleCollection::GooglePubSubTopics(vec![topic]),
-        GoogleCollection::GooglePubSubSubscriptions(vec![sub]),
-        GoogleCollection::GoogleRunServices(vec![run_svc]),
-        GoogleCollection::GoogleNetworks(vec![net]),
-        GoogleCollection::GoogleSubnetworks(vec![subnet]),
-        GoogleCollection::GoogleForwardingRules(vec![fw_rule]),
+        (p.clone(), GoogleCollection::GoogleInstances(vec![instance])),
+        (p.clone(), GoogleCollection::GoogleFirewalls(vec![firewall])),
+        (p.clone(), GoogleCollection::GoogleSql(vec![sql])),
+        (p.clone(), GoogleCollection::GoogleDns(vec![dns])),
+        (p.clone(), GoogleCollection::GoogleGke(vec![gke])),
+        (p.clone(), GoogleCollection::GoogleFunctions(vec![func])),
+        (
+            p.clone(),
+            GoogleCollection::GoogleStorageBuckets(vec![bucket]),
+        ),
+        (p.clone(), GoogleCollection::GooglePubSubTopics(vec![topic])),
+        (
+            p.clone(),
+            GoogleCollection::GooglePubSubSubscriptions(vec![sub]),
+        ),
+        (
+            p.clone(),
+            GoogleCollection::GoogleRunServices(vec![run_svc]),
+        ),
+        (p.clone(), GoogleCollection::GoogleNetworks(vec![net])),
+        (p.clone(), GoogleCollection::GoogleSubnetworks(vec![subnet])),
+        (p, GoogleCollection::GoogleForwardingRules(vec![fw_rule])),
     ])
 }
 

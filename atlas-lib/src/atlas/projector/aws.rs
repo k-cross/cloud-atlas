@@ -2,12 +2,12 @@ use crate::Settings;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
-use crate::cloud::definition::AmazonCollection;
+use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection};
 use rayon::prelude::*;
 
 pub fn aws_projector(
     builder: &mut GraphBuilder,
-    aws_data: &Vec<(String, AmazonCollection)>,
+    aws_data: &[(String, AmazonCollection)],
     opts: &Settings,
 ) {
     // Each (region, collection) tuple is independent, so project them into
@@ -180,12 +180,12 @@ fn project_amazon_collection(
                 dbg!(&buses);
             }
         }
-        AmazonCollection::AmazonLoadBalancers {
+        AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
             load_balancers,
             target_groups,
             listeners,
             target_health,
-        } => {
+        }) => {
             for lb in load_balancers {
                 if let Some(arn) = lb.load_balancer_arn() {
                     let parent_idx = match lb.vpc_id() {
@@ -242,10 +242,10 @@ fn project_amazon_collection(
                 }
             }
         }
-        AmazonCollection::AmazonRoute53 {
+        AmazonCollection::AmazonRoute53(AWSRoute53 {
             hosted_zones,
             record_sets,
-        } => {
+        }) => {
             let g_idx = builder.get_or_add_node(Node::AwsRegion("global".into()));
 
             for hz in hosted_zones {
@@ -375,12 +375,12 @@ fn project_amazon_collection(
                 );
             }
         }
-        AmazonCollection::AmazonNetworking {
+        AmazonCollection::AmazonNetworking(AWSNetworking {
             route_tables,
             internet_gateways,
             nat_gateways,
             addresses,
-        } => {
+        }) => {
             // Elastic IPs: a managed public IP, stitched to the generic IP
             // space so egress can be followed across clouds.
             for addr in addresses {

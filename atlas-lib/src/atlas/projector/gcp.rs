@@ -16,14 +16,14 @@ macro_rules! project_leaf {
     };
 }
 
-pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) {
+pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[(String, GoogleCollection)]) {
     // Collections are independent, so project each into a thread-local
     // sub-graph in parallel and merge serially in input order.
     let sub_graphs: Vec<GraphBuilder> = gcp_data
         .par_iter()
-        .map(|collection| {
+        .map(|(project, collection)| {
             let mut local = GraphBuilder::new();
-            project_google_collection(&mut local, collection);
+            project_google_collection(&mut local, project, collection);
             local
         })
         .collect();
@@ -33,30 +33,23 @@ pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[GoogleCollection]) 
     }
 }
 
-fn project_google_collection(builder: &mut GraphBuilder, x: &GoogleCollection) {
+fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &GoogleCollection) {
+    let project_idx = builder.get_or_add_node(Node::GcpProject(project.into()));
+
     match x {
         GoogleCollection::GoogleInstances(instances) => {
             for inst in instances {
-                // Extract project and zone from the self_link e.g., https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance
-                let mut project_idx = None;
+                // The zone is only ever available inside the self_link, e.g.
+                // https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance
                 let mut zone_idx = None;
-                if let Some(self_link) = &inst.self_link {
-                    if let Some(project_id) = self_link
-                        .split("/projects/")
-                        .nth(1)
-                        .and_then(|rest| rest.split('/').next())
-                    {
-                        let project_node = Node::GcpProject(project_id.into());
-                        project_idx = Some(builder.get_or_add_node(project_node));
-                    }
-                    if let Some(zone) = self_link
+                if let Some(self_link) = &inst.self_link
+                    && let Some(zone) = self_link
                         .split("/zones/")
                         .nth(1)
                         .and_then(|rest| rest.split('/').next())
-                    {
-                        let zone_node = Node::GcpComputeZone(zone.into());
-                        zone_idx = Some(builder.get_or_add_node(zone_node));
-                    }
+                {
+                    let zone_node = Node::GcpComputeZone(zone.into());
+                    zone_idx = Some(builder.get_or_add_node(zone_node));
                 }
 
                 if let Some(id) = &inst.id {

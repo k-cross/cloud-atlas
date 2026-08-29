@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_sns::Client;
+    use aws_sdk_sns::types::Topic;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Topic>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut topics = Vec::new();
@@ -25,6 +25,6 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonSns(topics))
+        Ok(topics)
     }
 }

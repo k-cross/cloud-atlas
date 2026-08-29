@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_apigateway::Client;
+    use aws_sdk_apigateway::types::RestApi;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<RestApi>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut apis = Vec::new();
@@ -25,6 +25,6 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonApiGateway(apis))
+        Ok(apis)
     }
 }

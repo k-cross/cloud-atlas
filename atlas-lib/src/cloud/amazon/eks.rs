@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_eks::Client;
+    use aws_sdk_eks::types::Cluster;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Cluster>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut clusters = Vec::new();
@@ -30,6 +30,6 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonEks(clusters))
+        Ok(clusters)
     }
 }

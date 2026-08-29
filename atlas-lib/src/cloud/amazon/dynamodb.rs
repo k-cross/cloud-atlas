@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::{AmazonCollection, TableName};
+    use crate::cloud::definition::TableName;
     use aws_sdk_dynamodb::Client;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<TableName>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut tables = Vec::new();
@@ -27,6 +27,6 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonDynamoDb(tables))
+        Ok(tables)
     }
 }

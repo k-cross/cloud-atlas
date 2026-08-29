@@ -5,7 +5,7 @@
 //! The heavily-commented reference examples live in `instance.rs` /
 //! `security_group.rs` / `sqs.rs`.
 
-use crate::cloud::definition::{AmazonCollection, TableName};
+use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, TableName};
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
@@ -48,11 +48,7 @@ const JSON11: &str = "application/x-amz-json-1.1";
 async fn lambda_functions() {
     let body = r#"{"Functions":[{"FunctionName":"fn1","FunctionArn":"arn:aws:lambda:us-east-1:111:function:fn1","Runtime":"python3.12"}]}"#;
     let cfg = replay_config(&[(JSON, body)]).await;
-    let AmazonCollection::AmazonLambdas(fns) =
-        super::lambda::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonLambdas");
-    };
+    let fns = super::lambda::collector::runner(&cfg).await.unwrap();
     assert_eq!(fns[0].function_name(), Some("fn1"));
 }
 
@@ -62,10 +58,7 @@ async fn eks_clusters() {
     let list = r#"{"clusters":["c1"]}"#;
     let describe = r#"{"cluster":{"name":"c1","arn":"arn:aws:eks:us-east-1:111:cluster/c1","status":"ACTIVE"}}"#;
     let cfg = replay_config(&[(JSON, list), (JSON, describe)]).await;
-    let AmazonCollection::AmazonEks(clusters) = super::eks::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonEks");
-    };
+    let clusters = super::eks::collector::runner(&cfg).await.unwrap();
     assert_eq!(clusters[0].name(), Some("c1"));
 }
 
@@ -73,13 +66,9 @@ async fn eks_clusters() {
 async fn ecs_clusters() {
     let body = r#"{"clusters":[{"clusterArn":"arn:aws:ecs:us-east-1:111:cluster/c1","clusterName":"c1","status":"ACTIVE"}]}"#;
     let cfg = replay_config(&[(JSON11, body)]).await;
-    let AmazonCollection::AmazonClusters(clusters) =
-        super::container_service::collector::runner(&cfg)
-            .await
-            .unwrap()
-    else {
-        panic!("expected AmazonClusters");
-    };
+    let clusters = super::container_service::collector::runner(&cfg)
+        .await
+        .unwrap();
     assert_eq!(clusters[0].cluster_name(), Some("c1"));
 }
 
@@ -87,11 +76,7 @@ async fn ecs_clusters() {
 async fn dynamodb_tables() {
     let body = r#"{"TableNames":["orders","users"]}"#;
     let cfg = replay_config(&[(JSON10, body)]).await;
-    let AmazonCollection::AmazonDynamoDb(tables) =
-        super::dynamodb::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonDynamoDb");
-    };
+    let tables = super::dynamodb::collector::runner(&cfg).await.unwrap();
     assert_eq!(
         tables,
         vec![
@@ -105,11 +90,7 @@ async fn dynamodb_tables() {
 async fn api_gateway_rest_apis() {
     let body = r#"{"item":[{"id":"api1","name":"my-api"}]}"#;
     let cfg = replay_config(&[(JSON, body)]).await;
-    let AmazonCollection::AmazonApiGateway(apis) =
-        super::api_gateway::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonApiGateway");
-    };
+    let apis = super::api_gateway::collector::runner(&cfg).await.unwrap();
     assert_eq!(apis[0].id(), Some("api1"));
     assert_eq!(apis[0].name(), Some("my-api"));
 }
@@ -118,11 +99,7 @@ async fn api_gateway_rest_apis() {
 async fn eventbridge_buses() {
     let body = r#"{"EventBuses":[{"Name":"default","Arn":"arn:aws:events:us-east-1:111:event-bus/default"}]}"#;
     let cfg = replay_config(&[(JSON11, body)]).await;
-    let AmazonCollection::AmazonEventbridge(buses) =
-        super::eventbridge::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonEventbridge");
-    };
+    let buses = super::eventbridge::collector::runner(&cfg).await.unwrap();
     assert_eq!(buses[0].name(), Some("default"));
 }
 
@@ -139,10 +116,7 @@ async fn sns_topics() {
   <ResponseMetadata><RequestId>r</RequestId></ResponseMetadata>
 </ListTopicsResponse>"#;
     let cfg = replay_config(&[(XML, body)]).await;
-    let AmazonCollection::AmazonSns(topics) = super::sns::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonSns");
-    };
+    let topics = super::sns::collector::runner(&cfg).await.unwrap();
     assert_eq!(
         topics[0].topic_arn(),
         Some("arn:aws:sns:us-east-1:111:my-topic")
@@ -163,10 +137,7 @@ async fn rds_db_instances() {
   </DescribeDBInstancesResult>
 </DescribeDBInstancesResponse>"#;
     let cfg = replay_config(&[(XML, body)]).await;
-    let AmazonCollection::AmazonRds(dbs) = super::rds::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonRds");
-    };
+    let dbs = super::rds::collector::runner(&cfg).await.unwrap();
     assert_eq!(dbs[0].db_instance_identifier(), Some("mydb"));
     assert_eq!(dbs[0].engine(), Some("postgres"));
     assert_eq!(
@@ -187,11 +158,7 @@ async fn cloudfront_distributions() {
   <Items/>
 </DistributionList>"#;
     let cfg = replay_config(&[(XML, body)]).await;
-    let AmazonCollection::AmazonCloudFront(dists) =
-        super::cloudfront::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonCloudFront");
-    };
+    let dists = super::cloudfront::collector::runner(&cfg).await.unwrap();
     assert!(dists.is_empty());
 }
 
@@ -218,13 +185,10 @@ async fn route53_zones_and_records() {
   <MaxItems>100</MaxItems>
 </ListResourceRecordSetsResponse>"#;
     let cfg = replay_config(&[(XML, zones), (XML, records)]).await;
-    let AmazonCollection::AmazonRoute53 {
+    let AWSRoute53 {
         hosted_zones,
         record_sets,
-    } = super::route53::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonRoute53");
-    };
+    } = super::route53::collector::runner(&cfg).await.unwrap();
     assert_eq!(hosted_zones[0].name(), "example.com.");
     assert_eq!(record_sets[0].name(), "example.com.");
 }
@@ -245,15 +209,12 @@ async fn ec2_networking_plane() {
   <addressesSet><item><publicIp>52.1.2.3</publicIp><allocationId>eipalloc-1</allocationId></item></addressesSet>
 </DescribeAddressesResponse>"#;
     let cfg = replay_config(&[(XML, route_tables), (XML, igws), (XML, nats), (XML, addrs)]).await;
-    let AmazonCollection::AmazonNetworking {
+    let AWSNetworking {
         route_tables,
         internet_gateways,
         nat_gateways,
         addresses,
-    } = super::networking::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonNetworking");
-    };
+    } = super::networking::collector::runner(&cfg).await.unwrap();
     assert_eq!(route_tables[0].route_table_id(), Some("rtb-1"));
     assert_eq!(internet_gateways[0].internet_gateway_id(), Some("igw-1"));
     assert_eq!(nat_gateways[0].nat_gateway_id(), Some("nat-1"));
@@ -289,14 +250,11 @@ async fn elbv2_load_balancers_and_target_groups() {
   <DescribeTargetHealthResult><TargetHealthDescriptions/></DescribeTargetHealthResult>
 </DescribeTargetHealthResponse>"#;
     let cfg = replay_config(&[(XML, lbs), (XML, listeners), (XML, tgs), (XML, health)]).await;
-    let AmazonCollection::AmazonLoadBalancers {
+    let AWSLoadBalancing {
         load_balancers,
         target_groups,
         ..
-    } = super::load_balancer::collector::runner(&cfg).await.unwrap()
-    else {
-        panic!("expected AmazonLoadBalancers");
-    };
+    } = super::load_balancer::collector::runner(&cfg).await.unwrap();
     assert_eq!(load_balancers[0].load_balancer_name(), Some("my-lb"));
     assert_eq!(target_groups[0].target_group_name(), Some("my-tg"));
 }

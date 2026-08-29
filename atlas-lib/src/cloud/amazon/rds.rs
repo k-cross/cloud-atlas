@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_rds::Client;
+    use aws_sdk_rds::types::DbInstance;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<DbInstance>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut dbs = Vec::new();
@@ -25,6 +25,6 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonRds(dbs))
+        Ok(dbs)
     }
 }

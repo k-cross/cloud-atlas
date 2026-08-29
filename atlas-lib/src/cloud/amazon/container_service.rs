@@ -1,14 +1,12 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
     use aws_sdk_ecs::Client;
+    use aws_sdk_ecs::types::Cluster;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Cluster>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
         let resp = client.describe_clusters().send().await?;
-        Ok(AmazonCollection::AmazonClusters(
-            resp.clusters.unwrap_or_default(),
-        ))
+        Ok(resp.clusters.unwrap_or_default())
     }
 }

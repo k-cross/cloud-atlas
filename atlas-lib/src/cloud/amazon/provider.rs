@@ -9,9 +9,15 @@ use crate::cloud::definition::{AmazonCollection, Provider};
 
 const SOURCE: CollectionSource = CollectionSource::Aws;
 
+/// One line per collector: the name failures are attributed under, the
+/// `AmazonCollection` variant its output belongs in, and the call that produces
+/// it. Applying the variant *here* rather than inside the collector is what
+/// makes the pairing type-checked — a collector whose return type does not fit
+/// the variant it is registered against fails to compile, so no collector can
+/// file its results under another one's name.
 macro_rules! collectors {
-    ($($name:literal => $run:expr),+ $(,)?) => {
-        vec![$(($name, Box::pin($run) as _)),+]
+    ($($name:literal => $variant:path, $run:expr),+ $(,)?) => {
+        vec![$(($name, Box::pin(async { $run.await.map($variant) }) as _)),+]
     };
 }
 
@@ -26,22 +32,22 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
             let config = super::load_config(&r).await;
 
             let collectors: Vec<NamedCollector<'_, AmazonCollection>> = collectors![
-                "ecs" => container_service::collector::runner(&config),
-                "eventbridge" => eventbridge::collector::runner(&config),
-                "ec2" => instance::collector::runner(&config),
-                "lambda" => lambda::collector::runner(&config),
-                "elbv2" => load_balancer::collector::runner(&config),
-                "config" => resource::collector::runner(verbose, &config),
-                "route53" => route53::collector::runner(&config),
-                "eks" => eks::collector::runner(&config),
-                "apigateway" => api_gateway::collector::runner(&config),
-                "rds" => rds::collector::runner(&config),
-                "dynamodb" => dynamodb::collector::runner(&config),
-                "sqs" => sqs::collector::runner(&config),
-                "sns" => sns::collector::runner(&config),
-                "cloudfront" => cloudfront::collector::runner(&config),
-                "security_groups" => security_group::collector::runner(&config),
-                "networking" => networking::collector::runner(&config),
+                "ecs" => AmazonCollection::AmazonClusters, container_service::collector::runner(&config),
+                "eventbridge" => AmazonCollection::AmazonEventbridge, eventbridge::collector::runner(&config),
+                "ec2" => AmazonCollection::AmazonInstances, instance::collector::runner(&config),
+                "lambda" => AmazonCollection::AmazonLambdas, lambda::collector::runner(&config),
+                "elbv2" => AmazonCollection::AmazonLoadBalancers, load_balancer::collector::runner(&config),
+                "config" => AmazonCollection::AmazonResources, resource::collector::runner(verbose, &config),
+                "route53" => AmazonCollection::AmazonRoute53, route53::collector::runner(&config),
+                "eks" => AmazonCollection::AmazonEks, eks::collector::runner(&config),
+                "apigateway" => AmazonCollection::AmazonApiGateway, api_gateway::collector::runner(&config),
+                "rds" => AmazonCollection::AmazonRds, rds::collector::runner(&config),
+                "dynamodb" => AmazonCollection::AmazonDynamoDb, dynamodb::collector::runner(&config),
+                "sqs" => AmazonCollection::AmazonSqs, sqs::collector::runner(&config),
+                "sns" => AmazonCollection::AmazonSns, sns::collector::runner(&config),
+                "cloudfront" => AmazonCollection::AmazonCloudFront, cloudfront::collector::runner(&config),
+                "security_groups" => AmazonCollection::AmazonSecurityGroups, security_group::collector::runner(&config),
+                "networking" => AmazonCollection::AmazonNetworking, networking::collector::runner(&config),
             ];
 
             let (collections, local_report) = run_all(collectors, SOURCE, &r).await;

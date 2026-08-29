@@ -1,10 +1,10 @@
 pub mod collector {
-    use crate::cloud::definition::{AmazonCollection, QueueUrl};
+    use crate::cloud::definition::QueueUrl;
     use aws_sdk_sqs::Client;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<QueueUrl>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut queues = Vec::new();
@@ -27,14 +27,14 @@ pub mod collector {
             }
         }
 
-        Ok(AmazonCollection::AmazonSqs(queues))
+        Ok(queues)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::collector::runner;
-    use crate::cloud::definition::{AmazonCollection, QueueUrl};
+    use crate::cloud::definition::QueueUrl;
     use aws_credential_types::Credentials;
     use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
@@ -62,9 +62,7 @@ mod tests {
             .load()
             .await;
 
-        let AmazonCollection::AmazonSqs(queues) = runner(&config).await.expect("runner ok") else {
-            panic!("expected AmazonSqs");
-        };
+        let queues = runner(&config).await.expect("runner ok");
         assert_eq!(
             queues,
             vec![QueueUrl(

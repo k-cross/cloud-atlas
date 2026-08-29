@@ -1,5 +1,5 @@
 pub mod collector {
-    use crate::cloud::definition::AmazonCollection;
+    use crate::cloud::definition::AWSNetworking;
     use aws_sdk_ec2::Client;
 
     /// Collects the VPC routing/egress plane: route tables (with their routes
@@ -8,7 +8,7 @@ pub mod collector {
     /// reach the internet, and how".
     pub async fn runner(
         config: &aws_config::SdkConfig,
-    ) -> Result<AmazonCollection, Box<dyn std::error::Error>> {
+    ) -> Result<AWSNetworking, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
         let mut route_tables = Vec::new();
@@ -60,7 +60,7 @@ pub mod collector {
         let resp = client.describe_addresses().send().await?;
         let addresses = resp.addresses().to_vec();
 
-        Ok(AmazonCollection::AmazonNetworking {
+        Ok(AWSNetworking {
             route_tables,
             internet_gateways,
             nat_gateways,
