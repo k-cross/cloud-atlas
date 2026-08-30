@@ -36,8 +36,20 @@ async fn collection(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 fn collection_value(report: &CollectionReport) -> serde_json::Value {
+    // `complete` and `unreadable` are not the same question. A scan that read
+    // every provider but could not map one drifted row is incomplete — the
+    // client lost something — yet still authoritative about what exists, so
+    // nothing is held. Only `unreadable` suspends removals.
+    let mut unreadable: Vec<String> = report
+        .unreadable_sources()
+        .iter()
+        .map(|source| source.to_string())
+        .collect();
+    unreadable.sort();
+
     serde_json::json!({
         "complete": report.is_complete(),
+        "unreadable": unreadable,
         "failures": report.failures,
     })
 }
@@ -45,12 +57,17 @@ fn collection_value(report: &CollectionReport) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_lib::atlas::collection::CollectionSource;
+    use atlas_lib::atlas::collection::{CollectionSource, FailureKind};
 
     #[test]
     fn a_partial_scan_reports_its_attributed_failures() {
         let mut report = CollectionReport::default();
-        report.record(CollectionSource::Aws, "us-east-1/ec2", "throttled");
+        report.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/ec2",
+            "throttled",
+        );
 
         let value = collection_value(&report);
 

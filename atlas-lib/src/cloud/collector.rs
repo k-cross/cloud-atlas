@@ -7,7 +7,7 @@
 //! honest: the only way to consume a collector's `Result` is to hand it to
 //! `run_all`, which records the error rather than dropping it.
 
-use crate::atlas::collection::{CollectionReport, CollectionSource};
+use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -36,7 +36,17 @@ pub async fn run_all<T>(
     for (name, result) in results {
         match result {
             Ok(collection) => collected.push(collection),
-            Err(e) => report.record(source, format!("{scope}/{name}"), e),
+            // A collector's error arrives boxed, so its kind is no longer
+            // recoverable here; `Unavailable` is the conservative reading —
+            // hold the resources and wait. A provider that can diagnose a
+            // permissions failure does so *before* fanning out, where the
+            // error is still typed (see each `build_*`).
+            Err(e) => report.record(
+                source,
+                FailureKind::Unavailable,
+                format!("{scope}/{name}"),
+                e,
+            ),
         }
     }
 

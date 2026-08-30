@@ -114,8 +114,11 @@ impl AtlasEngine {
     fn install(&mut self, mut scan: Scan) {
         let held = self.retention.hold(&scan.report);
         if !scan.report.is_complete() {
+            // Not necessarily "retaining": a scan whose only failures were
+            // malformed records was still read end to end, so it holds nothing.
             eprintln!(
-                "Warning: collection was incomplete, retaining unconfirmed resources -- {}",
+                "Warning: collection was incomplete ({} source(s) retained) -- {}",
+                held.len(),
                 scan.report.summary()
             );
             for released in scan.report.unreadable_sources().difference(&held) {
@@ -166,7 +169,7 @@ impl AtlasEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::collection::CollectionSource;
+    use crate::atlas::collection::{CollectionSource, FailureKind};
     use crate::atlas::definition::Node;
 
     fn seeded(nodes: [Node; 2]) -> GraphBuilder {
@@ -194,7 +197,12 @@ mod tests {
         engine.builder = seeded([instance(), zone()]);
 
         let mut report = CollectionReport::default();
-        report.record(CollectionSource::Aws, "us-east-1/ec2", "throttled");
+        report.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/ec2",
+            "throttled",
+        );
         let scan = Scan {
             builder: GraphBuilder::new(),
             report,

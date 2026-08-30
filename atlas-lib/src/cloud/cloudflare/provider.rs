@@ -1,5 +1,5 @@
 use crate::Settings;
-use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::definition::{CloudflareCollection, Provider, ScriptId, ZoneId};
 use cloudflare::framework::Environment;
 use cloudflare::framework::auth::Credentials;
@@ -14,7 +14,9 @@ pub async fn build_cloudflare(verbose: bool, _settings: &Settings) -> ProviderSc
 
     match clients() {
         Ok((client, cf)) => collect(&client, &cf, verbose, &mut data, &mut report).await,
-        Err(e) => report.record(SOURCE, "credentials", e),
+        // No token, or a token the client refuses to build with: the
+        // whole provider is unreadable for a reason polling cannot fix.
+        Err(e) => report.record(SOURCE, FailureKind::Unauthorized, "credentials", e),
     }
 
     ProviderScan {
@@ -55,7 +57,7 @@ async fn collect(
     match super::zone::get_zones(client).await {
         Ok(zones) => data.zones = zones,
         Err(e) => {
-            report.record(SOURCE, "zones", e);
+            report.record(SOURCE, FailureKind::Unavailable, "zones", e);
             return;
         }
     }
@@ -73,7 +75,12 @@ async fn collect(
             Ok(records) => {
                 data.dns_records.insert(ZoneId(zone.id.clone()), records);
             }
-            Err(e) => report.record(SOURCE, format!("zone {}/dns", zone.name), e),
+            Err(e) => report.record(
+                SOURCE,
+                FailureKind::Unavailable,
+                format!("zone {}/dns", zone.name),
+                e,
+            ),
         }
     }
 
@@ -117,6 +124,7 @@ async fn collect(
                         }
                         Err(e) => report.record(
                             SOURCE,
+                            FailureKind::Unavailable,
                             format!("account {account_id}/worker {}/bindings", id.script),
                             e,
                         ),
@@ -124,7 +132,12 @@ async fn collect(
                     data.workers.push(id);
                 }
             }
-            Err(e) => report.record(SOURCE, format!("account {account_id}/workers"), e),
+            Err(e) => report.record(
+                SOURCE,
+                FailureKind::Unavailable,
+                format!("account {account_id}/workers"),
+                e,
+            ),
         }
 
         macro_rules! extend_or_record {
@@ -133,7 +146,7 @@ async fn collect(
                     Ok(items) => data.$field.extend(items),
                     Err(e) => {
                         let scope = format!("account {account_id}/{}", stringify!($field));
-                        report.record(SOURCE, scope, e)
+                        report.record(SOURCE, FailureKind::Unavailable, scope, e)
                     }
                 }
             };

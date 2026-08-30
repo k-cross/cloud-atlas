@@ -10,7 +10,7 @@
 //! (the typed `Node` encodes its config, so a changed resource is a different
 //! value). Richer update semantics are deferred to the liveness work.
 
-use crate::atlas::collection::{CollectionReport, CollectionSource};
+use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{RenderEdge, RenderNode, SNAPSHOT_VERSION, edge_key, node_key};
 use crate::atlas::graph_builder::GraphBuilder;
@@ -158,8 +158,17 @@ pub fn carry_forward(
 /// attributing every node to the collector that produced it — needs per-node
 /// provenance, because a node kind does not identify its collector (an
 /// `AwsEc2Vpc` comes from five of them).
+///
+/// The budget is not uniform, because not every failure is equally likely to
+/// recover. Waiting out a throttle is sensible; waiting out a rejected
+/// credential is just claiming resources nobody can verify, since no amount of
+/// polling will fix it without a human. So a source diagnosed as
+/// [`FailureKind::Unauthorized`] spends the shorter [`Retention::AUTH_BUDGET`]
+/// instead. [`FailureKind::Malformed`] never reaches here at all — such a scan
+/// was read, so the source stays authoritative and nothing is held.
 pub struct Retention {
     budget: u32,
+    auth_budget: u32,
     consecutive_failures: HashMap<CollectionSource, u32>,
 }
 
@@ -168,13 +177,29 @@ impl Retention {
     /// that is ten minutes of an outage before the graph gives up on a provider.
     pub const DEFAULT_BUDGET: u32 = 10;
 
+    /// Ticks a source is held for when the diagnosis is unambiguously a
+    /// permissions problem. Deliberately short but not zero: a token refresh
+    /// can race, and wiping a provider's whole estate over one such blip only
+    /// to restore it on the next tick is its own kind of wrong.
+    pub const AUTH_BUDGET: u32 = 2;
+
     /// A budget of 0 disables retention entirely (every incomplete scan deletes
     /// what it could not confirm); there is no "forever" — pass a large budget
     /// if that is what you want.
     pub fn new(budget: u32) -> Self {
         Self {
             budget,
+            // Never longer than the configured budget: `--retain-scans 0`
+            // means retain nothing, and an auth failure is not an exception.
+            auth_budget: Self::AUTH_BUDGET.min(budget),
             consecutive_failures: HashMap::new(),
+        }
+    }
+
+    fn budget_for(&self, kind: FailureKind) -> u32 {
+        match kind {
+            FailureKind::Unauthorized => self.auth_budget,
+            _ => self.budget,
         }
     }
 
@@ -188,9 +213,12 @@ impl Retention {
         unreadable
             .into_iter()
             .filter(|&source| {
+                let budget = report
+                    .unreadable_kind(source)
+                    .map_or(self.budget, |kind| self.budget_for(kind));
                 let streak = self.consecutive_failures.entry(source).or_default();
                 *streak += 1;
-                *streak <= self.budget
+                *streak <= budget
             })
             .collect()
     }

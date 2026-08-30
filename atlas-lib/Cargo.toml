@@ -12,6 +12,7 @@ readme = "README.md"
 
 [dependencies]
 aws-config = "1.0"
+aws-credential-types = "1"
 aws-sdk-apigateway = "1.0"
 aws-sdk-cloudfront = "1.0"
 aws-sdk-config = "1.0"

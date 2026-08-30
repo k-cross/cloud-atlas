@@ -797,7 +797,12 @@ mod tests {
 
     fn unreadable(source: CollectionSource) -> crate::atlas::collection::CollectionReport {
         let mut report = crate::atlas::collection::CollectionReport::default();
-        report.record(source, "scope", "unreachable");
+        report.record(
+            source,
+            crate::atlas::collection::FailureKind::Unavailable,
+            "scope",
+            "unreachable",
+        );
         report
     }
 

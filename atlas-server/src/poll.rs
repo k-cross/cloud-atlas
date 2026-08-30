@@ -4,7 +4,7 @@
 //! streams, flow logs) plug in on top of this later.
 
 use crate::state::AppState;
-use atlas_lib::atlas::collection::{CollectionReport, CollectionSource};
+use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::graph_builder::GraphBuilder;
@@ -84,16 +84,21 @@ pub async fn run(state: AppState, source: Source, interval: Duration, retention:
         let held = retention.hold(&report);
 
         if !report.is_complete() {
+            // `held` rather than "holding": a scan can be incomplete without
+            // anything being held, when every failure was a malformed record
+            // in a response we did read.
             tracing::warn!(
                 tick,
                 failures = report.failures.len(),
-                "collection incomplete, holding unconfirmed resources: {}",
+                held = held.len(),
+                "collection incomplete: {}",
                 report.summary()
             );
             for released in report.unreadable_sources().difference(&held) {
                 tracing::warn!(
                     tick,
                     source = %released,
+                    kind = %report.unreadable_kind(*released).unwrap_or(FailureKind::Unavailable),
                     scans = retention.streak(*released),
                     "source unreadable for too many consecutive scans; releasing its \
                      unconfirmed resources to the differ",
@@ -134,7 +139,7 @@ pub async fn run(state: AppState, source: Source, interval: Duration, retention:
 mod tests {
     use super::*;
 
-    use atlas_lib::atlas::collection::{CollectionReport, CollectionSource};
+    use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 
     fn without_kind(graph: &Graph<Node, Edge>, kind: &str) -> GraphBuilder {
         let mut trimmed = graph.clone();
@@ -155,8 +160,132 @@ mod tests {
 
     fn aws_throttled() -> CollectionReport {
         let mut report = CollectionReport::default();
-        report.record(CollectionSource::Aws, "us-east-1/ec2", "throttled");
+        report.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/ec2",
+            "throttled",
+        );
         report
+    }
+
+    fn aws_refused() -> CollectionReport {
+        let mut report = CollectionReport::default();
+        report.record(
+            CollectionSource::Aws,
+            FailureKind::Unauthorized,
+            "us-east-1/credentials",
+            "the security token included in the request is expired",
+        );
+        report
+    }
+
+    /// A row ARG returned that would not deserialize. The query itself
+    /// succeeded, so Azure was read.
+    fn azure_drifted_row() -> CollectionReport {
+        let mut report = CollectionReport::default();
+        report.note(
+            CollectionSource::Azure,
+            FailureKind::Malformed,
+            "resource_graph/row /subscriptions/s/vm-1",
+            "unknown variant",
+        );
+        report
+    }
+
+    /// The failure that is *not* a read failure. ARG answers for the entire
+    /// tenant in one response, so treating an unmappable row as an unreadable
+    /// source froze deletions across every Azure resource for the whole
+    /// retention budget — because one resource drifted from its model.
+    #[test]
+    fn a_malformed_row_does_not_suspend_removals() {
+        let live = demo_graph(1).graph;
+        let report = azure_drifted_row();
+
+        assert!(
+            !report.is_complete(),
+            "the row was still lost and must be reported"
+        );
+        assert!(
+            report.unreadable_sources().is_empty(),
+            "a row that would not map does not make the source unreadable"
+        );
+
+        let mut retention = Retention::default();
+        let held = retention.hold(&report);
+        assert!(held.is_empty(), "nothing to hold: Azure was read");
+
+        let dropped = "AzureVirtualMachine";
+        let mut next = without_kind(&live, dropped);
+        assert!(
+            next.graph.node_count() < live.node_count(),
+            "fixture must contain the kind this test drops"
+        );
+
+        let patch = reconcile(&live, &mut next, &held);
+        assert!(
+            !patch.removed_nodes.is_empty(),
+            "a scan that was read stays authoritative about what is gone"
+        );
+    }
+
+    /// Waiting out a throttle is sensible; waiting out a rejected credential
+    /// just claims resources nobody can verify, since polling will not fix it.
+    #[test]
+    fn an_unauthorized_source_is_released_sooner_than_an_unavailable_one() {
+        let budget = Retention::DEFAULT_BUDGET;
+        assert!(Retention::AUTH_BUDGET < budget);
+
+        let mut throttled = Retention::new(budget);
+        for scan in 1..=budget {
+            assert!(
+                !throttled.hold(&aws_throttled()).is_empty(),
+                "scan {scan} is within the outage budget"
+            );
+        }
+        assert!(throttled.hold(&aws_throttled()).is_empty());
+
+        let mut refused = Retention::new(budget);
+        for scan in 1..=Retention::AUTH_BUDGET {
+            assert!(
+                !refused.hold(&aws_refused()).is_empty(),
+                "scan {scan} is within the auth budget"
+            );
+        }
+        assert!(
+            refused.hold(&aws_refused()).is_empty(),
+            "a credential failure must not pin the provider for the full outage budget"
+        );
+    }
+
+    /// Releasing early is only safe when the diagnosis is unambiguous. One
+    /// region forbidden while another is merely throttled may still recover.
+    #[test]
+    fn mixed_evidence_keeps_the_longer_budget() {
+        let mut report = aws_refused();
+        report.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-west-2/ec2",
+            "throttled",
+        );
+
+        let mut retention = Retention::new(Retention::DEFAULT_BUDGET);
+        for scan in 1..=Retention::AUTH_BUDGET + 1 {
+            assert!(
+                !retention.hold(&report).is_empty(),
+                "scan {scan}: mixed evidence must not spend the short auth budget"
+            );
+        }
+    }
+
+    /// `--retain-scans 0` means retain nothing. An auth failure is not an
+    /// exception that quietly lengthens it.
+    #[test]
+    fn a_zero_budget_holds_nothing_regardless_of_kind() {
+        let mut retention = Retention::new(0);
+        assert!(retention.hold(&aws_refused()).is_empty());
+        assert!(retention.hold(&aws_throttled()).is_empty());
     }
 
     #[test]
@@ -257,7 +386,12 @@ mod tests {
         assert!(clean.is_complete());
 
         let mut partial = CollectionReport::default();
-        partial.record(CollectionSource::Aws, "us-east-1/dynamodb", "throttled");
+        partial.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/dynamodb",
+            "throttled",
+        );
         assert!(!partial.is_complete());
         assert!(partial.summary().contains("AWS"));
         assert!(partial.summary().contains("us-east-1/dynamodb"));

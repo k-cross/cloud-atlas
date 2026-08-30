@@ -1,5 +1,5 @@
 use crate::Settings;
-use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::amazon::{
     api_gateway, cloudfront, container_service, dynamodb, eks, eventbridge, instance, lambda,
     load_balancer, networking, rds, resource, route53, security_group, sns, sqs,
@@ -30,6 +30,21 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
     for r in opts.regions.clone() {
         futures.push(async move {
             let config = super::load_config(&r).await;
+
+            // Fail the region as a whole rather than sixteen times over: with
+            // no usable credentials every collector below would fail for the
+            // same reason, and boxed, so none of them could say it was a
+            // permissions problem.
+            if let Err(e) = super::resolve_credentials(&config).await {
+                let mut report = CollectionReport::default();
+                report.record(
+                    SOURCE,
+                    FailureKind::Unauthorized,
+                    format!("{r}/credentials"),
+                    e,
+                );
+                return (Vec::new(), report);
+            }
 
             let collectors: Vec<NamedCollector<'_, AmazonCollection>> = collectors![
                 "ecs" => AmazonCollection::AmazonClusters, container_service::collector::runner(&config),

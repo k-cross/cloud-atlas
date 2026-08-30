@@ -1,7 +1,7 @@
 use crate::Settings;
 use crate::api::azure::client::AzureApiClient;
 use crate::api::azure::models::*;
-use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::definition::{MicrosoftCollection, Provider};
 use serde::Deserialize;
 
@@ -15,14 +15,31 @@ const MAX_REPORTED_ROWS: usize = 5;
 pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
     let mut report = CollectionReport::default();
 
-    let collections = match query_tenant(opts).await {
+    // Building the credential is kept separate from querying with it, so the
+    // two failures can be told apart: a missing `az login` will not resolve on
+    // a timer, while a refused ARG query might.
+    let client = match AzureApiClient::new().await {
+        Ok(client) => client,
+        Err(e) => {
+            report.record(SOURCE, FailureKind::Unauthorized, "credentials", e);
+            return ProviderScan {
+                provider: Provider::Azure(Vec::new()),
+                report,
+            };
+        }
+    };
+
+    // An empty subscription list makes ARG query the entire tenant.
+    let subscriptions = opts.azure_subscriptions.clone().unwrap_or_default();
+
+    let collections = match client.query_graph(&arg_query(), &subscriptions).await {
         Ok(rows) => {
             let (collections, mapping) = map_resources(rows);
             report.merge(mapping);
             collections
         }
         Err(e) => {
-            report.record(SOURCE, "resource_graph", e);
+            report.record(SOURCE, FailureKind::Unavailable, "resource_graph", e);
             Vec::new()
         }
     };
@@ -93,17 +110,6 @@ fn arg_query() -> String {
         | where type in~ ({types})
         | project id, name, type, location, kind, properties"
     )
-}
-
-async fn query_tenant(
-    opts: &Settings,
-) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
-    let client = AzureApiClient::new().await?;
-
-    // An empty subscription list makes ARG query the entire tenant.
-    let subscriptions = opts.azure_subscriptions.clone().unwrap_or_default();
-
-    client.query_graph(&arg_query(), &subscriptions).await
 }
 
 /// Map raw Azure Resource Graph rows into the typed collections the projector
@@ -306,15 +312,25 @@ pub fn map_resources(
         MicrosoftCollection::AzureCdnProfiles(cdns),
     ];
 
+    // `Malformed`, not a read failure: the query succeeded and every other row
+    // in it is authoritative. Reporting these as unreadable would suspend
+    // deletions across the entire tenant — ARG answers for all of Azure in one
+    // response — because one resource drifted from its model.
     let mut report = CollectionReport::default();
     for (id, error) in unmapped.iter().take(MAX_REPORTED_ROWS) {
-        report.note(SOURCE, format!("resource_graph/row {id}"), error.clone());
+        report.note(
+            SOURCE,
+            FailureKind::Malformed,
+            format!("resource_graph/row {id}"),
+            error.clone(),
+        );
     }
     if let Some(remaining) = unmapped.len().checked_sub(MAX_REPORTED_ROWS)
         && remaining > 0
     {
         report.note(
             SOURCE,
+            FailureKind::Malformed,
             "resource_graph/rows",
             format!("{remaining} further rows could not be mapped"),
         );

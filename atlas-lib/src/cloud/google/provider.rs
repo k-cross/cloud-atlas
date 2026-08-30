@@ -1,7 +1,7 @@
 use crate::Settings;
 use crate::api::google::client::GoogleApiClient;
 use crate::api::google::{compute, compute_network, dns, functions, gke, sql};
-use crate::atlas::collection::{CollectionReport, CollectionSource, ProviderScan};
+use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::collector::{NamedCollector, run_all};
 use crate::cloud::definition::{GoogleCollection, Provider};
 use yup_oauth2::ApplicationSecret;
@@ -39,7 +39,9 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
     let client = match authenticate().await {
         Ok(client) => client,
         Err(e) => {
-            report.record(SOURCE, "auth", e);
+            // The OAuth2 flow itself failed, so nothing downstream can be read
+            // and no timer will fix it.
+            report.record(SOURCE, FailureKind::Unauthorized, "auth", e);
             return ProviderScan {
                 provider: Provider::GCP(services),
                 report,
