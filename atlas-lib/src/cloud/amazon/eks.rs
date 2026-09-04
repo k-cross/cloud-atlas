@@ -19,8 +19,8 @@ pub mod collector {
             let resp = req.send().await?;
             for name in resp.clusters() {
                 let cluster_resp = client.describe_cluster().name(name).send().await?;
-                if let Some(cluster) = cluster_resp.cluster() {
-                    clusters.push(cluster.clone());
+                if let Some(cluster) = cluster_resp.cluster {
+                    clusters.push(cluster);
                 }
             }
 

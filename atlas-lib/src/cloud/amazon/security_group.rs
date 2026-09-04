@@ -16,10 +16,9 @@ pub mod collector {
                 req = req.next_token(token);
             }
 
-            let resp = req.send().await?;
-            groups.extend(resp.security_groups().to_vec());
-
-            next_token = resp.next_token().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            next_token = resp.next_token.take();
+            groups.extend(resp.security_groups.take().unwrap_or_default());
             if next_token.is_none() {
                 break;
             }

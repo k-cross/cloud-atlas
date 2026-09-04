@@ -18,9 +18,9 @@ pub mod collector {
             if let Some(token) = &next_token {
                 req = req.next_token(token);
             }
-            let resp = req.send().await?;
-            route_tables.extend(resp.route_tables().to_vec());
-            next_token = resp.next_token().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            next_token = resp.next_token.take();
+            route_tables.extend(resp.route_tables.take().unwrap_or_default());
             if next_token.is_none() {
                 break;
             }
@@ -33,9 +33,9 @@ pub mod collector {
             if let Some(token) = &next_token {
                 req = req.next_token(token);
             }
-            let resp = req.send().await?;
-            internet_gateways.extend(resp.internet_gateways().to_vec());
-            next_token = resp.next_token().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            next_token = resp.next_token.take();
+            internet_gateways.extend(resp.internet_gateways.take().unwrap_or_default());
             if next_token.is_none() {
                 break;
             }
@@ -48,9 +48,9 @@ pub mod collector {
             if let Some(token) = &next_token {
                 req = req.next_token(token);
             }
-            let resp = req.send().await?;
-            nat_gateways.extend(resp.nat_gateways().to_vec());
-            next_token = resp.next_token().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            next_token = resp.next_token.take();
+            nat_gateways.extend(resp.nat_gateways.take().unwrap_or_default());
             if next_token.is_none() {
                 break;
             }
@@ -58,7 +58,7 @@ pub mod collector {
 
         // DescribeAddresses is not paginated.
         let resp = client.describe_addresses().send().await?;
-        let addresses = resp.addresses().to_vec();
+        let addresses = resp.addresses.unwrap_or_default();
 
         Ok(AWSNetworking {
             route_tables,

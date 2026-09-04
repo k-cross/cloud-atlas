@@ -50,26 +50,26 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
     };
 
     let mut futures = Vec::new();
-    for p in opts.gcp_projects.clone().unwrap_or_default() {
-        let c = client.clone();
+    for p in opts.gcp_projects.as_deref().unwrap_or_default() {
+        let c = &client;
         futures.push(async move {
             let collectors: Vec<NamedCollector<'_, GoogleCollection>> = collectors![
-                "compute_instances" => GoogleCollection::GoogleInstances, compute::list_instances(&c, &p),
-                "firewalls" => GoogleCollection::GoogleFirewalls, compute::list_firewalls(&c, &p),
-                "sql" => GoogleCollection::GoogleSql, sql::list_instances(&c, &p),
-                "dns" => GoogleCollection::GoogleDns, dns::list_managed_zones(&c, &p),
-                "gke" => GoogleCollection::GoogleGke, gke::list_clusters(&c, &p),
-                "functions" => GoogleCollection::GoogleFunctions, functions::list_functions(&c, &p),
-                "storage" => GoogleCollection::GoogleStorageBuckets, c.list_buckets(&p),
-                "pubsub_topics" => GoogleCollection::GooglePubSubTopics, c.list_topics(&p),
-                "pubsub_subscriptions" => GoogleCollection::GooglePubSubSubscriptions, c.list_subscriptions(&p),
-                "run" => GoogleCollection::GoogleRunServices, c.list_run_services(&p),
-                "networks" => GoogleCollection::GoogleNetworks, compute_network::list_networks(&c, &p),
-                "subnetworks" => GoogleCollection::GoogleSubnetworks, compute_network::list_subnetworks(&c, &p),
-                "forwarding_rules" => GoogleCollection::GoogleForwardingRules, compute_network::list_forwarding_rules(&c, &p),
+                "compute_instances" => GoogleCollection::GoogleInstances, compute::list_instances(c, p),
+                "firewalls" => GoogleCollection::GoogleFirewalls, compute::list_firewalls(c, p),
+                "sql" => GoogleCollection::GoogleSql, sql::list_instances(c, p),
+                "dns" => GoogleCollection::GoogleDns, dns::list_managed_zones(c, p),
+                "gke" => GoogleCollection::GoogleGke, gke::list_clusters(c, p),
+                "functions" => GoogleCollection::GoogleFunctions, functions::list_functions(c, p),
+                "storage" => GoogleCollection::GoogleStorageBuckets, c.list_buckets(p),
+                "pubsub_topics" => GoogleCollection::GooglePubSubTopics, c.list_topics(p),
+                "pubsub_subscriptions" => GoogleCollection::GooglePubSubSubscriptions, c.list_subscriptions(p),
+                "run" => GoogleCollection::GoogleRunServices, c.list_run_services(p),
+                "networks" => GoogleCollection::GoogleNetworks, compute_network::list_networks(c, p),
+                "subnetworks" => GoogleCollection::GoogleSubnetworks, compute_network::list_subnetworks(c, p),
+                "forwarding_rules" => GoogleCollection::GoogleForwardingRules, compute_network::list_forwarding_rules(c, p),
             ];
 
-            let (collections, local_report) = run_all(collectors, SOURCE, &p).await;
+            let (collections, local_report) = run_all(collectors, SOURCE, p).await;
             let local_services: Vec<_> = collections
                 .into_iter()
                 .map(|collection| (p.to_owned(), collection))

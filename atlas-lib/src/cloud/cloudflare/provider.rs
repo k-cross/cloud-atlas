@@ -89,7 +89,7 @@ async fn collect(
     for zone in &data.zones {
         // Fetch account-level resources only once per account
         let account_id = &zone.account.id;
-        if !accounts_seen.insert(account_id.clone()) {
+        if !accounts_seen.insert(account_id.as_str()) {
             continue;
         }
         if verbose {

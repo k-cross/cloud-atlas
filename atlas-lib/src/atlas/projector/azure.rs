@@ -104,25 +104,22 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                                 && let Some(direction) = &rprops.direction
                                 && direction.eq_ignore_ascii_case("Outbound")
                             {
-                                let mut destinations = Vec::new();
-                                if let Some(dest) = &rprops.destination_address_prefix {
-                                    destinations.push(dest.clone());
-                                }
-                                if let Some(dests) = &rprops.destination_address_prefixes {
-                                    destinations.extend(dests.clone());
-                                }
+                                let destinations = rprops
+                                    .destination_address_prefix
+                                    .iter()
+                                    .chain(rprops.destination_address_prefixes.iter().flatten());
 
                                 for dest in destinations {
-                                    if is_service_tag(&dest) {
+                                    if is_service_tag(dest) {
                                         builder.link_to(
                                             idx,
-                                            Node::AzureServiceTag(dest.into()),
+                                            Node::AzureServiceTag(dest.as_str().into()),
                                             Edge::RoutesTo,
                                         );
-                                    } else if !is_large_cidr(&dest) {
+                                    } else if !is_large_cidr(dest) {
                                         builder.link_to(
                                             idx,
-                                            Node::GenericIpAddress(dest.into()),
+                                            Node::GenericIpAddress(dest.as_str().into()),
                                             Edge::RoutesTo,
                                         );
                                     }

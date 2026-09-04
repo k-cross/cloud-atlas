@@ -27,9 +27,9 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
 
     let mut futures = Vec::new();
 
-    for r in opts.regions.clone() {
+    for r in &opts.regions {
         futures.push(async move {
-            let config = super::load_config(&r).await;
+            let config = super::load_config(r).await;
 
             // Fail the region as a whole rather than sixteen times over: with
             // no usable credentials every collector below would fail for the
@@ -65,7 +65,7 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
                 "networking" => AmazonCollection::AmazonNetworking, networking::collector::runner(&config),
             ];
 
-            let (collections, local_report) = run_all(collectors, SOURCE, &r).await;
+            let (collections, local_report) = run_all(collectors, SOURCE, r).await;
             let local_services: Vec<_> = collections
                 .into_iter()
                 .map(|collection| (r.to_owned(), collection))

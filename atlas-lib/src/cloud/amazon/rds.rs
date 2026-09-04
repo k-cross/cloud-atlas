@@ -16,10 +16,9 @@ pub mod collector {
                 req = req.marker(m);
             }
 
-            let resp = req.send().await?;
-            dbs.extend(resp.db_instances().to_vec());
-
-            marker = resp.marker().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            marker = resp.marker.take();
+            dbs.extend(resp.db_instances.take().unwrap_or_default());
             if marker.is_none() {
                 break;
             }

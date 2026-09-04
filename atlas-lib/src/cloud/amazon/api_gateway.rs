@@ -16,10 +16,9 @@ pub mod collector {
                 req = req.position(pos);
             }
 
-            let resp = req.send().await?;
-            apis.extend(resp.items().to_vec());
-
-            position = resp.position().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            position = resp.position.take();
+            apis.extend(resp.items.take().unwrap_or_default());
             if position.is_none() {
                 break;
             }

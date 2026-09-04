@@ -11,7 +11,7 @@ pub mod collector {
         let mut record_sets = Vec::new();
 
         let hz_resp = client.list_hosted_zones().send().await?;
-        hosted_zones.extend(hz_resp.hosted_zones().to_owned());
+        hosted_zones.extend(hz_resp.hosted_zones);
 
         for zone in &hosted_zones {
             // Route53 zone IDs come with a /hostedzone/ prefix which we can just pass along
@@ -29,12 +29,12 @@ pub mod collector {
                     req = req.start_record_type(t.clone());
                 }
 
-                let rr_resp = req.send().await?;
-                record_sets.extend(rr_resp.resource_record_sets().to_owned());
+                let mut rr_resp = req.send().await?;
 
                 is_truncated = rr_resp.is_truncated();
-                next_record_name = rr_resp.next_record_name().map(|s| s.to_owned());
-                next_record_type = rr_resp.next_record_type().cloned();
+                next_record_name = rr_resp.next_record_name.take();
+                next_record_type = rr_resp.next_record_type.take();
+                record_sets.extend(rr_resp.resource_record_sets);
             }
         }
 

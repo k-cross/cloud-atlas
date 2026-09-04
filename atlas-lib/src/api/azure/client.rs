@@ -1,6 +1,5 @@
 use azure_core::credentials::TokenCredential;
 use azure_identity::AzureCliCredential;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
 #[derive(Clone)]
@@ -52,14 +51,7 @@ impl AzureApiClient {
         let url =
             format!("{base}/providers/Microsoft.ResourceGraph/resources?api-version=2021-03-01");
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", self.token))?,
-        );
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        let body = serde_json::json!({
+        let mut current_body = serde_json::json!({
             "subscriptions": subscriptions,
             "query": query,
             "options": {
@@ -70,16 +62,16 @@ impl AzureApiClient {
 
         // Loop for pagination if needed
         let mut all_results = Vec::new();
-        let mut current_body = body.clone();
         let mut expected_total: Option<u64> = None;
 
         loop {
-            let req = self
+            let res = self
                 .client
                 .post(&url)
-                .headers(headers.clone())
-                .json(&current_body);
-            let res = req.send().await?;
+                .bearer_auth(&self.token)
+                .json(&current_body)
+                .send()
+                .await?;
 
             let status = res.status();
             let text = res.text().await?;
@@ -111,10 +103,10 @@ impl AzureApiClient {
             }
 
             // Pagination handling for ARG
-            if let Some(skip_token) = parsed.get("$skipToken")
+            if let Some(skip_token) = parsed.get_mut("$skipToken")
                 && !skip_token.is_null()
             {
-                current_body["options"]["$skipToken"] = skip_token.clone();
+                current_body["options"]["$skipToken"] = skip_token.take();
                 continue;
             }
 

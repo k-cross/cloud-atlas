@@ -16,12 +16,15 @@ pub mod collector {
                 req = req.next_token(token);
             }
 
-            let resp = req.send().await?;
-            for q in resp.queue_urls() {
-                queues.push(QueueUrl(q.to_string()));
-            }
-
-            next_token = resp.next_token().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            next_token = resp.next_token.take();
+            queues.extend(
+                resp.queue_urls
+                    .take()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(QueueUrl),
+            );
             if next_token.is_none() {
                 break;
             }

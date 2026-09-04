@@ -10,7 +10,7 @@ pub mod collector {
 
         // Fetch Load Balancers
         let lbs_resp = client.describe_load_balancers().send().await?;
-        let load_balancers = lbs_resp.load_balancers().to_owned();
+        let load_balancers = lbs_resp.load_balancers.unwrap_or_default();
 
         // Fetch Listeners for each Load Balancer
         let mut listeners = Vec::new();
@@ -21,13 +21,13 @@ pub mod collector {
                     .load_balancer_arn(arn)
                     .send()
                     .await?;
-                listeners.extend(listeners_resp.listeners().to_owned());
+                listeners.extend(listeners_resp.listeners.unwrap_or_default());
             }
         }
 
         // Fetch Target Groups
         let tg_resp = client.describe_target_groups().send().await?;
-        let target_groups = tg_resp.target_groups().to_owned();
+        let target_groups = tg_resp.target_groups.unwrap_or_default();
 
         // Fetch Target Health for each Target Group
         let mut target_health = HashMap::new();
@@ -40,7 +40,7 @@ pub mod collector {
                     .await?;
                 target_health.insert(
                     arn.to_owned(),
-                    health_resp.target_health_descriptions().to_owned(),
+                    health_resp.target_health_descriptions.unwrap_or_default(),
                 );
             }
         }

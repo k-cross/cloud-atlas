@@ -7,6 +7,6 @@ pub mod collector {
     ) -> Result<Vec<FunctionConfiguration>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
         let resp = client.list_functions().send().await?;
-        Ok(resp.functions().to_owned())
+        Ok(resp.functions.unwrap_or_default())
     }
 }

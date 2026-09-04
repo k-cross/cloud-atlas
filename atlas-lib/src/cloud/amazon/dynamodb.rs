@@ -16,12 +16,15 @@ pub mod collector {
                 req = req.exclusive_start_table_name(eval);
             }
 
-            let resp = req.send().await?;
-            for t in resp.table_names() {
-                tables.push(TableName(t.to_string()));
-            }
-
-            last_eval = resp.last_evaluated_table_name().map(|s| s.to_string());
+            let mut resp = req.send().await?;
+            last_eval = resp.last_evaluated_table_name.take();
+            tables.extend(
+                resp.table_names
+                    .take()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(TableName),
+            );
             if last_eval.is_none() {
                 break;
             }

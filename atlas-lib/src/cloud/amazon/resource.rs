@@ -26,11 +26,10 @@ pub mod collector {
         let mut results = requests.buffer_unordered(10);
 
         while let Some((value, resp_result)) = results.next().await {
-            let resp = resp_result?;
-            let resources = resp.resource_identifiers();
+            let resources = resp_result?.resource_identifiers.unwrap_or_default();
 
             if !resources.is_empty() {
-                r_map.insert(value.to_string(), resources.to_owned());
+                r_map.insert(value.to_string(), resources);
             }
         }
 

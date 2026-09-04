@@ -10,15 +10,13 @@ pub mod collector {
             .set_values(Some(vec!["running".to_owned(), "pending".to_owned()]))
             .build();
         let resp = client.describe_instances().filters(filter).send().await?;
-        let mut running_insts = Vec::new();
 
-        for reservation in resp.reservations() {
-            for instance in reservation.instances() {
-                running_insts.push(instance.to_owned());
-            }
-        }
-
-        Ok(running_insts)
+        Ok(resp
+            .reservations
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|reservation| reservation.instances.unwrap_or_default())
+            .collect())
     }
 
     pub async fn runner(

@@ -33,7 +33,7 @@ pub struct DevOpts {
 /// never silent.
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub fn dev(opts: DevOpts) -> Result<(), String> {
+pub fn dev(mut opts: DevOpts) -> Result<(), String> {
     let root = repo_root();
 
     if !opts.skip_wasm {
@@ -60,15 +60,15 @@ pub fn dev(opts: DevOpts) -> Result<(), String> {
     } else {
         if !opts.regions.is_empty() {
             server_args.push("--regions".into());
-            server_args.extend(opts.regions.iter().cloned());
+            server_args.append(&mut opts.regions);
         }
         if !opts.gcp_projects.is_empty() {
             server_args.push("--gcp-projects".into());
-            server_args.extend(opts.gcp_projects.iter().cloned());
+            server_args.append(&mut opts.gcp_projects);
         }
         if !opts.azure_subscriptions.is_empty() {
             server_args.push("--azure-subscriptions".into());
-            server_args.extend(opts.azure_subscriptions.iter().cloned());
+            server_args.append(&mut opts.azure_subscriptions);
         }
         if opts.cloudflare {
             server_args.push("--cloudflare".into());

@@ -30,9 +30,9 @@ pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
     };
 
     // An empty subscription list makes ARG query the entire tenant.
-    let subscriptions = opts.azure_subscriptions.clone().unwrap_or_default();
+    let subscriptions = opts.azure_subscriptions.as_deref().unwrap_or_default();
 
-    let collections = match client.query_graph(&arg_query(), &subscriptions).await {
+    let collections = match client.query_graph(&arg_query(), subscriptions).await {
         Ok(rows) => {
             let (collections, mapping) = map_resources(rows);
             report.merge(mapping);
@@ -74,8 +74,10 @@ macro_rules! azure_types {
             /// ARG reports `type` in the casing the provider registered it
             /// with, so rows are matched case-insensitively against the table.
             fn parse(raw: &str) -> Option<Self> {
-                let lowered = raw.to_lowercase();
-                Self::ALL.iter().copied().find(|t| t.arg_type() == lowered)
+                Self::ALL
+                    .iter()
+                    .copied()
+                    .find(|t| t.arg_type().eq_ignore_ascii_case(raw))
             }
         }
     };
@@ -236,12 +238,7 @@ pub fn map_resources(
                 });
             }
             AzureType::NetworkSecurityGroups => {
-                let mut properties = None;
-                if let Some(props_val) = &res.properties
-                    && let Ok(p) = serde_json::from_value(props_val.clone())
-                {
-                    properties = Some(p);
-                }
+                let properties = res.properties.as_ref().and_then(properties_of);
                 nsgs.push(NetworkSecurityGroup {
                     id: res.id,
                     name: res.name,
@@ -270,12 +267,7 @@ pub fn map_resources(
                 if kind.contains("functionapp") {
                     leaf!(funcs, FunctionApp, res);
                 } else {
-                    let mut properties = None;
-                    if let Some(props_val) = &res.properties
-                        && let Ok(p) = serde_json::from_value(props_val.clone())
-                    {
-                        properties = Some(p);
-                    }
+                    let properties = res.properties.as_ref().and_then(properties_of);
                     apps.push(AppService {
                         id: res.id,
                         name: res.name,
@@ -317,17 +309,16 @@ pub fn map_resources(
     // deletions across the entire tenant — ARG answers for all of Azure in one
     // response — because one resource drifted from its model.
     let mut report = CollectionReport::default();
-    for (id, error) in unmapped.iter().take(MAX_REPORTED_ROWS) {
+    let remaining = unmapped.len().saturating_sub(MAX_REPORTED_ROWS);
+    for (id, error) in unmapped.into_iter().take(MAX_REPORTED_ROWS) {
         report.note(
             SOURCE,
             FailureKind::Malformed,
             format!("resource_graph/row {id}"),
-            error.clone(),
+            error,
         );
     }
-    if let Some(remaining) = unmapped.len().checked_sub(MAX_REPORTED_ROWS)
-        && remaining > 0
-    {
+    if remaining > 0 {
         report.note(
             SOURCE,
             FailureKind::Malformed,
@@ -337,6 +328,12 @@ pub fn map_resources(
     }
 
     (collections, report)
+}
+
+/// Deserialize a typed `properties` block out of the raw ARG row, borrowing it
+/// rather than cloning the whole JSON subtree.
+fn properties_of<T: serde::de::DeserializeOwned>(props: &serde_json::Value) -> Option<T> {
+    T::deserialize(props).ok()
 }
 
 #[cfg(test)]
