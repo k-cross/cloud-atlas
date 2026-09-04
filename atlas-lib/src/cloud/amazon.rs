@@ -4,6 +4,7 @@ pub mod container_service;
 pub mod dynamodb;
 pub mod eks;
 pub mod eventbridge;
+pub mod events;
 pub mod instance;
 pub mod lambda;
 pub mod load_balancer;

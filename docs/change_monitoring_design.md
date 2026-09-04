@@ -249,10 +249,49 @@ pushes deltas. This is the server the user asked about.
 |---|---|---|---|
 | **1** | Incremental graph | Persistent graph + differ; daemon emits change sets instead of wiping. Unlocks everything else with zero new cloud deps. | **Done** — `atlas-lib/src/atlas/patch.rs` (`GraphPatch` + `diff`, keyed on stable `node_key`/`edge_key`); `AtlasEngine::collect` decouples collection from the wipe-and-export CLI path. |
 | **2** | Live backend skeleton | Graph Actor + WS hub; frontend consumes snapshot-then-patches. Still driven by Tier 3 polling under the hood. | **Done** — `atlas-server/` (single-writer graph behind `RwLock` + `broadcast`, `poll.rs` Tier-3 reconciliation, bidirectional WebSocket `snapshot`/`patch`/`get_neighbors`); `atlas-web` applies patches live. `--demo` exercises the whole path credential-free. |
-| **3** | One real event stream | Wire AWS EventBridge/Config as the first Tier 1 adapter end-to-end; prove the normalized `ChangeEvent` path. | Next |
+| **3** | One real event stream | Wire AWS EventBridge/Config as the first Tier 1 adapter end-to-end; prove the normalized `ChangeEvent` path. | **Done** — `atlas-lib/src/atlas/event.rs` (`ChangeEvent` + `EventApplier`, last-writer-wins on the cloud's own record time); `cloud/amazon/events.rs` (Config configuration items, EC2 state changes, CloudTrail management events → `ChangeEvent`, over an SQS-backed `EventQueue`); `atlas-server/src/stream.rs` + the two-tier `select!` in `poll.rs`. `--aws-event-queue <url>` turns it on. |
 | **4** | Flow-log liveness | Tier 2 consumer for VPC Flow Logs → `Edge::TrafficFlow` + node freshness → drives the Phase 3 health overlay in the rendering design. | Planned |
 | **5** | Remaining clouds | GCP asset feeds, Azure Event Grid; Cloudflare stays on fast poll. Reconciliation tuned per cloud. | Planned |
 
+> **Tier 1 as built (Phase 3).** EventBridge is the one delivery path and an
+> SQS queue is the one consumer, because the server is long-lived and
+> restartable: a queue buffers across a restart, and its at-least-once
+> redelivery is what `EventApplier` is designed to tolerate. Three producers are
+> read off it — AWS Config configuration items (rich enough to project a create
+> with its VPC/subnet/security groups attached), EC2 instance state changes
+> (free and near-instant, identity only), and CloudTrail management events (the
+> broadest coverage, a curated set of mutating calls). Four decisions are
+> load-bearing:
+>
+> - **An adapter may only produce what the full-scan projector produces.** Tier
+>   3 diffs the whole graph, so an edge invented by an adapter is deleted at the
+>   next reconciliation and re-added by the next event, forever. EC2 instances
+>   therefore go through the projector's own `project_instance` (shared with the
+>   SDK path via `InstanceFacts`), the Config catch-all node reuses the scan's
+>   own `use_aws_resource` filter, and resource types the graph keys differently
+>   from Config — ENIs (keyed by instance), Route 53 hosted zones (`/hostedzone/`
+>   prefix), SQS queues (keyed by URL) — are deliberately left unmapped. A test
+>   asserts the event path's subgraph is contained in the full scan's.
+> - **Events add; only Tier 3 garbage-collects.** An event speaks for one
+>   resource, so a create/modify never removes an edge it failed to mention and a
+>   delete removes only the node it named. That asymmetry is what makes a lossy,
+>   unordered feed safe to apply at all.
+> - **Ordering is last-writer-wins on the cloud's record time**, per resource, so
+>   a redelivered create cannot resurrect what a later delete removed. Delivery
+>   time is deliberately not used as a fallback: it would assert an ordering the
+>   feed does not promise.
+> - **Stream health is reported separately from scan health**
+>   (`/collection.json`'s `stream` key). A dead feed makes the graph *slow*, not
+>   *wrong* — Tier 3 still reads the provider end to end — so it must never enter
+>   `unreadable_sources()` and suspend removals. Likewise a message that cannot
+>   be parsed is `Malformed`, never a read failure.
+>
+> The two tiers race, and the resolution is documented rather than hidden: a
+> reconciliation installs the estate as of when the scan *started*, so a
+> resource an event created mid-scan is removed by that tick and re-added by the
+> next. Clients are never inconsistent, only briefly behind; closing it needs
+> per-node provenance the graph does not carry.
+>
 > **Implemented shape vs. this doc:** the live server uses a single-writer
 > `RwLock`-guarded graph + `tokio::sync::broadcast` (not a literal actor/mpsc)
 > and **WebSocket** (not SSE) — chosen so the client can pull specific data
@@ -267,9 +306,12 @@ pushes deltas. This is the server the user asked about.
   becomes noticeable? Likely per-cloud and per-resource-class.
 - **Cross-account/org onboarding** — event feeds need setup per account/project/
   subscription; how do we make enabling them turnkey for an operator?
-- **Ordering & idempotency** — events are at-least-once and can arrive out of
-  order; the Graph Actor must apply them idempotently (last-writer-wins per
-  resource version).
+- ~~**Ordering & idempotency**~~ — settled for Tier 1 in `atlas::event`:
+  idempotency falls out of `GraphBuilder`'s dedup, and ordering is
+  last-writer-wins per resource keyed on the cloud's own record time, with a
+  bounded ordering table so a long-running daemon does not accumulate one entry
+  per resource ever seen. Still open for *cross-tier* ordering — a scan cannot
+  currently tell that part of its result is older than an event already applied.
 - **Backpressure** — a large change burst (mass deploy, region event) must not
   stall the push hub; patches may need coalescing per client.
 - **State on restart** — the server is a live in-memory twin; on restart it

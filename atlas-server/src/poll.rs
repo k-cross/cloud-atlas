@@ -1,12 +1,33 @@
-//! Tier-3 reconciliation loop: periodically re-derive the whole graph, diff it
-//! against the live one, and broadcast the change set. This is the same
-//! full-scan we do today, minus the wipe — the incremental primary feeds (event
-//! streams, flow logs) plug in on top of this later.
+//! The graph's single writer, driving both live tiers.
+//!
+//! **Tier 3** is the reconciliation scan: periodically re-derive the whole
+//! graph, diff it against the live one, and broadcast the change set. It is
+//! authoritative — the only thing that can conclude a resource is gone because
+//! nothing mentioned it.
+//!
+//! **Tier 1** is the event feed (`stream::Source`): normalized `ChangeEvent`s
+//! applied the moment they arrive, seconds after the change instead of up to a
+//! poll interval later. It only ever says what it was told, so it can add a
+//! resource, and delete the one an event named, but never garbage-collect.
+//!
+//! Both run on *this* task, chosen by `select!`, which is what keeps mutation
+//! serialized (the graph-actor intent of `docs/change_monitoring_design.md` §7)
+//! without either tier taking a lock the other is waiting on.
+//!
+//! The two do race, and the resolution is deliberate: a reconciliation scan
+//! installs the estate as it looked when the scan *started*, so a resource
+//! created by an event mid-scan is removed by that tick's diff and re-added by
+//! the next one. Clients are never inconsistent — the patch always describes
+//! the graph that was installed — only briefly behind. Fixing it properly means
+//! replaying post-scan events over the scan result, which needs per-node
+//! provenance the graph does not carry yet.
 
 use crate::state::AppState;
+use crate::stream;
 use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
+use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
 use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff};
 use atlas_lib::fixtures;
@@ -71,68 +92,178 @@ fn reconcile(
     diff(live, &next.graph)
 }
 
-/// Run forever, reconciling every `interval`. Only non-empty diffs mutate the
-/// live graph or hit the broadcast channel.
-pub async fn run(state: AppState, source: Source, interval: Duration, retention: Retention) {
-    let mut retention = retention;
-    let mut tick: u64 = 0;
-    loop {
-        tokio::time::sleep(interval).await;
-        tick += 1;
-
-        let (mut next, report) = source.scan(tick).await;
-        let held = retention.hold(&report);
-
-        if !report.is_complete() {
-            // `held` rather than "holding": a scan can be incomplete without
-            // anything being held, when every failure was a malformed record
-            // in a response we did read.
-            tracing::warn!(
-                tick,
-                failures = report.failures.len(),
-                held = held.len(),
-                "collection incomplete: {}",
-                report.summary()
+/// Apply a batch of Tier-1 events to the live graph, folding what each one
+/// changed into a single patch.
+///
+/// One patch rather than one per event because a burst — a deploy, an
+/// autoscaling event — is one thing happening to the estate, and fanning it out
+/// as a hundred frames makes every connected client re-layout a hundred times.
+fn apply_events(
+    live: &mut GraphBuilder,
+    applier: &mut EventApplier,
+    events: &[ChangeEvent],
+) -> GraphPatch {
+    let mut patch = GraphPatch::empty();
+    for event in events {
+        let change = applier.apply(live, event);
+        if change.is_empty() {
+            // Routine: a redelivery, or a create we already have. Worth seeing
+            // at debug level, not worth a broadcast.
+            tracing::debug!(
+                event = %event.id,
+                op = %event.op,
+                node = %event.node,
+                "event told us nothing new",
             );
-            for released in report.unreadable_sources().difference(&held) {
-                tracing::warn!(
-                    tick,
-                    source = %released,
-                    kind = %report.unreadable_kind(*released).unwrap_or(FailureKind::Unavailable),
-                    scans = retention.streak(*released),
-                    "source unreadable for too many consecutive scans; releasing its \
-                     unconfirmed resources to the differ",
-                );
-            }
-        }
-
-        // Diff under the read lock — no full-graph clone, and the critical
-        // section is just the comparison. WebSocket readers share the lock.
-        let patch = {
-            let live = state.live.read().await;
-            reconcile(&live, &mut next, &held)
-        };
-
-        // Published even when the graph is unchanged: a provider going dark
-        // changes what the snapshot *means* without changing a single node.
-        *state.report.write().await = report;
-
-        if patch.is_empty() {
             continue;
         }
-
         tracing::info!(
-            tick,
-            added_nodes = patch.added_nodes.len(),
-            removed_nodes = patch.removed_nodes.len(),
-            added_edges = patch.added_edges.len(),
-            removed_edges = patch.removed_edges.len(),
-            "graph changed",
+            event = %event.id,
+            op = %event.op,
+            node = %event.node,
+            scope = %event.scope,
+            "applied change event",
         );
-        *state.live.write().await = next.graph;
-        // Err only means no subscribers are connected — nothing to do.
-        let _ = state.patches.send(patch);
+        patch.extend(change);
     }
+    patch
+}
+
+/// Broadcast a patch and log it. Returns nothing to do for an empty patch,
+/// which is the common case on both tiers.
+fn publish(state: &AppState, patch: GraphPatch, tier: &'static str) {
+    if patch.is_empty() {
+        return;
+    }
+    tracing::info!(
+        tier,
+        added_nodes = patch.added_nodes.len(),
+        removed_nodes = patch.removed_nodes.len(),
+        added_edges = patch.added_edges.len(),
+        removed_edges = patch.removed_edges.len(),
+        "graph changed",
+    );
+    // Err only means no subscribers are connected — nothing to do.
+    let _ = state.patches.send(patch);
+}
+
+/// Run forever: reconcile every `interval`, and apply events from `events` as
+/// they arrive. Only non-empty changes mutate the live graph or hit the
+/// broadcast channel.
+pub async fn run(
+    state: AppState,
+    source: Source,
+    events: stream::Source,
+    interval: Duration,
+    retention: Retention,
+) {
+    let mut retention = retention;
+    let mut applier = EventApplier::new();
+    let mut backoff = stream::Backoff::new();
+    let mut tick: u64 = 0;
+
+    if events.is_enabled() {
+        tracing::info!("tier-1 event feed enabled; reconciling every {interval:?}");
+    }
+
+    // `interval` fires immediately on its first tick; the graph was just
+    // collected at start-up, so skip that one and keep the original cadence of
+    // "sleep, then scan".
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    // Pinned outside the loop, and deliberately not recreated per iteration.
+    // A drain deletes the messages it processed before returning them, so a
+    // receive dropped in that window loses those events for good — SQS has
+    // already forgotten them. Holding one future across iterations means a
+    // reconciliation tick winning the `select!` merely stops polling the drain;
+    // it resumes untouched next time round.
+    let mut drain = Box::pin(events.next(backoff.delay()));
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                tick += 1;
+                reconcile_tick(&state, &source, &mut retention, tick).await;
+            }
+            batch = &mut drain => {
+                backoff.record(batch.report.is_complete());
+                ingest(&state, &mut applier, batch).await;
+                drain = Box::pin(events.next(backoff.delay()));
+            }
+        }
+    }
+}
+
+/// One Tier-3 pass: scan, decide what is held, diff, install, broadcast.
+async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Retention, tick: u64) {
+    let (mut next, report) = source.scan(tick).await;
+    let held = retention.hold(&report);
+
+    if !report.is_complete() {
+        // `held` rather than "holding": a scan can be incomplete without
+        // anything being held, when every failure was a malformed record
+        // in a response we did read.
+        tracing::warn!(
+            tick,
+            failures = report.failures.len(),
+            held = held.len(),
+            "collection incomplete: {}",
+            report.summary()
+        );
+        for released in report.unreadable_sources().difference(&held) {
+            tracing::warn!(
+                tick,
+                source = %released,
+                kind = %report.unreadable_kind(*released).unwrap_or(FailureKind::Unavailable),
+                scans = retention.streak(*released),
+                "source unreadable for too many consecutive scans; releasing its \
+                 unconfirmed resources to the differ",
+            );
+        }
+    }
+
+    // Diff under the read lock — no full-graph clone, and the critical
+    // section is just the comparison. WebSocket readers share the lock.
+    let patch = {
+        let live = state.live.read().await;
+        reconcile(&live.graph, &mut next, &held)
+    };
+
+    // Published even when the graph is unchanged: a provider going dark
+    // changes what the snapshot *means* without changing a single node.
+    *state.report.write().await = report;
+
+    if patch.is_empty() {
+        return;
+    }
+    *state.live.write().await = next;
+    publish(state, patch, "reconcile");
+}
+
+/// One Tier-1 batch: apply, broadcast, and publish the feed's own health.
+async fn ingest(state: &AppState, applier: &mut EventApplier, batch: stream::Batch) {
+    if !batch.report.is_complete() {
+        tracing::warn!(
+            failures = batch.report.failures.len(),
+            "event feed degraded: {}",
+            batch.report.summary()
+        );
+    }
+    // Kept apart from the scan report on purpose: a feed we cannot read makes
+    // the graph slow, not wrong, and must not suspend Tier-3 removals.
+    *state.stream_report.write().await = batch.report;
+
+    if batch.events.is_empty() {
+        return;
+    }
+
+    let patch = {
+        let mut live = state.live.write().await;
+        apply_events(&mut live, applier, &batch.events)
+    };
+    publish(state, patch, "event");
 }
 
 #[cfg(test)]
@@ -140,6 +271,27 @@ mod tests {
     use super::*;
 
     use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
+    use atlas_lib::atlas::event::ChangeOp;
+
+    const T0: i64 = 1_788_436_800_000;
+
+    fn change(op: ChangeOp, node: Node, at: i64) -> ChangeEvent {
+        ChangeEvent::new(CollectionSource::Aws, "us-east-1", "evt", at, op, node)
+    }
+
+    fn created(node: Node, at: i64) -> ChangeEvent {
+        let mut context = GraphBuilder::new();
+        context.get_or_add_node(node.clone());
+        change(ChangeOp::Created, node, at).with_context(context.graph)
+    }
+
+    fn some_fixture_instance(graph: &Graph<Node, Edge>) -> Node {
+        graph
+            .node_weights()
+            .find(|node| matches!(node, Node::AwsEc2Instance(_)))
+            .expect("the fixtures contain an EC2 instance")
+            .clone()
+    }
 
     fn without_kind(graph: &Graph<Node, Edge>, kind: &str) -> GraphBuilder {
         let mut trimmed = graph.clone();
@@ -415,5 +567,104 @@ mod tests {
         assert_eq!(removed.removed_nodes.len(), 2);
         assert_eq!(removed.removed_edges.len(), 1);
         assert!(removed.added_nodes.is_empty() && removed.added_edges.is_empty());
+    }
+
+    /// The point of Tier 1: a change reaches the graph without waiting for a
+    /// scan, and the patch says exactly what it did.
+    #[test]
+    fn an_event_batch_changes_the_graph_and_reports_what_it_changed() {
+        let mut live = demo_graph(2);
+        let mut applier = EventApplier::new();
+        let new_instance = Node::AwsEc2Instance("i-brand-new".into());
+
+        let patch = apply_events(
+            &mut live,
+            &mut applier,
+            &[created(new_instance.clone(), T0)],
+        );
+
+        assert_eq!(patch.added_nodes.len(), 1);
+        assert!(live.contains(&new_instance));
+    }
+
+    /// A whole burst is one patch, not one per event: a deploy that touches
+    /// fifty resources must not make every connected client re-layout fifty
+    /// times.
+    #[test]
+    fn a_burst_of_events_produces_a_single_patch() {
+        let mut live = demo_graph(2);
+        let mut applier = EventApplier::new();
+        let events: Vec<_> = (0..5)
+            .map(|i| created(Node::AwsEc2Instance(format!("i-burst-{i}").into()), T0 + i))
+            .collect();
+
+        let patch = apply_events(&mut live, &mut applier, &events);
+
+        assert_eq!(patch.added_nodes.len(), 5);
+    }
+
+    /// Tier 1 is not authoritative about absence. An event says what it was
+    /// told and nothing more, so a batch must never remove a resource no event
+    /// mentioned — that is Tier 3's job alone.
+    #[test]
+    fn events_never_garbage_collect() {
+        let mut live = demo_graph(2);
+        let before = live.graph.node_count();
+        let mut applier = EventApplier::new();
+
+        let patch = apply_events(
+            &mut live,
+            &mut applier,
+            &[created(Node::AwsEc2Instance("i-brand-new".into()), T0)],
+        );
+
+        assert!(patch.removed_nodes.is_empty() && patch.removed_edges.is_empty());
+        assert_eq!(live.graph.node_count(), before + 1);
+    }
+
+    /// A deletion event takes the resource out immediately, along with the
+    /// edges that died with it — the latency win that justifies the tier.
+    #[test]
+    fn a_deletion_event_removes_a_resource_the_scan_still_believes_in() {
+        let mut live = demo_graph(2);
+        let doomed = some_fixture_instance(&live.graph);
+        let mut applier = EventApplier::new();
+
+        let patch = apply_events(
+            &mut live,
+            &mut applier,
+            &[change(ChangeOp::Deleted, doomed.clone(), T0)],
+        );
+
+        assert_eq!(patch.removed_nodes.len(), 1);
+        assert!(!live.contains(&doomed));
+    }
+
+    /// The documented race, pinned so it stays a known trade and not a
+    /// surprise: the next reconciliation installs the estate as the scan saw
+    /// it, which puts back a resource an event deleted mid-scan. The graph is
+    /// briefly behind, never inconsistent — the patch always describes the
+    /// graph that was installed.
+    #[test]
+    fn a_reconciliation_scan_overrules_an_event_it_could_not_have_seen() {
+        let mut live = demo_graph(2);
+        let doomed = some_fixture_instance(&live.graph);
+        let mut applier = EventApplier::new();
+        apply_events(
+            &mut live,
+            &mut applier,
+            &[change(ChangeOp::Deleted, doomed.clone(), T0)],
+        );
+
+        let mut next = demo_graph(2);
+        let patch = reconcile(&live.graph, &mut next, &nothing_held());
+
+        assert!(
+            patch
+                .added_nodes
+                .iter()
+                .any(|n| n.key == atlas_lib::atlas::export::node_key(&doomed)),
+            "the scan re-adds what its snapshot still contained"
+        );
     }
 }

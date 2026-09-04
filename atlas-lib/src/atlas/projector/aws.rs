@@ -3,6 +3,7 @@ use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection};
+use petgraph::graph::NodeIndex;
 use rayon::prelude::*;
 
 pub fn aws_projector(
@@ -39,81 +40,32 @@ fn project_amazon_collection(
     match x {
         AmazonCollection::AmazonInstances(instance_data) => {
             for inst in instance_data {
-                let vpc_idx = inst.vpc_id.as_ref().map(|vpc_id| {
-                    builder.link_to(
-                        region_idx,
-                        Node::AwsEc2Vpc(vpc_id.as_str().into()),
-                        Edge::Contains,
-                    )
-                });
-
-                let subnet_idx = inst.subnet_id.as_ref().map(|subnet_id| {
-                    builder.link_to(
-                        vpc_idx,
-                        Node::AwsEc2Subnet(subnet_id.as_str().into()),
-                        Edge::Contains,
-                    )
-                });
-
-                let mut inst_idx = None;
-                if let Some(instance_id) = inst.instance_id.as_ref() {
-                    let idx =
-                        builder.get_or_add_node(Node::AwsEc2Instance(instance_id.as_str().into()));
-                    inst_idx = Some(idx);
-
-                    if let Some(subnet_idx) = subnet_idx {
-                        // Instance -> HasIp -> ENI -> AttachedTo -> Subnet
-                        let eni_idx = builder.link_to(
-                            idx,
-                            Node::AwsEc2Eni(instance_id.as_str().into()),
-                            Edge::HasIp,
-                        );
-                        builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
-                    }
-                }
-
-                if let Some(place) = inst.placement.as_ref()
-                    && let Some(az_name) = place.availability_zone.as_ref()
-                {
-                    builder.link_from(
-                        inst_idx,
-                        Node::AwsEc2AvailabilityZone(az_name.as_str().into()),
-                        Edge::Contains,
-                    );
-                }
-
-                if let Some(private_ip) = inst.private_ip_address.as_ref() {
-                    builder.link_to(
-                        inst_idx,
-                        Node::GenericIpAddress(private_ip.as_str().into()),
-                        Edge::ConnectsTo,
-                    );
-                }
-
-                if let Some(tags) = inst.tags.as_ref() {
-                    for tag in tags {
-                        if let (Some(k), Some(v)) = (tag.key.as_ref(), tag.value.as_ref()) {
-                            builder.link_to(
-                                inst_idx,
-                                Node::AwsTag {
-                                    key: k.as_str().into(),
-                                    value: v.as_str().into(),
-                                },
-                                Edge::DependsOn,
-                            );
-                        }
-                    }
-                }
-
-                for sg in inst.security_groups() {
-                    if let Some(sg_id) = sg.group_id() {
-                        builder.link_to(
-                            inst_idx,
-                            Node::AwsEc2SecurityGroup(sg_id.into()),
-                            Edge::ConnectsTo,
-                        );
-                    }
-                }
+                project_instance(
+                    builder,
+                    region_idx,
+                    &InstanceFacts {
+                        id: inst.instance_id.as_deref(),
+                        vpc_id: inst.vpc_id.as_deref(),
+                        subnet_id: inst.subnet_id.as_deref(),
+                        availability_zone: inst
+                            .placement
+                            .as_ref()
+                            .and_then(|p| p.availability_zone.as_deref()),
+                        private_ip: inst.private_ip_address.as_deref(),
+                        security_group_ids: inst
+                            .security_groups()
+                            .iter()
+                            .filter_map(|sg| sg.group_id())
+                            .collect(),
+                        tags: inst
+                            .tags
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|tag| tag.key.as_deref().zip(tag.value.as_deref()))
+                            .collect(),
+                    },
+                );
             }
         }
         AmazonCollection::AmazonResources(resource_map) => {
@@ -528,7 +480,103 @@ fn project_amazon_collection(
     }
 }
 
-fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
+/// Everything the graph takes from one EC2 instance, independent of where it
+/// was read from.
+///
+/// The full-scan collector reads an `aws_sdk_ec2::types::Instance`; the Tier-1
+/// event adapter reads an AWS Config configuration item or a CloudTrail
+/// `RunInstances` record. Those are three different wire shapes describing the
+/// same thing, and if each grew its own idea of how an instance attaches to the
+/// graph, the event path would emit edges the full scan does not — which the
+/// next reconciliation would delete and the next event re-add, forever. Reduce
+/// to these facts, and [`project_instance`] stays the single definition of the
+/// shape.
+pub(crate) struct InstanceFacts<'a> {
+    pub id: Option<&'a str>,
+    pub vpc_id: Option<&'a str>,
+    pub subnet_id: Option<&'a str>,
+    pub availability_zone: Option<&'a str>,
+    pub private_ip: Option<&'a str>,
+    pub security_group_ids: Vec<&'a str>,
+    pub tags: Vec<(&'a str, &'a str)>,
+}
+
+/// Attach one instance to the graph: the `Instance -> HasIp -> ENI ->
+/// AttachedTo -> Subnet` pivot from CLAUDE.md, plus its VPC/AZ containment,
+/// private IP, tags and security groups.
+///
+/// The VPC and subnet are created even when the instance itself has no id, so a
+/// half-described instance still contributes the containment it did report.
+pub(crate) fn project_instance(
+    builder: &mut GraphBuilder,
+    region_idx: NodeIndex,
+    facts: &InstanceFacts<'_>,
+) {
+    let vpc_idx = facts
+        .vpc_id
+        .map(|vpc_id| builder.link_to(region_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains));
+
+    let subnet_idx = facts.subnet_id.map(|subnet_id| {
+        builder.link_to(
+            vpc_idx,
+            Node::AwsEc2Subnet(subnet_id.into()),
+            Edge::Contains,
+        )
+    });
+
+    let mut inst_idx = None;
+    if let Some(instance_id) = facts.id {
+        let idx = builder.get_or_add_node(Node::AwsEc2Instance(instance_id.into()));
+        inst_idx = Some(idx);
+
+        if let Some(subnet_idx) = subnet_idx {
+            // Instance -> HasIp -> ENI -> AttachedTo -> Subnet
+            let eni_idx = builder.link_to(idx, Node::AwsEc2Eni(instance_id.into()), Edge::HasIp);
+            builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
+        }
+    }
+
+    if let Some(az_name) = facts.availability_zone {
+        builder.link_from(
+            inst_idx,
+            Node::AwsEc2AvailabilityZone(az_name.into()),
+            Edge::Contains,
+        );
+    }
+
+    if let Some(private_ip) = facts.private_ip {
+        builder.link_to(
+            inst_idx,
+            Node::GenericIpAddress(private_ip.into()),
+            Edge::ConnectsTo,
+        );
+    }
+
+    for (key, value) in &facts.tags {
+        builder.link_to(
+            inst_idx,
+            Node::AwsTag {
+                key: (*key).into(),
+                value: (*value).into(),
+            },
+            Edge::DependsOn,
+        );
+    }
+
+    for sg_id in &facts.security_group_ids {
+        builder.link_to(
+            inst_idx,
+            Node::AwsEc2SecurityGroup((*sg_id).into()),
+            Edge::ConnectsTo,
+        );
+    }
+}
+
+/// Whether the AWS Config catch-all representation of a resource type earns a
+/// node. Shared with the Tier-1 event adapter, so a Config change notification
+/// files the same resource types the full scan does — a type the scan skips
+/// must not arrive by event only to be deleted at the next reconciliation.
+pub(crate) fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
     match name {
         // false assoc. unclear if needed
         "AWS::RDS::DBClusterSnapshot" => false,
@@ -572,6 +620,6 @@ fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
     }
 }
 
-fn use_global(name: &str) -> bool {
+pub(crate) fn use_global(name: &str) -> bool {
     matches!(name, "AWS::S3::Bucket")
 }

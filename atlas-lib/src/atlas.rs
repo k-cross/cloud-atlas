@@ -1,6 +1,7 @@
 pub mod collection;
 pub mod definition;
 pub mod engine;
+pub mod event;
 pub mod export;
 pub mod graph_builder;
 pub mod patch;

@@ -5,9 +5,8 @@
 //! readers that also subscribe to the broadcast for incremental patches.
 
 use atlas_lib::atlas::collection::CollectionReport;
-use atlas_lib::atlas::definition::{Edge, Node};
+use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::GraphPatch;
-use petgraph::graph::Graph;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
@@ -18,24 +17,35 @@ pub const PATCH_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// The authoritative in-memory twin. Cloned cheaply for diffing; replaced
-    /// wholesale by the poll loop when a change is detected.
-    pub live: Arc<RwLock<Graph<Node, Edge>>>,
+    /// The authoritative in-memory twin, held as a [`GraphBuilder`] rather than
+    /// a bare `Graph` for its node index: the Tier-1 event path mutates single
+    /// resources by identity, and without the index every event would mean a
+    /// linear scan of the graph to find the node it names. The Tier-3 loop
+    /// already produces a builder, so keeping it costs nothing.
+    pub live: Arc<RwLock<GraphBuilder>>,
     /// Fan-out of incremental patches to every connected client.
     pub patches: broadcast::Sender<GraphPatch>,
     /// What the most recent scan could not read. Without this a client cannot
     /// tell a small estate from a graph collected during an outage, since both
     /// look like a snapshot that is simply missing those resources.
     pub report: Arc<RwLock<CollectionReport>>,
+    /// What the Tier-1 event feed could not read, kept *separate* from the scan
+    /// report on purpose. A dead event stream means the graph is slow, not
+    /// wrong: Tier 3 still reads the same provider end to end and is still
+    /// authoritative about what is gone. Folding stream failures into the scan
+    /// report would make an unreachable queue suspend removals across all of
+    /// AWS, which is precisely backwards.
+    pub stream_report: Arc<RwLock<CollectionReport>>,
 }
 
 impl AppState {
-    pub fn new(initial: Graph<Node, Edge>, report: CollectionReport) -> Self {
+    pub fn new(initial: GraphBuilder, report: CollectionReport) -> Self {
         let (patches, _) = broadcast::channel(PATCH_CHANNEL_CAPACITY);
         Self {
             live: Arc::new(RwLock::new(initial)),
             patches,
             report: Arc::new(RwLock::new(report)),
+            stream_report: Arc::new(RwLock::new(CollectionReport::default())),
         }
     }
 }

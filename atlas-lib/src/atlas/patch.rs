@@ -32,6 +32,55 @@ pub struct GraphPatch {
 }
 
 impl GraphPatch {
+    /// A patch that changes nothing. The honest answer for an event that told
+    /// us something we already knew — the graph is add-only per event and
+    /// every apply is idempotent, so "no change" is a routine outcome, not a
+    /// failure.
+    pub fn empty() -> Self {
+        Self {
+            version: SNAPSHOT_VERSION,
+            added_nodes: Vec::new(),
+            removed_nodes: Vec::new(),
+            added_edges: Vec::new(),
+            removed_edges: Vec::new(),
+        }
+    }
+
+    /// Fold another patch into this one. The event ingest path produces one
+    /// patch per event and broadcasts the batch as a single patch, so they have
+    /// to combine.
+    ///
+    /// Concatenating the four lists is *not* enough. One batch can carry a
+    /// resource's whole life — a `RunInstances` and the `TerminateInstances`
+    /// that followed it can arrive in the same SQS receive — and the combined
+    /// patch would then name the same key as both added and removed. A consumer
+    /// has to pick an order for that, and the frontend removes before it adds
+    /// (so an edge never outlives its endpoints), which means the removal
+    /// no-ops against a node that is not there yet and the addition then puts
+    /// the resource back. The client would keep a resource the server does not
+    /// have, permanently, until it reconnected.
+    ///
+    /// So a removal cancels a pending addition of the same key instead of being
+    /// appended beside it, leaving the net change. The reverse order needs no
+    /// special case: remove-then-add already applies correctly.
+    ///
+    /// The scan is linear per removal, which is fine at batch scale (tens of
+    /// events); this is not the Tier-3 path, whose diffs never overlap.
+    pub fn extend(&mut self, other: GraphPatch) {
+        for key in other.removed_nodes {
+            if !cancel(&mut self.added_nodes, &key, |node| &node.key) {
+                self.removed_nodes.push(key);
+            }
+        }
+        for key in other.removed_edges {
+            if !cancel(&mut self.added_edges, &key, |edge| &edge.key) {
+                self.removed_edges.push(key);
+            }
+        }
+        self.added_nodes.extend(other.added_nodes);
+        self.added_edges.extend(other.added_edges);
+    }
+
     /// A patch that touches nothing — the common case between polls, and the
     /// signal the poll loop uses to skip a broadcast.
     pub fn is_empty(&self) -> bool {
@@ -39,6 +88,18 @@ impl GraphPatch {
             && self.removed_nodes.is_empty()
             && self.added_edges.is_empty()
             && self.removed_edges.is_empty()
+    }
+}
+
+/// Drop a pending addition of `key`, reporting whether there was one. The two
+/// halves then annihilate: nothing was added, so nothing needs removing.
+fn cancel<T>(added: &mut Vec<T>, key: &str, key_of: impl Fn(&T) -> &str) -> bool {
+    match added.iter().position(|item| key_of(item) == key) {
+        Some(at) => {
+            added.remove(at);
+            true
+        }
+        None => false,
     }
 }
 

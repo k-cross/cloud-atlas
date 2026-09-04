@@ -1,5 +1,7 @@
 use crate::atlas::definition::{Edge, Node};
+use petgraph::Direction;
 use petgraph::graph::{Graph, NodeIndex};
+use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 
 pub struct GraphBuilder {
@@ -18,6 +20,31 @@ impl GraphBuilder {
         Self {
             graph: Graph::new(),
             node_map: HashMap::new(),
+        }
+    }
+
+    /// Whether this node is already in the graph, without inserting it.
+    pub fn contains(&self, node: &Node) -> bool {
+        self.node_map.contains_key(node)
+    }
+
+    /// Where a node lives, if it is here. The index is only valid until the
+    /// next [`remove_node`](Self::remove_node).
+    pub fn index_of(&self, node: &Node) -> Option<NodeIndex> {
+        self.node_map.get(node).copied()
+    }
+
+    /// Whether this exact edge already connects these two nodes. The
+    /// by-value counterpart of the dedup check inside
+    /// [`add_edge`](Self::add_edge), for callers holding `Node`s rather than
+    /// indices.
+    pub fn has_edge(&self, source: &Node, target: &Node, edge: &Edge) -> bool {
+        match (self.node_map.get(source), self.node_map.get(target)) {
+            (Some(&a), Some(&b)) => self
+                .graph
+                .edges_connecting(a, b)
+                .any(|e| e.weight() == edge),
+            _ => false,
         }
     }
 
@@ -51,6 +78,54 @@ impl GraphBuilder {
         if !exists {
             self.graph.add_edge(a, b, edge);
         }
+    }
+
+    /// Take a node out of the graph, along with every edge touching it, and
+    /// report exactly what went — the caller needs that to describe the change
+    /// downstream, and re-deriving it after the fact is impossible.
+    ///
+    /// This is the only correct way to remove a node here: petgraph's
+    /// `remove_node` swap-removes, so the node that was last takes the removed
+    /// index and every other index above it stays put. Left alone, `node_map`
+    /// would then point that moved node at a stale index — the reason removal
+    /// belongs on the builder rather than at each call site.
+    pub fn remove_node(&mut self, node: &Node) -> Option<Removal> {
+        let idx = self.index_of(node)?;
+
+        // Self-loops would otherwise be collected twice, once per direction.
+        let edges: Vec<(Node, Node, Edge)> = self
+            .graph
+            .edges_directed(idx, Direction::Outgoing)
+            .chain(
+                self.graph
+                    .edges_directed(idx, Direction::Incoming)
+                    .filter(|e| e.source() != idx),
+            )
+            .map(|e| {
+                (
+                    self.graph[e.source()].clone(),
+                    self.graph[e.target()].clone(),
+                    e.weight().clone(),
+                )
+            })
+            .collect();
+
+        let last = NodeIndex::new(self.graph.node_count() - 1);
+        // Drop the mapping only once the graph has actually let go, so a stale
+        // index — the very bug this method exists to prevent — cannot leave a
+        // node present in the graph but unreachable by identity, where the next
+        // `get_or_add_node` would silently duplicate it.
+        let removed = self.graph.remove_node(idx)?;
+        self.node_map.remove(node);
+        if last != idx {
+            // The node that was at `last` now lives at `idx`.
+            self.node_map.insert(self.graph[idx].clone(), idx);
+        }
+
+        Some(Removal {
+            node: removed,
+            edges,
+        })
     }
 
     pub fn link_to(
@@ -113,5 +188,95 @@ impl GraphBuilder {
                 }
             }
         }
+    }
+}
+
+/// What a [`GraphBuilder::remove_node`] took out: the node itself plus every
+/// edge that died with it, by value, so the caller can name them after the
+/// graph no longer holds them.
+pub struct Removal {
+    pub node: Node,
+    pub edges: Vec<(Node, Node, Edge)>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(id: &str) -> Node {
+        Node::AwsEc2Instance(id.into())
+    }
+
+    #[test]
+    fn removing_a_node_takes_its_edges_with_it() {
+        let mut builder = GraphBuilder::new();
+        let vpc = builder.get_or_add_node(Node::AwsEc2Vpc("vpc-1".into()));
+        let subnet = builder.get_or_add_node(Node::AwsEc2Subnet("subnet-1".into()));
+        let eni = builder.get_or_add_node(Node::AwsEc2Eni("i-1".into()));
+        builder.add_edge(vpc, subnet, Edge::Contains);
+        builder.add_edge(eni, subnet, Edge::AttachedTo);
+
+        let removal = builder
+            .remove_node(&Node::AwsEc2Subnet("subnet-1".into()))
+            .expect("subnet was present");
+
+        assert_eq!(removal.node, Node::AwsEc2Subnet("subnet-1".into()));
+        assert_eq!(removal.edges.len(), 2, "both incident edges are reported");
+        assert_eq!(builder.graph.edge_count(), 0);
+        assert!(!builder.contains(&Node::AwsEc2Subnet("subnet-1".into())));
+    }
+
+    /// petgraph swap-removes, so the last node lands on the removed index. If
+    /// the map is not repaired, the moved node's edges get attached to whatever
+    /// now occupies its old index.
+    #[test]
+    fn removal_repairs_the_index_of_the_node_that_moved() {
+        let mut builder = GraphBuilder::new();
+        for id in ["i-1", "i-2", "i-3"] {
+            builder.get_or_add_node(instance(id));
+        }
+
+        builder.remove_node(&instance("i-1")).expect("present");
+
+        for id in ["i-2", "i-3"] {
+            let idx = builder.index_of(&instance(id)).expect("still mapped");
+            assert_eq!(
+                builder.graph[idx],
+                instance(id),
+                "{id} must still resolve to itself after the swap-remove"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_an_absent_node_reports_nothing() {
+        let mut builder = GraphBuilder::new();
+        builder.get_or_add_node(instance("i-1"));
+        assert!(builder.remove_node(&instance("i-missing")).is_none());
+        assert_eq!(builder.graph.node_count(), 1);
+    }
+
+    #[test]
+    fn has_edge_matches_the_dedup_rule_add_edge_applies() {
+        let mut builder = GraphBuilder::new();
+        let a = builder.get_or_add_node(instance("i-1"));
+        let b = builder.get_or_add_node(Node::AwsEc2Eni("i-1".into()));
+        builder.add_edge(a, b, Edge::HasIp);
+
+        assert!(builder.has_edge(
+            &instance("i-1"),
+            &Node::AwsEc2Eni("i-1".into()),
+            &Edge::HasIp
+        ));
+        assert!(!builder.has_edge(
+            &instance("i-1"),
+            &Node::AwsEc2Eni("i-1".into()),
+            &Edge::AttachedTo
+        ));
+        assert!(!builder.has_edge(
+            &instance("i-2"),
+            &Node::AwsEc2Eni("i-1".into()),
+            &Edge::HasIp
+        ));
     }
 }

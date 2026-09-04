@@ -107,9 +107,62 @@ cargo run -p atlas-server -- --regions us-east-1     # real collection (same fla
 cargo run -p atlas-server -- --poll-secs 30 --port 8080
 cargo run -p atlas-server -- --retain-scans 3          # give up on an unreadable
                                                        #   provider after 3 scans
+cargo run -p atlas-server -- --aws-event-queue https://sqs.us-east-1.amazonaws.com/111/atlas-events
+                                                       # Tier-1 live change feed (below)
 ```
 
-- `GET /snapshot.json` — full current snapshot (v2). `GET /collection.json` — `complete` (did the scan lose anything at all), `unreadable` (which sources could not be read, and so are suspending removals), and `failures` (each attributed to its source/scope and stamped with its `kind`). This is the only way a client can tell "this provider holds nothing" from "this provider could not be reached" from "we read it but dropped a row" — it matters most at start-up, when an outage makes the first partial collection the baseline. `GET /ws` — WebSocket hub.
+### Tier 1: the live event feed (`--aws-event-queue`)
+
+Polling is the backstop, not the primary feed. `atlas::event` is the normalized
+change model — a `ChangeEvent` naming one resource, what happened to it, and the
+neighbourhood the payload described — and `EventApplier` folds those into the
+live graph between reconciliation scans. `cloud/amazon/events.rs` is the first
+real adapter: an EventBridge rule targets an SQS queue, and `EventQueue` reads
+AWS Config configuration items, EC2 instance state changes and CloudTrail
+management events off it. `poll::run` is a `select!` over the reconciliation
+ticker and the feed, so both tiers share one writer and mutation stays
+serialized. Four rules hold this together — break any of them and the two tiers
+start undoing each other:
+
+1. **An adapter may only produce nodes and edges the full-scan projector would
+   also produce.** Tier 3 diffs the whole graph and is authoritative, so an edge
+   invented by an adapter is deleted at the next reconciliation and re-added by
+   the next event, forever. EC2 instances therefore go through the projector's
+   own `projector::aws::project_instance` (shared with the SDK path via
+   `InstanceFacts` — three wire shapes, one definition of how an instance
+   attaches), and the Config catch-all node reuses the scan's own
+   `use_aws_resource`/`use_global` filters. A resource type whose identity the
+   graph keys differently from Config is deliberately **not** mapped rather than
+   mapped approximately: ENIs (the graph keys them by instance), Route 53 hosted
+   zones (`/hostedzone/` prefix), SQS queues (keyed by URL). The
+   `an_instance_event_produces_only_what_a_full_scan_would` test pins this by
+   projecting the same instance both ways and asserting containment.
+2. **Events add; only Tier 3 garbage-collects.** A create/modify never removes
+   an edge it did not mention, and a delete removes only the node it named. That
+   asymmetry is what makes an at-least-once, out-of-order feed safe to apply.
+3. **Ordering is last-writer-wins on the cloud's own record time**, tracked per
+   resource, so a redelivered create cannot resurrect what a later delete
+   removed. Arrival time is never substituted for a timestamp we cannot parse —
+   that would assert an ordering the feed does not promise. The ordering table
+   is bounded (this is a daemon, not a script).
+4. **Stream health is not scan health.** A dead feed makes the graph *slow*, not
+   *wrong* — Tier 3 still reads the provider end to end — so stream failures
+   live in `AppState::stream_report` and surface under `/collection.json`'s
+   `stream` key. They must never enter `unreadable_sources()`, or an unreachable
+   queue would suspend deletions across all of AWS. Likewise a message that will
+   not parse is `FailureKind::Malformed` (reported, then deleted so a poison
+   message cannot replay forever), never a read failure.
+
+Known trade, tested so it stays known: the tiers race. A reconciliation installs
+the estate as of when the scan *started*, so a resource an event created
+mid-scan is removed by that tick and re-added by the next. Clients are never
+inconsistent, only briefly behind.
+
+Adapter tests replay canned EventBridge bodies (`cloud/amazon/events/tests.rs`),
+and the SQS transport is covered end to end with `StaticReplayClient` — queue
+message → `ChangeEvent` → graph mutation → `GraphPatch`, no credentials.
+
+- `GET /snapshot.json` — full current snapshot (v2). `GET /collection.json` — `complete` (did the scan lose anything at all), `unreadable` (which sources could not be read, and so are suspending removals), `failures` (each attributed to its source/scope and stamped with its `kind`), and `stream` (the Tier-1 feed's own health, deliberately separate — see above). This is the only way a client can tell "this provider holds nothing" from "this provider could not be reached" from "we read it but dropped a row" — it matters most at start-up, when an outage makes the first partial collection the baseline. `GET /ws` — WebSocket hub.
 - WS is **bidirectional**: server pushes `snapshot` then `patch`es; the client can pull `get_snapshot` / `get_neighbors` on demand.
 - Point the frontend at it: run `bun dev` in `atlas-render/atlas-web/` (assets on :4680) which connects by default to `ws://<host>:4681/ws`; override with `?server=ws://…` or force offline with `?static`.
 
@@ -148,6 +201,7 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
 - Azure: the `azure_types!` list in `azure/provider.rs` is the single source for both the ARG `where type in~ (..)` filter and `map_resources`' dispatch. Add a resource type there and the exhaustive match makes the compiler demand its mapping arm; `leaf!` covers the `{id, name, location}` case in one line.
 - Cloudflare: `CloudflareApiClient::get` in `cloud/cloudflare/mod.rs` — for raw REST endpoints not covered by the `cloudflare` crate (`get_paged` also hands back `result_info`, which cursor-paginated endpoints like R2 need). `cloudflare::paginate` walks any page-numbered crate endpoint to exhaustion: pass `per_page` and a closure taking the page number. Never terminate a page loop on "the page came back short" — a clamped `per_page` makes that an ordinary response, and stopping there silently truncates the collection into what the differ reads as mass deletion.
 - Projectors: `project_leaf!` macro in `projector/{azure,gcp}.rs` for resources that only add a standalone node.
-- `GraphBuilder::add_edge` deduplicates identical edges automatically, and `GraphBuilder::merge(&graph)` is the single definition of folding one graph into another by node identity — `patch::carry_forward` is a thin policy wrapper over it, so never hand-roll a node/edge dedup pass.
+- `GraphBuilder::add_edge` deduplicates identical edges automatically, and `GraphBuilder::merge(&graph)` is the single definition of folding one graph into another by node identity — `patch::carry_forward` is a thin policy wrapper over it, so never hand-roll a node/edge dedup pass. `GraphBuilder::remove_node` is the matching removal: it reports every edge that died with the node (the patch needs to name them) and repairs `node_map` after petgraph's swap-remove, which silently moves the last node onto the removed index. Never call `graph.remove_node` directly on a builder-owned graph.
+- Event adapters: `atlas::event::ChangeEvent` is the normalized shape every provider's live feed translates into, and `EventApplier` is the only thing that applies one (idempotency + ordering live there, not at the call sites). A new adapter builds its `context` subgraph with the *projector's* own functions — see `projector::aws::project_instance` and `InstanceFacts` — so it cannot emit a shape the full scan would disagree with.
 
 `docs/audit_findings.md` records resolved audit findings — patterns to avoid reintroducing.

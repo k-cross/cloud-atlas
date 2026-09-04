@@ -103,8 +103,8 @@ async fn handle_client_msg(
     match serde_json::from_str::<ClientMsg>(text) {
         Ok(ClientMsg::Subscribe) | Ok(ClientMsg::GetSnapshot) => send_snapshot(sink, state).await,
         Ok(ClientMsg::GetNeighbors { key }) => {
-            let graph = state.live.read().await;
-            let value = neighbors_value(&graph, &key);
+            let live = state.live.read().await;
+            let value = neighbors_value(&live.graph, &key);
             send_value(sink, &value).await
         }
         Err(e) => {
@@ -119,8 +119,9 @@ async fn send_snapshot(
     state: &AppState,
 ) -> Result<(), ()> {
     let value = {
-        let graph = state.live.read().await;
-        let mut v = serde_json::to_value(render_snapshot(&graph)).unwrap_or_else(|_| json!({}));
+        let live = state.live.read().await;
+        let mut v =
+            serde_json::to_value(render_snapshot(&live.graph)).unwrap_or_else(|_| json!({}));
         v["type"] = json!("snapshot");
         v
     };
@@ -192,6 +193,7 @@ mod tests {
     use atlas_lib::atlas::collection::CollectionReport;
     use atlas_lib::atlas::definition::{Edge, Node};
     use atlas_lib::atlas::export::{SNAPSHOT_VERSION, node_key};
+    use atlas_lib::atlas::graph_builder::GraphBuilder;
     use atlas_lib::atlas::patch::GraphPatch;
     use futures::channel::mpsc;
     use futures::{SinkExt, StreamExt};
@@ -201,12 +203,12 @@ mod tests {
 
     /// A two-node graph plus the state that serves it.
     fn state_with_a_pair() -> (AppState, String) {
-        let mut graph: Graph<Node, Edge> = Graph::new();
-        let a = graph.add_node(Node::GenericHostname("center.example".into()));
-        let b = graph.add_node(Node::GenericIpAddress("10.0.0.1".into()));
-        graph.add_edge(a, b, Edge::ResolvesTo);
-        let key = node_key(&graph[a]);
-        (AppState::new(graph, CollectionReport::default()), key)
+        let mut builder = GraphBuilder::new();
+        let a = builder.get_or_add_node(Node::GenericHostname("center.example".into()));
+        let b = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        builder.add_edge(a, b, Edge::ResolvesTo);
+        let key = node_key(&builder.graph[a]);
+        (AppState::new(builder, CollectionReport::default()), key)
     }
 
     /// Drive one client message and return every frame it produced.

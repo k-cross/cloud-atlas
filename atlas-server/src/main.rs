@@ -1,12 +1,14 @@
 //! Cloud Atlas live backend.
 //!
-//! Owns the in-memory graph, reconciles it against the providers on an
-//! interval (`poll`), and pushes incremental patches to the frontend over
-//! WebSocket (`ws`). See `docs/change_monitoring_design.md` §7.
+//! Owns the in-memory graph, keeps it current from two directions — the
+//! Tier-1 event feed (`stream`) and the Tier-3 reconciliation scan, both driven
+//! by the single writer in `poll` — and pushes incremental patches to the
+//! frontend over WebSocket (`ws`). See `docs/change_monitoring_design.md` §7.
 
 mod http;
 mod poll;
 mod state;
+mod stream;
 mod ws;
 
 use crate::poll::Source;
@@ -60,6 +62,16 @@ pub struct Opt {
     /// holds them effectively forever.
     #[clap(long, default_value_t = Retention::DEFAULT_BUDGET)]
     retain_scans: u32,
+
+    /// URL of an SQS queue fed by an EventBridge rule, to consume as the Tier-1
+    /// live change feed (AWS Config items, EC2 state changes, CloudTrail
+    /// management events).
+    ///
+    /// Optional: without it the graph is still correct, just at poll-interval
+    /// latency instead of seconds. The queue is read in the first `--regions`
+    /// region, which is where its EventBridge rule lives.
+    #[clap(long)]
+    aws_event_queue: Option<String>,
 }
 
 #[tokio::main]
@@ -72,12 +84,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    // The Tier-1 feed is read in the region whose EventBridge rule targets the
+    // queue: the first configured region, before `regions` is moved into the
+    // engine's settings.
+    let event_region = opt.regions.first().cloned().unwrap_or_default();
+
     // Seed the graph once up front so the very first client gets a populated
     // snapshot, and choose the reconciliation source.
     let (initial, initial_report, source) = if opt.demo {
         tracing::info!("demo mode: serving credential-free Globex fixtures");
         (
-            fixtures::build_graph().graph,
+            fixtures::build_graph(),
             CollectionReport::default(),
             Source::Demo,
         )
@@ -103,11 +120,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 scan.report.summary()
             );
         }
-        (
-            scan.builder.graph,
-            scan.report,
-            Source::Live(Box::new(engine)),
-        )
+        (scan.builder, scan.report, Source::Live(Box::new(engine)))
+    };
+
+    let events = match (&opt.aws_event_queue, opt.demo) {
+        (Some(queue_url), false) => {
+            tracing::info!(region = %event_region, "consuming AWS change events from {queue_url}");
+            stream::Source::aws(&event_region, queue_url, false).await
+        }
+        // A queue is meaningless in demo mode, where nothing reaches AWS at
+        // all; say so rather than silently ignoring the flag.
+        (Some(_), true) => {
+            tracing::warn!("--aws-event-queue is ignored in --demo mode");
+            stream::Source::Disabled
+        }
+        (None, _) => stream::Source::Disabled,
     };
 
     let state = AppState::new(initial, initial_report);
@@ -123,6 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let poller = poll::run(
         state,
         source,
+        events,
         Duration::from_secs(opt.poll_secs),
         Retention::new(opt.retain_scans),
     );
