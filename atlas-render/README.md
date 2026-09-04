@@ -14,16 +14,35 @@ shape, used for live incremental updates):
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "nodes": [{"id": 0, "key": "AwsEc2Instance#Instance(i-1)", "label": "Instance(i-1)", "kind": "AwsEc2Instance"}],
-  "edges": [{"source": 0, "target": 1, "key": "HasIp|...", "source_key": "...", "target_key": "...", "kind": "HasIp"}]
+  "edges": [{"source": 0, "target": 1, "key": "HasIp|...", "source_key": "...", "target_key": "...", "kind": "HasIp"}],
+  "observations": [
+    {"key": "TrafficFlow|...", "last_seen": 1788436800000, "packets": 24, "bytes": 4800, "status": "accepted"},
+    {"key": "GenericIpAddress#...", "last_seen": 1788436800000, "status": "accepted"}
+  ]
 }
 ```
 
 `key` (added in v2) is a stable identity derived from the typed resource, so a
 node or edge can be referenced across full-scan rebuilds — this is what lets
 `atlas-server` (below) push add/remove patches instead of re-sending the whole
-graph. Producers: `atlas` writes `atlas.json` next to `atlas.dot` on every
+graph.
+
+`observations` (added in v3) is the Tier-2 liveness overlay: how recently
+traffic was seen on a node or edge, keyed by that same stable `key`. It is a
+separate list rather than fields on the node because freshness changes on a
+completely different cadence from topology — a patch carries `observations`
+(refreshed) and `expired` (lapsed keys) without re-announcing a single
+resource. An observation naming a key the graph does not hold is ignored; the
+layout engine ignores the whole list, since it positions by topology alone.
+
+`packets`/`bytes` appear on flow **edges** only. One record names several keys —
+both endpoints plus the instance and interface it came from — so stamping volume
+on each would report the same traffic several times over, and on a node the
+figure would be an undirected sum across every flow that touched it anyway. A
+node carries `last_seen` and `status`, which compose as a maximum and a flag;
+derive its throughput from its incident `TrafficFlow` edges. Producers: `atlas` writes `atlas.json` next to `atlas.dot` on every
 update; `atlas-server` serves the live graph at `/snapshot.json` and streams
 patches over WebSocket; `cargo run --example demo` in the main workspace
 writes `multi_cloud_demo.json` from the credential-free Globex fixtures.

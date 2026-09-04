@@ -8,9 +8,10 @@ use std::fmt;
 /// with `SNAPSHOT_VERSION` in `atlas-lib`'s `atlas::export` module and
 /// `atlas-web`'s `graph.ts`; a bump also requires rebuilding the wasm
 /// (`bun run wasm`) since this constant is compiled in. v2 added the stable
-/// `key` fields the live backend uses for patches; the layout itself still
-/// positions purely by dense index.
-pub const SNAPSHOT_VERSION: u32 = 2;
+/// `key` fields the live backend uses for patches; v3 added `observations`, the
+/// Tier-2 liveness overlay. The layout itself still positions purely by dense
+/// index and reads neither.
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 /// The full snapshot as exported by atlas-lib (`atlas.json`). Labels and
 /// kinds ride along for the rendering layer (colors, tooltips); the layout
@@ -20,6 +21,24 @@ pub struct GraphSnapshot {
     pub version: u32,
     pub nodes: Vec<SnapshotNode>,
     pub edges: Vec<SnapshotEdge>,
+    /// Liveness per node/edge key (v3). Part of the contract but not of the
+    /// layout: the engine positions by topology, and how a resource is drawn
+    /// once positioned is the renderer's business. `default` so the frontend
+    /// can re-serialize its graph for a warm start without carrying it.
+    #[serde(default)]
+    pub observations: Vec<SnapshotObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotObservation {
+    pub key: String,
+    pub last_seen: i64,
+    /// Volume rides on flow edges only; a node observation omits both fields.
+    #[serde(default)]
+    pub packets: Option<u64>,
+    #[serde(default)]
+    pub bytes: Option<u64>,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,7 +242,7 @@ mod tests {
     // the exporter changed shape and SNAPSHOT_VERSION must be bumped across all
     // three consumers (export.rs, this crate, atlas-web) plus a wasm rebuild.
     const SAMPLE: &str = r#"{
-        "version": 2,
+        "version": 3,
         "nodes": [
             {"id": 0, "key": "AwsEc2Instance#a", "label": "Instance(i-1)", "kind": "AwsEc2Instance"},
             {"id": 1, "key": "AwsEc2Eni#b", "label": "Eni(eni-1)", "kind": "AwsEc2Eni"},
@@ -232,6 +251,10 @@ mod tests {
         "edges": [
             {"source": 0, "target": 1, "key": "HasIp|a->b", "source_key": "AwsEc2Instance#a", "target_key": "AwsEc2Eni#b", "kind": "HasIp"},
             {"source": 1, "target": 2, "key": "AttachedTo|b->c", "source_key": "AwsEc2Eni#b", "target_key": "AwsEc2Subnet#c", "kind": "AttachedTo"}
+        ],
+        "observations": [
+            {"key": "TrafficFlow|a->b", "last_seen": 1788436800000, "packets": 24, "bytes": 4800, "status": "accepted"},
+            {"key": "AwsEc2Instance#a", "last_seen": 1788436800000, "status": "accepted"}
         ]
     }"#;
 
@@ -247,7 +270,7 @@ mod tests {
     #[test]
     fn remaps_sparse_node_ids() {
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "nodes": [
                 {"id": 10, "label": "a", "kind": "GenericIpAddress"},
                 {"id": 99, "label": "b", "kind": "GenericHostname"}
@@ -262,7 +285,7 @@ mod tests {
     #[test]
     fn rejects_unknown_edge_endpoint() {
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "nodes": [{"id": 0, "label": "a", "kind": "GenericIpAddress"}],
             "edges": [{"source": 0, "target": 5, "kind": "RoutesTo"}]
         }"#;
@@ -274,11 +297,24 @@ mod tests {
 
     #[test]
     fn rejects_future_version() {
-        let json = r#"{"version": 3, "nodes": [], "edges": []}"#;
+        let json = r#"{"version": 4, "nodes": [], "edges": []}"#;
         assert!(matches!(
             LayoutGraph::from_json(json).unwrap_err(),
-            GraphError::UnsupportedVersion { found: 3, .. }
+            GraphError::UnsupportedVersion { found: 4, .. }
         ));
+    }
+
+    /// The engine lays out topology; a snapshot with no observations is an
+    /// ordinary one (the batch CLI export, or the frontend re-serializing its
+    /// own graph for a warm start) and must not be rejected.
+    #[test]
+    fn a_snapshot_without_observations_still_parses() {
+        let json = r#"{
+            "version": 3,
+            "nodes": [{"id": 0, "label": "a", "kind": "GenericIpAddress"}],
+            "edges": []
+        }"#;
+        assert_eq!(LayoutGraph::from_json(json).unwrap().node_count(), 1);
     }
 
     #[test]

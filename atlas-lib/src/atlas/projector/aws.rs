@@ -64,6 +64,18 @@ fn project_amazon_collection(
                             .iter()
                             .filter_map(|tag| tag.key.as_deref().zip(tag.value.as_deref()))
                             .collect(),
+                        // `DescribeInstances` already carries every interface's
+                        // real id, so the ENI pivot costs no extra API call.
+                        network_interfaces: inst
+                            .network_interfaces()
+                            .iter()
+                            .filter_map(|eni| {
+                                Some(EniFacts {
+                                    id: eni.network_interface_id()?,
+                                    subnet_id: eni.subnet_id(),
+                                })
+                            })
+                            .collect(),
                     },
                 );
             }
@@ -499,6 +511,18 @@ pub(crate) struct InstanceFacts<'a> {
     pub private_ip: Option<&'a str>,
     pub security_group_ids: Vec<&'a str>,
     pub tags: Vec<(&'a str, &'a str)>,
+    /// Every interface the instance holds, by its real `eni-` id. Plural
+    /// because an instance can be multi-homed, and each interface can sit in a
+    /// different subnet from the instance's primary one.
+    pub network_interfaces: Vec<EniFacts<'a>>,
+}
+
+/// One interface, as any of the three wire shapes describes it.
+pub(crate) struct EniFacts<'a> {
+    pub id: &'a str,
+    /// The interface's own subnet, which is not always the instance's — a
+    /// second ENI is frequently placed in another subnet on purpose.
+    pub subnet_id: Option<&'a str>,
 }
 
 /// Attach one instance to the graph: the `Instance -> HasIp -> ENI ->
@@ -507,6 +531,13 @@ pub(crate) struct InstanceFacts<'a> {
 ///
 /// The VPC and subnet are created even when the instance itself has no id, so a
 /// half-described instance still contributes the containment it did report.
+///
+/// An instance that reports no interfaces gets no ENI, and therefore no path to
+/// its subnet. That is deliberate: the ENI is keyed by its own `eni-` id, so
+/// there is nothing to invent one from, and substituting a direct
+/// `Instance -> Subnet` edge would be a shape no other producer emits — every
+/// reconciliation would delete it and every event would put it back. The
+/// containment the instance did report (VPC, subnet, AZ) still lands.
 pub(crate) fn project_instance(
     builder: &mut GraphBuilder,
     region_idx: NodeIndex,
@@ -529,10 +560,22 @@ pub(crate) fn project_instance(
         let idx = builder.get_or_add_node(Node::AwsEc2Instance(instance_id.into()));
         inst_idx = Some(idx);
 
-        if let Some(subnet_idx) = subnet_idx {
+        for eni in &facts.network_interfaces {
             // Instance -> HasIp -> ENI -> AttachedTo -> Subnet
-            let eni_idx = builder.link_to(idx, Node::AwsEc2Eni(instance_id.into()), Edge::HasIp);
-            builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
+            let eni_idx = builder.link_to(idx, Node::AwsEc2Eni(eni.id.into()), Edge::HasIp);
+            // The interface's own subnet wins over the instance's primary one,
+            // and lands under the same VPC either way.
+            let attached = match eni.subnet_id {
+                Some(subnet_id) if Some(subnet_id) != facts.subnet_id => Some(builder.link_to(
+                    vpc_idx,
+                    Node::AwsEc2Subnet(subnet_id.into()),
+                    Edge::Contains,
+                )),
+                _ => subnet_idx,
+            };
+            if let Some(subnet_idx) = attached {
+                builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
+            }
         }
     }
 

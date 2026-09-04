@@ -455,7 +455,7 @@ mod tests {
         use crate::graph::LayoutGraph;
         // Two placed nodes far from the origin, one freshly-added node (no x/y).
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "nodes": [
                 {"id": 0, "label": "a", "kind": "GenericIpAddress", "x": 100.0, "y": 100.0},
                 {"id": 1, "label": "b", "kind": "GenericIpAddress", "x": 120.0, "y": 100.0},
@@ -485,7 +485,7 @@ mod tests {
         // the layout must move ONLY the newcomer: pinned nodes stay
         // bit-identical, so incremental updates can never re-flow the cloud.
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "nodes": [
                 {"id": 0, "label": "a", "kind": "GenericIpAddress", "x": 50.0, "y": 0.0},
                 {"id": 1, "label": "b", "kind": "GenericIpAddress", "x": -50.0, "y": 0.0},
@@ -520,7 +520,7 @@ mod tests {
         // A removal-only update warm-starts every surviving node — nothing can
         // move, so the engine must present as converged without iterating.
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "nodes": [
                 {"id": 0, "label": "a", "kind": "GenericIpAddress", "x": 1.0, "y": 2.0},
                 {"id": 1, "label": "b", "kind": "GenericIpAddress", "x": 3.0, "y": 4.0}
@@ -539,7 +539,7 @@ mod tests {
         use crate::graph::LayoutGraph;
         // No x/y anywhere → the first node sits at the spiral origin.
         let json = r#"{
-            "version": 2,
+            "version": 3,
             "nodes": [
                 {"id": 0, "label": "a", "kind": "GenericIpAddress"},
                 {"id": 1, "label": "b", "kind": "GenericIpAddress"}

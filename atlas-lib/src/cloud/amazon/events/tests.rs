@@ -49,7 +49,8 @@ fn instance_config_item(status: &str) -> String {
               "relationships": [
                 {{ "resourceType": "AWS::EC2::VPC", "resourceId": "vpc-globex" }},
                 {{ "resourceType": "AWS::EC2::Subnet", "resourceId": "subnet-globex" }},
-                {{ "resourceType": "AWS::EC2::SecurityGroup", "resourceId": "sg-globex" }}
+                {{ "resourceType": "AWS::EC2::SecurityGroup", "resourceId": "sg-globex" }},
+                {{ "resourceType": "AWS::EC2::NetworkInterface", "resourceId": "eni-0abc123a" }}
               ],
               "configuration": {{
                 "instanceId": "i-0abc123",
@@ -58,6 +59,9 @@ fn instance_config_item(status: &str) -> String {
                 "privateIpAddress": "10.0.1.20",
                 "placement": {{ "availabilityZone": "us-east-1a" }},
                 "securityGroups": [{{ "groupId": "sg-globex", "groupName": "web" }}],
+                "networkInterfaces": [
+                  {{ "networkInterfaceId": "eni-0abc123a", "subnetId": "subnet-globex" }}
+                ],
                 "tags": [{{ "key": "env", "value": "prod" }}]
               }}
             }}
@@ -73,7 +77,7 @@ fn parse_ok(body: &str) -> Vec<ChangeEvent> {
 /// The same instance, as the full-scan collector would hand it to the
 /// projector.
 fn scanned_instance_graph() -> Graph<Node, Edge> {
-    use aws_sdk_ec2::types::{GroupIdentifier, Instance, Placement, Tag};
+    use aws_sdk_ec2::types::{GroupIdentifier, Instance, InstanceNetworkInterface, Placement, Tag};
 
     let instance = Instance::builder()
         .instance_id("i-0abc123")
@@ -83,6 +87,12 @@ fn scanned_instance_graph() -> Graph<Node, Edge> {
         .placement(Placement::builder().availability_zone("us-east-1a").build())
         .security_groups(GroupIdentifier::builder().group_id("sg-globex").build())
         .tags(Tag::builder().key("env").value("prod").build())
+        .network_interfaces(
+            InstanceNetworkInterface::builder()
+                .network_interface_id("eni-0abc123a")
+                .subnet_id("subnet-globex")
+                .build(),
+        )
         .build();
 
     let mut builder = GraphBuilder::new();
@@ -163,7 +173,7 @@ fn an_instance_event_carries_the_eni_pivot() {
     let keys = node_keys(&typed.context);
     for expected in [
         Node::AwsEc2Instance("i-0abc123".into()),
-        Node::AwsEc2Eni("i-0abc123".into()),
+        Node::AwsEc2Eni("eni-0abc123a".into()),
         Node::AwsEc2Subnet("subnet-globex".into()),
         Node::AwsEc2Vpc("vpc-globex".into()),
         Node::AwsEc2SecurityGroup("sg-globex".into()),
@@ -178,7 +188,7 @@ fn an_instance_event_carries_the_eni_pivot() {
     }
     assert!(
         typed.context.edge_references().any(|e| {
-            typed.context[e.source()] == Node::AwsEc2Eni("i-0abc123".into())
+            typed.context[e.source()] == Node::AwsEc2Eni("eni-0abc123a".into())
                 && typed.context[e.target()] == Node::AwsEc2Subnet("subnet-globex".into())
                 && e.weight() == &Edge::AttachedTo
         }),
@@ -372,7 +382,10 @@ fn run_instances_creates_every_instance_it_launched() {
               { "instanceId": "i-aaa", "vpcId": "vpc-globex", "subnetId": "subnet-globex",
                 "privateIpAddress": "10.0.1.5",
                 "placement": { "availabilityZone": "us-east-1a" },
-                "groupSet": { "items": [{ "groupId": "sg-globex" }] } },
+                "groupSet": { "items": [{ "groupId": "sg-globex" }] },
+                "networkInterfaceSet": { "items": [
+                  { "networkInterfaceId": "eni-aaa1", "subnetId": "subnet-globex" }
+                ] } },
               { "instanceId": "i-bbb", "vpcId": "vpc-globex", "subnetId": "subnet-globex" }
             ] }
           }
@@ -385,8 +398,8 @@ fn run_instances_creates_every_instance_it_launched() {
     assert!(events.iter().all(|e| e.op == ChangeOp::Created));
     let first = &events[0];
     assert!(
-        node_keys(&first.context).contains(&node_key(&Node::AwsEc2Eni("i-aaa".into()))),
-        "a launch reports placement, so it projects with the ENI pivot"
+        node_keys(&first.context).contains(&node_key(&Node::AwsEc2Eni("eni-aaa1".into()))),
+        "a launch reports its interfaces, so it projects with the ENI pivot"
     );
 }
 
@@ -586,7 +599,7 @@ async fn a_queued_event_reaches_the_graph_as_a_patch() {
 
     assert!(!patch.is_empty());
     assert!(live.contains(&Node::AwsEc2Instance("i-0abc123".into())));
-    assert!(live.contains(&Node::AwsEc2Eni("i-0abc123".into())));
+    assert!(live.contains(&Node::AwsEc2Eni("eni-0abc123a".into())));
 }
 
 /// One poison message must not take the batch down with it, and must not go

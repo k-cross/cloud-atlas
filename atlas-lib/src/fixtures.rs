@@ -14,8 +14,15 @@
 //! - `run.globex.app` — GCP Cloud Run URI and Cloudflare CNAME target
 //! - `198.51.100.10` — Azure Public IP and Cloudflare A record
 //! - `10.20.0.5` — GCP Cloud SQL private IP and Azure NSG outbound rule
+//!
+//! [`flows`] adds the Tier-2 data-plane layer on top: observed traffic the
+//! control plane cannot see, including one flow that crosses a seam and one
+//! that was rejected.
 
 use crate::Settings;
+use crate::atlas::collection::CollectionSource;
+use crate::atlas::definition::Node;
+use crate::atlas::flow::{FlowAction, FlowIndex, FlowObservation};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
@@ -50,27 +57,113 @@ pub fn all() -> Vec<Provider> {
     vec![aws(), gcp(), azure(), cloudflare()]
 }
 
-/// Project the entire fake environment onto a fresh graph.
+/// Project the entire fake environment onto a fresh graph, then fold the
+/// observed-traffic overlay on top — the same two steps, in the same order, the
+/// live server performs on every reconciliation tick.
 pub fn build_graph() -> GraphBuilder {
     let s = settings();
     let mut builder = GraphBuilder::new();
     for provider in all() {
         projector::build(&mut builder, &provider, &s);
     }
+
+    let mut observed = FlowIndex::default();
+    for flow in flows() {
+        observed.observe(&flow);
+    }
+    observed.overlay(&mut builder);
+
     builder
+}
+
+/// Traffic the fake environment has been observed carrying — what a flow-log
+/// feed would deliver, already normalized.
+///
+/// Three deliberate shapes:
+/// - `10.10.1.10 -> 198.51.100.10` crosses a seam. The destination is already
+///   in the graph as the Azure public IP *and* the Cloudflare A record, so the
+///   observed flow lands as a real edge from the AWS estate into the other two
+///   without any API-level correlation.
+/// - `10.10.1.11 -> 203.0.113.77` goes somewhere no scan reported, which is the
+///   case for a `GenericIpAddress` created by the overlay alone.
+/// - the same pair, rejected, which is the interesting half: a security group
+///   says traffic *could* flow, and only this says it was turned away.
+///
+/// `observed_at` is stamped at call time rather than fixed, so an overlay built
+/// from these is current whenever it is built. The *graph* stays deterministic
+/// — [`crate::atlas::definition::Edge::TrafficFlow`] carries no payload.
+pub fn flows() -> Vec<FlowObservation> {
+    let now = now_millis();
+    let flow = |src: &str, dst: &str, resources: Vec<Node>, action| FlowObservation {
+        source: CollectionSource::Aws,
+        scope: REGION.to_owned(),
+        src: Node::GenericIpAddress(src.into()),
+        dst: Node::GenericIpAddress(dst.into()),
+        resources,
+        packets: 128,
+        bytes: 16_384,
+        action,
+        observed_at: now,
+    };
+
+    vec![
+        flow(
+            "10.10.1.10",
+            "198.51.100.10",
+            vec![
+                Node::AwsEc2Instance("i-globex-web-01".into()),
+                Node::AwsEc2Eni("eni-globex-web-01a".into()),
+            ],
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "10.10.1.11",
+            "203.0.113.77",
+            vec![
+                Node::AwsEc2Instance("i-globex-web-02".into()),
+                Node::AwsEc2Eni("eni-globex-web-02a".into()),
+            ],
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "10.10.1.11",
+            "203.0.113.77",
+            Vec::new(),
+            Some(FlowAction::Rejected),
+        ),
+    ]
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 pub fn aws() -> Provider {
     use aws_sdk_ec2::types::{
-        Address, GroupIdentifier, InternetGateway, InternetGatewayAttachment, IpPermission,
-        IpRange, Ipv6Range, NatGateway, NatGatewayAddress, Placement, Route, RouteTable,
-        RouteTableAssociation, SecurityGroup, Tag, UserIdGroupPair, builders::InstanceBuilder,
+        Address, GroupIdentifier, InstanceNetworkInterface, InternetGateway,
+        InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway, NatGatewayAddress,
+        Placement, Route, RouteTable, RouteTableAssociation, SecurityGroup, Tag, UserIdGroupPair,
+        builders::InstanceBuilder,
     };
 
     let sg_web = GroupIdentifier::builder()
         .group_id("sg-web")
         .group_name("globex-web")
         .build();
+
+    // Two interfaces on the first instance, the second one in a *different*
+    // subnet — the multi-homed shape a single synthetic ENI per instance could
+    // not represent.
+    let eni = |id: &str, subnet: &str| {
+        InstanceNetworkInterface::builder()
+            .network_interface_id(id)
+            .subnet_id(subnet)
+            .vpc_id("vpc-globex")
+            .build()
+    };
 
     let i1 = InstanceBuilder::default()
         .set_instance_id(Some("i-globex-web-01".to_owned()))
@@ -82,6 +175,10 @@ pub fn aws() -> Provider {
         ))
         .set_tags(Some(vec![Tag::builder().key("env").value("prod").build()]))
         .set_security_groups(Some(vec![sg_web.clone()]))
+        .set_network_interfaces(Some(vec![
+            eni("eni-globex-web-01a", "subnet-public-1a"),
+            eni("eni-globex-web-01b", "subnet-private-1a"),
+        ]))
         .build();
     let i2 = InstanceBuilder::default()
         .set_instance_id(Some("i-globex-web-02".to_owned()))
@@ -92,6 +189,7 @@ pub fn aws() -> Provider {
             Placement::builder().availability_zone("us-east-1a").build(),
         ))
         .set_security_groups(Some(vec![sg_web]))
+        .set_network_interfaces(Some(vec![eni("eni-globex-web-02a", "subnet-public-1a")]))
         .build();
 
     let ecs = aws_sdk_ecs::types::Cluster::builder()

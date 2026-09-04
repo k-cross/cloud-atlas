@@ -7,14 +7,22 @@
 //! ticker, so the two tiers share one writer and mutations of the live graph
 //! stay serialized without a lock dance.
 //!
-//! [`Source::Disabled`] is not an error state — it is the normal shape for a
+//! [`FlowSource`] is the Tier-2 counterpart, yielding
+//! [`FlowObservation`](atlas_lib::atlas::flow::FlowObservation)s off a
+//! flow-log feed. It is a separate source, and separately reported, because it
+//! answers a different question: a dead event feed makes the graph slow, while
+//! a dead flow feed makes it merely undecorated.
+//!
+//! `Disabled` is not an error state on either — it is the normal shape for a
 //! provider with no feed wired up, and for the whole server when the operator
 //! has not created a queue. Its `next` never resolves, so the `select!` branch
 //! simply never fires and the graph converges on Tier 3 alone.
 
 use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::event::ChangeEvent;
+use atlas_lib::atlas::flow::FlowObservation;
 use atlas_lib::cloud::amazon::events::stream::EventQueue;
+use atlas_lib::cloud::amazon::flow_logs::stream::FlowLogQueue;
 use std::time::Duration;
 
 /// One drain of a feed. Infallible like the provider scans: a source that could
@@ -73,6 +81,53 @@ impl Source {
                 let batch = queue.receive().await;
                 Batch {
                     events: batch.events,
+                    report: batch.report,
+                }
+            }
+        }
+    }
+}
+
+/// One drain of a flow feed, with the same infallible shape as [`Batch`].
+pub struct FlowBatch {
+    pub observations: Vec<FlowObservation>,
+    pub report: CollectionReport,
+}
+
+/// Tier 2: where observed traffic comes from.
+pub enum FlowSource {
+    /// No flow feed configured. The graph is complete and correct, just with no
+    /// liveness on it — which is exactly what every release before this one
+    /// served.
+    Disabled,
+    /// VPC Flow Logs delivered to S3, whose event notifications land on an SQS
+    /// queue.
+    Aws(Box<FlowLogQueue>),
+}
+
+impl FlowSource {
+    pub async fn aws(region: &str, queue_url: &str) -> Self {
+        let config = atlas_lib::cloud::amazon::load_config(region).await;
+        FlowSource::Aws(Box::new(FlowLogQueue::new(&config, queue_url, region)))
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, FlowSource::Disabled)
+    }
+
+    /// Wait `delay`, then drain the next batch of observations. The delay lives
+    /// inside the future for the same reason it does on [`Source::next`]:
+    /// sleeping in the poll loop's body would stall the tiers that still work.
+    pub async fn next(&self, delay: Duration) -> FlowBatch {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match self {
+            FlowSource::Disabled => std::future::pending().await,
+            FlowSource::Aws(queue) => {
+                let batch = queue.receive().await;
+                FlowBatch {
+                    observations: batch.observations,
                     report: batch.report,
                 }
             }

@@ -250,7 +250,7 @@ pushes deltas. This is the server the user asked about.
 | **1** | Incremental graph | Persistent graph + differ; daemon emits change sets instead of wiping. Unlocks everything else with zero new cloud deps. | **Done** — `atlas-lib/src/atlas/patch.rs` (`GraphPatch` + `diff`, keyed on stable `node_key`/`edge_key`); `AtlasEngine::collect` decouples collection from the wipe-and-export CLI path. |
 | **2** | Live backend skeleton | Graph Actor + WS hub; frontend consumes snapshot-then-patches. Still driven by Tier 3 polling under the hood. | **Done** — `atlas-server/` (single-writer graph behind `RwLock` + `broadcast`, `poll.rs` Tier-3 reconciliation, bidirectional WebSocket `snapshot`/`patch`/`get_neighbors`); `atlas-web` applies patches live. `--demo` exercises the whole path credential-free. |
 | **3** | One real event stream | Wire AWS EventBridge/Config as the first Tier 1 adapter end-to-end; prove the normalized `ChangeEvent` path. | **Done** — `atlas-lib/src/atlas/event.rs` (`ChangeEvent` + `EventApplier`, last-writer-wins on the cloud's own record time); `cloud/amazon/events.rs` (Config configuration items, EC2 state changes, CloudTrail management events → `ChangeEvent`, over an SQS-backed `EventQueue`); `atlas-server/src/stream.rs` + the two-tier `select!` in `poll.rs`. `--aws-event-queue <url>` turns it on. |
-| **4** | Flow-log liveness | Tier 2 consumer for VPC Flow Logs → `Edge::TrafficFlow` + node freshness → drives the Phase 3 health overlay in the rendering design. | Planned |
+| **4** | Flow-log liveness | Tier 2 consumer for VPC Flow Logs → `Edge::TrafficFlow` + node freshness → drives the Phase 3 health overlay in the rendering design. | **Done** — `atlas-lib/src/atlas/flow.rs` (`FlowObservation` + the bounded, expiring `FlowIndex` overlay); `cloud/amazon/flow_logs.rs` (VPC Flow Log records off an S3-notification SQS queue); the Tier-2 arm of `poll::run`, `AppState::flows`, and snapshot v3's `observations`. `--aws-flow-log-queue <url>` turns it on. |
 | **5** | Remaining clouds | GCP asset feeds, Azure Event Grid; Cloudflare stays on fast poll. Reconciliation tuned per cloud. | Planned |
 
 > **Tier 1 as built (Phase 3).** EventBridge is the one delivery path and an
@@ -268,10 +268,12 @@ pushes deltas. This is the server the user asked about.
 >   next reconciliation and re-added by the next event, forever. EC2 instances
 >   therefore go through the projector's own `project_instance` (shared with the
 >   SDK path via `InstanceFacts`), the Config catch-all node reuses the scan's
->   own `use_aws_resource` filter, and resource types the graph keys differently
->   from Config — ENIs (keyed by instance), Route 53 hosted zones (`/hostedzone/`
->   prefix), SQS queues (keyed by URL) — are deliberately left unmapped. A test
->   asserts the event path's subgraph is contained in the full scan's.
+>   own `use_aws_resource` filter, and resource types Config reports in a shape
+>   the scan would not produce — Route 53 hosted zones (`/hostedzone/` prefix),
+>   SQS queues (keyed by URL), and ENIs (keyed correctly by `eni-` id, but the
+>   scan only learns about instance-attached ones) — are deliberately left
+>   unmapped. A test asserts the event path's subgraph is contained in the full
+>   scan's.
 > - **Events add; only Tier 3 garbage-collects.** An event speaks for one
 >   resource, so a create/modify never removes an edge it failed to mention and a
 >   delete removes only the node it named. That asymmetry is what makes a lossy,
@@ -300,10 +302,96 @@ pushes deltas. This is the server the user asked about.
 > liveness work. The Graph Actor / event-stream adapters of §7 are the Phase 3+
 > build-out on top of this skeleton.
 
+> **Tier 2 as built (Phase 4).** VPC Flow Logs deliver natively to S3 and S3
+> notifies SQS natively, so the whole delivery path is operator configuration
+> with no code in between — the CloudWatch Logs → subscription filter → Kinesis
+> alternative needs a consumer per shard and a Lambda in the middle for no extra
+> signal. Four decisions carry the design:
+>
+> - **The metrics live beside the graph, not inside it.** `Node` and `Edge` are
+>   the graph's identity types — hashed, deduplicated on insert, diffed by value
+>   — so a packet counter inside `Edge::TrafficFlow` would make every metric
+>   update a *different* edge: duplicates past `add_edge`'s dedup, and a
+>   remove-then-add of the same `edge_key` in every reconciliation patch. The
+>   variant is therefore payload-free and `flow::FlowIndex` holds the numbers,
+>   keyed by the same stable `node_key`/`edge_key` the wire uses. That is also
+>   the only way node freshness can work, since `Node` cannot carry mutable
+>   state either — one mechanism covers both. What the two carry differs:
+>   `FlowStats` on an edge has volume, `Liveness` on a node does not. One record
+>   names both endpoints plus the instance and interface it came from, so
+>   counting its packets against each would report the same traffic four times,
+>   and a node's "packets" is an undirected sum across every flow that touched
+>   it in any case. `last_seen` is stamped on all of them because it composes as
+>   a maximum rather than a sum.
+> - **An observation may create only the nodes no provider owns.** A flow record
+>   carries an IP, an interface id and a byte count — never a type, tags, subnet
+>   or security groups — so a typed node built from one would be topology
+>   reconstructed from shadows that the next full scan would disagree with. The
+>   exception is the `GenericIpAddress`/`GenericHostname`/`ExternalService`
+>   pivots (`Node::owner()` is `None`), which the projectors already emit for
+>   addresses they do not recognise either. That exception is what makes a flow
+>   between two clouds land as a real edge between their estates.
+> - **Expiry deletes, and Tier 3 applies it.** Each reconciliation folds the
+>   current overlay into the freshly scanned graph *before* diffing, so a flow
+>   that has gone quiet is simply absent from the next graph and the ordinary
+>   differ removes its edge. Tier 2 removes nothing itself, exactly as Tier 1
+>   garbage-collects nothing. The corollary is that `Edge::TrafficFlow` is the
+>   one thing `patch::carry_forward` refuses to hold: a provider going dark says
+>   nothing about whether traffic is still flowing, and holding those edges
+>   would freeze liveness for as long as any collector is unhealthy.
+> - **A third health report, for a third question.** `/collection.json`'s
+>   `flows` key sits beside `stream` for the same reason `stream` sits beside
+>   the scan: an unreachable flow-log bucket leaves the topology entirely
+>   correct and only the liveness stale, so it must never enter
+>   `unreadable_sources()`. Its `observed` count is what lets a client tell "we
+>   stopped looking" from "the network went quiet".
+>
+> The overlay is bounded as well as expiring (`DEFAULT_CAPACITY`), because flow
+> logs are the highest-volume feed of the three and a busy VPC talks to a
+> practically unlimited number of external addresses — each of which would
+> otherwise pull a node into the graph for the lifetime of the process.
+>
+> The snapshot contract went to **v3** for this: `observations` on the snapshot,
+> `observations`/`expired` on the patch. Freshness changes far more often than
+> topology, so it had to be patchable without re-announcing a resource.
+
 ## 10. Open Questions
 
 - **Reconciliation cadence vs. cost** — how slow can Tier 3 run before drift
   becomes noticeable? Likely per-cloud and per-resource-class.
+- **Liveness TTL vs. flow-log lag** — `--flow-ttl-secs` defaults to fifteen
+  minutes, generous against AWS's one-to-ten-minute aggregation windows plus
+  delivery lag. Too short marks healthy resources dark for pipeline reasons;
+  too long claims a decommissioned host is still talking. The right value is
+  probably per-provider, since GCP and Azure aggregate differently.
+- **Generic-node identity is byte-exact, with no normalization.** Every
+  cross-cloud merge in this design — and now every flow-log endpoint — resolves
+  by a `HashMap<Node, NodeIndex>` lookup on the typed value, so
+  `GenericIpAddress("10.10.1.10")` matches only that exact string.
+  `010.010.001.010`, `2001:db8::1` against `2001:0db8:0000:...`, an
+  IPv4-mapped IPv6 form, or a hostname differing only in a trailing dot are all
+  *different nodes*. The graph then holds two pivots for one address and the
+  seam silently fails to stitch. This predates Tier 2 (the fixtures document
+  their seams as "identical strings on purpose"), but flow logs widen the
+  exposure, since AWS formats addresses in the flow-log writer rather than in
+  the EC2 API. The fix is to canonicalise at the one place a `GenericIpAddress`
+  or `GenericHostname` is constructed — parse to `IpAddr` and re-`Display`,
+  lowercase and strip the trailing dot on hostnames — rather than at each of the
+  ~dozen call sites, and to leave anything that will not parse untouched instead
+  of guessing.
+- **Observed traffic does not confirm inferred reachability.** §4 lists
+  "confirming inferred edges" as one of the things flow logs are genuinely good
+  for — a security-group rule says traffic *could* flow, a flow record proves it
+  *did* — and that link does not exist. Security groups project their rules as
+  `GenericIpAddress("198.51.100.0/24")` (`projector/aws.rs`), flow logs produce
+  `GenericIpAddress("198.51.100.10")`, and exact-value matching keeps them
+  apart. Closing it means CIDR *containment*, not equality: build a prefix trie
+  over the CIDR-shaped generic nodes once per scan and link each observed
+  address into the ranges that contain it. Two things to decide first — whether
+  that link is a new edge kind or a reuse of `RoutesTo` (it asserts something
+  about a *rule*, not about traffic, so probably its own kind), and who owns it,
+  since a rule-to-address edge is derived from both tiers at once and therefore
+  fits neither `carry_forward`'s ownership model nor the flow overlay's expiry.
 - **Cross-account/org onboarding** — event feeds need setup per account/project/
   subscription; how do we make enabling them turnkey for an operator?
 - ~~**Ordering & idempotency**~~ — settled for Tier 1 in `atlas::event`:

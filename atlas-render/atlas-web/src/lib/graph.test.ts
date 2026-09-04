@@ -7,6 +7,7 @@ import {
 	type Snapshot,
 	type SnapshotEdge,
 	type SnapshotNode,
+	type SnapshotObservation,
 	snapshotFromGraph,
 } from "./graph";
 import { nodeSize, PROVIDER_COLORS } from "./style";
@@ -24,6 +25,12 @@ function edge(sourceKey: string, targetKey: string, kind: string): SnapshotEdge 
 		target_key: targetKey,
 		kind,
 	};
+}
+
+// A node observation, which is the shape most of these tests use: freshness
+// and verdict, no volume.
+function observation(key: string, lastSeen: number, status = "accepted"): SnapshotObservation {
+	return { key, last_seen: lastSeen, status };
 }
 
 function snapshot(partial: Partial<Snapshot>): Snapshot {
@@ -190,5 +197,96 @@ describe("snapshotFromGraph", () => {
 
 		const warm = snapshotFromGraph(graph, true);
 		expect(warm.nodes[0]).toMatchObject({ x: 12, y: 34 });
+	});
+});
+
+// The Tier-2 overlay: liveness keyed by the same stable node/edge keys, riding
+// its own list because freshness changes far more often than topology does.
+describe("observations", () => {
+	test("attach liveness to the node they name", () => {
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress")],
+				observations: [observation("ip-a", 1788436800000)],
+			}),
+		);
+		expect(graph.getNodeAttribute("ip-a", "lastSeen")).toBe(1788436800000);
+		expect(graph.getNodeAttribute("ip-a", "flowStatus")).toBe("accepted");
+	});
+
+	test("attach liveness to the edge they name", () => {
+		const flow = edge("ip-a", "ip-b", "TrafficFlow");
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress"), node("ip-b", "GenericIpAddress")],
+				edges: [flow],
+				observations: [observation(flow.key, 1788436800000, "mixed")],
+			}),
+		);
+		expect(graph.getEdgeAttribute(flow.key, "flowStatus")).toBe("mixed");
+	});
+
+	// The feed can observe a resource before any scan has found it. Inventing a
+	// node for one is the server's decision, not ours.
+	test("naming nothing in the graph is ignored, not an error", () => {
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress")],
+				observations: [observation("ip-nowhere", 1788436800000)],
+			}),
+		);
+		expect(graph.order).toBe(1);
+	});
+
+	test("a patch refreshes freshness without touching topology", () => {
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress")],
+				observations: [observation("ip-a", 1)],
+			}),
+		);
+		applyPatch(graph, patch({ observations: [observation("ip-a", 2)] }));
+		expect(graph.order).toBe(1);
+		expect(graph.getNodeAttribute("ip-a", "lastSeen")).toBe(2);
+	});
+
+	// Without this a client keeps the last freshness it heard forever, and a
+	// resource that has gone silent stays lit.
+	test("an expired key stops reporting as live", () => {
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress")],
+				observations: [observation("ip-a", 1)],
+			}),
+		);
+		applyPatch(graph, patch({ expired: ["ip-a"] }));
+		expect(graph.getNodeAttribute("ip-a", "lastSeen")).toBeUndefined();
+		expect(graph.hasNode("ip-a")).toBe(true);
+	});
+
+	// A server that predates the overlay sends neither list.
+	test("a patch with no liveness applies cleanly", () => {
+		const graph = buildGraph(snapshot({ nodes: [node("ip-a", "GenericIpAddress")] }));
+		applyPatch(graph, patch({ added_nodes: [node("ip-b", "GenericIpAddress")] }));
+		expect(graph.order).toBe(2);
+	});
+
+	// Volume belongs to the flow, because one record names several nodes and
+	// stamping its counters on each would report the same traffic repeatedly.
+	test("volume rides on flow edges, not on nodes", () => {
+		const flow = edge("ip-a", "ip-b", "TrafficFlow");
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress"), node("ip-b", "GenericIpAddress")],
+				edges: [flow],
+				observations: [
+					{ key: flow.key, last_seen: 1, packets: 24, bytes: 4800, status: "accepted" },
+					observation("ip-a", 1),
+				],
+			}),
+		);
+		expect(graph.getEdgeAttribute(flow.key, "packets")).toBe(24);
+		expect(graph.getNodeAttribute("ip-a", "packets")).toBeUndefined();
+		expect(graph.getNodeAttribute("ip-a", "lastSeen")).toBe(1);
 	});
 });

@@ -5,6 +5,7 @@ pub mod dynamodb;
 pub mod eks;
 pub mod eventbridge;
 pub mod events;
+pub mod flow_logs;
 pub mod instance;
 pub mod lambda;
 pub mod load_balancer;

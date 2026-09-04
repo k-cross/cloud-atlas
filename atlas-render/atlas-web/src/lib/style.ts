@@ -34,6 +34,9 @@ export const EDGE_COLORS: Record<string, string> = {
 	HasIp: "#38585e",
 	RoutesTo: "#2f6285",
 	ResolvesTo: "#6c4a78",
+	// Observed traffic, not inferred reachability — the brightest edge in the
+	// palette, because it is the only one that says something is happening now.
+	TrafficFlow: "#3f8f6f",
 };
 
 // Degree-scaled size: hubs (VPCs, subnets, zones) stand out, leaves stay

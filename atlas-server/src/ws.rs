@@ -14,7 +14,7 @@
 use crate::state::AppState;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::export::{
-    RenderEdge, RenderNode, SNAPSHOT_VERSION, node_key, render_snapshot,
+    RenderEdge, RenderNode, SNAPSHOT_VERSION, node_key, render_snapshot_with,
 };
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -120,8 +120,9 @@ async fn send_snapshot(
 ) -> Result<(), ()> {
     let value = {
         let live = state.live.read().await;
-        let mut v =
-            serde_json::to_value(render_snapshot(&live.graph)).unwrap_or_else(|_| json!({}));
+        let flows = state.flows.read().await;
+        let snapshot = render_snapshot_with(&live.graph, flows.observations());
+        let mut v = serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}));
         v["type"] = json!("snapshot");
         v
     };
@@ -193,6 +194,7 @@ mod tests {
     use atlas_lib::atlas::collection::CollectionReport;
     use atlas_lib::atlas::definition::{Edge, Node};
     use atlas_lib::atlas::export::{SNAPSHOT_VERSION, node_key};
+    use atlas_lib::atlas::flow::FlowIndex;
     use atlas_lib::atlas::graph_builder::GraphBuilder;
     use atlas_lib::atlas::patch::GraphPatch;
     use futures::channel::mpsc;
@@ -208,7 +210,10 @@ mod tests {
         let b = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
         builder.add_edge(a, b, Edge::ResolvesTo);
         let key = node_key(&builder.graph[a]);
-        (AppState::new(builder, CollectionReport::default()), key)
+        (
+            AppState::new(builder, CollectionReport::default(), FlowIndex::default()),
+            key,
+        )
     }
 
     /// Drive one client message and return every frame it produced.

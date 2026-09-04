@@ -10,11 +10,20 @@
 //! poll interval later. It only ever says what it was told, so it can add a
 //! resource, and delete the one an event named, but never garbage-collect.
 //!
-//! Both run on *this* task, chosen by `select!`, which is what keeps mutation
-//! serialized (the graph-actor intent of `docs/change_monitoring_design.md` §7)
-//! without either tier taking a lock the other is waiting on.
+//! **Tier 2** is the flow feed (`stream::FlowSource`): observed traffic, folded
+//! into `AppState::flows` and laid over the graph as `Edge::TrafficFlow` plus
+//! per-key freshness. It is the only tier that can say a resource is *doing*
+//! something, and the only one that never decides anything exists. Its edges
+//! are re-folded onto every scan before the diff, so an observation that lapses
+//! is removed by the ordinary differ rather than by a special path — see
+//! `atlas::flow`.
 //!
-//! The two do race, and the resolution is deliberate: a reconciliation scan
+//! All three run on *this* task, chosen by `select!`, which is what keeps
+//! mutation serialized (the graph-actor intent of
+//! `docs/change_monitoring_design.md` §7) without any tier taking a lock
+//! another is waiting on.
+//!
+//! Tiers 1 and 3 do race, and the resolution is deliberate: a reconciliation scan
 //! installs the estate as it looked when the scan *started*, so a resource
 //! created by an event mid-scan is removed by that tick's diff and re-added by
 //! the next one. Clients are never inconsistent — the patch always describes
@@ -28,8 +37,9 @@ use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKi
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
+use atlas_lib::atlas::flow::{FlowIndex, FlowObservation};
 use atlas_lib::atlas::graph_builder::GraphBuilder;
-use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff};
+use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff, merge_additions};
 use atlas_lib::fixtures;
 use petgraph::graph::Graph;
 use std::collections::HashSet;
@@ -57,6 +67,17 @@ impl Source {
             Source::Demo => (demo_graph(tick), CollectionReport::default()),
         }
     }
+
+    /// Traffic this source observes without a feed. Only the demo has any: it
+    /// re-observes the fixtures' flows every tick so a credential-free run
+    /// carries live-looking liveness, exactly as the real path does off
+    /// `stream::FlowSource`.
+    fn observations(&self) -> Vec<FlowObservation> {
+        match self {
+            Source::Live(_) => Vec::new(),
+            Source::Demo => fixtures::flows(),
+        }
+    }
 }
 
 /// The fixtures graph, plus a small connected sentinel pair on odd ticks. The
@@ -81,14 +102,22 @@ fn demo_graph(tick: u64) -> GraphBuilder {
 /// `held` is what [`Retention`] decided, not simply what failed: a source that
 /// has been unreadable for too long is no longer held, so the graph converges
 /// instead of waiting forever on a collector that never recovers.
+///
+/// The flow overlay is folded on *after* carry-forward and before the diff, so
+/// the scanned graph is compared against the live one with the same decoration
+/// on both sides. That ordering is what makes Tier-2 expiry work through the
+/// ordinary differ: a flow the overlay no longer believes in is simply absent
+/// from `next`, and the diff removes its edge like any other.
 fn reconcile(
     live: &Graph<Node, Edge>,
     next: &mut GraphBuilder,
     held: &HashSet<CollectionSource>,
+    flows: &FlowIndex,
 ) -> GraphPatch {
     if !held.is_empty() {
         carry_forward(next, live, held);
     }
+    flows.overlay(next);
     diff(live, &next.graph)
 }
 
@@ -141,6 +170,8 @@ fn publish(state: &AppState, patch: GraphPatch, tier: &'static str) {
         removed_nodes = patch.removed_nodes.len(),
         added_edges = patch.added_edges.len(),
         removed_edges = patch.removed_edges.len(),
+        observations = patch.observations.len(),
+        expired = patch.expired.len(),
         "graph changed",
     );
     // Err only means no subscribers are connected — nothing to do.
@@ -154,16 +185,21 @@ pub async fn run(
     state: AppState,
     source: Source,
     events: stream::Source,
+    flows: stream::FlowSource,
     interval: Duration,
     retention: Retention,
 ) {
     let mut retention = retention;
     let mut applier = EventApplier::new();
     let mut backoff = stream::Backoff::new();
+    let mut flow_backoff = stream::Backoff::new();
     let mut tick: u64 = 0;
 
     if events.is_enabled() {
         tracing::info!("tier-1 event feed enabled; reconciling every {interval:?}");
+    }
+    if flows.is_enabled() {
+        tracing::info!("tier-2 flow feed enabled");
     }
 
     // `interval` fires immediately on its first tick; the graph was just
@@ -180,6 +216,7 @@ pub async fn run(
     // reconciliation tick winning the `select!` merely stops polling the drain;
     // it resumes untouched next time round.
     let mut drain = Box::pin(events.next(backoff.delay()));
+    let mut flow_drain = Box::pin(flows.next(flow_backoff.delay()));
 
     loop {
         tokio::select! {
@@ -188,18 +225,49 @@ pub async fn run(
                 reconcile_tick(&state, &source, &mut retention, tick).await;
             }
             batch = &mut drain => {
-                backoff.record(batch.report.is_complete());
+                backoff.record(healthy(&batch.report));
                 ingest(&state, &mut applier, batch).await;
                 drain = Box::pin(events.next(backoff.delay()));
             }
+            batch = &mut flow_drain => {
+                flow_backoff.record(healthy(&batch.report));
+                ingest_flows(&state, batch).await;
+                flow_drain = Box::pin(flows.next(flow_backoff.delay()));
+            }
         }
     }
+}
+
+/// Whether a feed is worth going straight back to, as opposed to backing off.
+///
+/// Deliberately *not* `is_complete()`, which is false for any failure at all
+/// including [`FailureKind::Malformed`] — and a malformed message means the
+/// feed was read perfectly well and one thing on it could not be understood.
+/// Backing off there punishes a healthy queue for its contents: a poison
+/// message, a partial `DeleteMessageBatch`, or — worst — a flow-log bucket
+/// configured for Parquet, where *every* object is malformed and the feed
+/// would sit pinned at the backoff ceiling while being entirely readable.
+fn healthy(report: &CollectionReport) -> bool {
+    report.unreadable_sources().is_empty()
 }
 
 /// One Tier-3 pass: scan, decide what is held, diff, install, broadcast.
 async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Retention, tick: u64) {
     let (mut next, report) = source.scan(tick).await;
     let held = retention.hold(&report);
+
+    // One instant for the whole tick, and the only place the overlay ages.
+    // Expiry is deliberately driven from the reconciliation clock rather than
+    // from the flow feed: a feed that has gone silent must still let its
+    // observations lapse, or a dead flow pipeline would pin the last traffic it
+    // ever saw as permanently current.
+    {
+        let mut flows = state.flows.write().await;
+        for observation in &source.observations() {
+            flows.observe(observation);
+        }
+        flows.expire(now_millis());
+    }
 
     if !report.is_complete() {
         // `held` rather than "holding": a scan can be incomplete without
@@ -226,20 +294,82 @@ async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Reten
 
     // Diff under the read lock — no full-graph clone, and the critical
     // section is just the comparison. WebSocket readers share the lock.
-    let patch = {
+    let mut patch = {
         let live = state.live.read().await;
-        reconcile(&live.graph, &mut next, &held)
+        let flows = state.flows.read().await;
+        reconcile(&live.graph, &mut next, &held, &flows)
     };
 
     // Published even when the graph is unchanged: a provider going dark
     // changes what the snapshot *means* without changing a single node.
     *state.report.write().await = report;
 
-    if patch.is_empty() {
+    // Whether to install `next` is a question about topology alone. Freshness
+    // rides on the same patch but changes nothing in the graph, so a tick that
+    // only refreshed liveness must not churn the installed node indices.
+    let topology_changed = !patch.is_empty();
+    {
+        let mut flows = state.flows.write().await;
+        patch.observations = flows.drain_observations();
+        patch.expired = flows.drain_lapsed();
+    }
+
+    if topology_changed {
+        *state.live.write().await = next;
+    }
+    publish(state, patch, "reconcile");
+}
+
+/// One Tier-2 batch: record what was observed, add the traffic edges it implies,
+/// and publish the feed's own health.
+///
+/// The edges go in immediately rather than waiting for the next reconciliation,
+/// for the same reason Tier 1 does not wait: a flow that has already been
+/// observed is not news a minute later. The next scan folds the same overlay in
+/// and agrees.
+async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
+    if !batch.report.is_complete() {
+        tracing::warn!(
+            failures = batch.report.failures.len(),
+            "flow feed degraded: {}",
+            batch.report.summary()
+        );
+    }
+    // Third report, third question. A flow feed we cannot read leaves the
+    // topology entirely correct and only the liveness stale, so it must not
+    // suspend a removal any more than a dead event feed may.
+    *state.flow_report.write().await = batch.report;
+
+    if batch.observations.is_empty() {
         return;
     }
-    *state.live.write().await = next;
-    publish(state, patch, "reconcile");
+
+    let patch = {
+        let mut live = state.live.write().await;
+        let mut flows = state.flows.write().await;
+        for observation in &batch.observations {
+            flows.observe(observation);
+        }
+        let context = FlowIndex::context(&live, &batch.observations);
+        let mut patch = merge_additions(&mut live, &context);
+        patch.observations = flows.drain_observations();
+        // Drained together with the observations, never left for the next
+        // reconciliation. `evict` retires keys as a side effect of `observe`,
+        // and a lapse that outlives the patch it belongs to can be contradicted
+        // before it is sent: re-observe the evicted key in a later batch and
+        // the tick would announce an expiry for a flow that is live again,
+        // darkening it on every client until it next happens to be seen.
+        patch.expired = flows.drain_lapsed();
+        patch
+    };
+    publish(state, patch, "flow");
+}
+
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 /// One Tier-1 batch: apply, broadcast, and publish the feed's own health.
@@ -272,6 +402,7 @@ mod tests {
 
     use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
     use atlas_lib::atlas::event::ChangeOp;
+    use atlas_lib::atlas::flow::FlowAction;
 
     const T0: i64 = 1_788_436_800_000;
 
@@ -303,6 +434,13 @@ mod tests {
 
     fn nothing_held() -> HashSet<CollectionSource> {
         HashSet::new()
+    }
+
+    /// A reconciliation with no observed traffic to lay over it. The overlay's
+    /// own behaviour is covered in `atlas::flow`; these tests are about the
+    /// retention policy, which must be unaffected by it.
+    fn no_flows() -> FlowIndex {
+        FlowIndex::default()
     }
 
     /// AWS held back -- it owns the kind these tests drop.
@@ -374,7 +512,7 @@ mod tests {
             "fixture must contain the kind this test drops"
         );
 
-        let patch = reconcile(&live, &mut next, &held);
+        let patch = reconcile(&live, &mut next, &held, &no_flows());
         assert!(
             !patch.removed_nodes.is_empty(),
             "a scan that was read stays authoritative about what is gone"
@@ -451,13 +589,18 @@ mod tests {
             "fixture must contain the kind this test drops"
         );
 
-        let complete_patch = reconcile(&live, &mut without_kind(&live, dropped), &nothing_held());
+        let complete_patch = reconcile(
+            &live,
+            &mut without_kind(&live, dropped),
+            &nothing_held(),
+            &no_flows(),
+        );
         assert!(
             !complete_patch.removed_nodes.is_empty(),
             "a complete scan is authoritative and must still delete"
         );
 
-        let patch = reconcile(&live, &mut next, &holding_aws());
+        let patch = reconcile(&live, &mut next, &holding_aws(), &no_flows());
         assert!(
             patch.removed_nodes.is_empty() && patch.removed_edges.is_empty(),
             "an incomplete scan deleted {} nodes / {} edges",
@@ -481,7 +624,12 @@ mod tests {
 
         for scan in 1..=2 {
             let held = retention.hold(&aws_throttled());
-            let patch = reconcile(&live, &mut without_kind(&live, "AwsEc2Instance"), &held);
+            let patch = reconcile(
+                &live,
+                &mut without_kind(&live, "AwsEc2Instance"),
+                &held,
+                &no_flows(),
+            );
             assert!(
                 patch.removed_nodes.is_empty(),
                 "scan {scan} is still within budget and must not delete"
@@ -494,7 +642,12 @@ mod tests {
             "the budget is spent, AWS is no longer held"
         );
 
-        let patch = reconcile(&live, &mut without_kind(&live, "AwsEc2Instance"), &held);
+        let patch = reconcile(
+            &live,
+            &mut without_kind(&live, "AwsEc2Instance"),
+            &held,
+            &no_flows(),
+        );
         assert!(
             !patch.removed_nodes.is_empty(),
             "past its budget, an unreadable source must stop blocking removals"
@@ -506,7 +659,7 @@ mod tests {
         let live = demo_graph(2).graph;
         let mut next = without_kind(&demo_graph(3).graph, "AwsEc2Instance");
 
-        let patch = reconcile(&live, &mut next, &holding_aws());
+        let patch = reconcile(&live, &mut next, &holding_aws(), &no_flows());
 
         assert_eq!(
             patch.added_nodes.len(),
@@ -523,7 +676,7 @@ mod tests {
         let mut next = demo_graph(3);
         let same = next.graph.clone();
 
-        let with_policy = reconcile(&live, &mut next, &nothing_held());
+        let with_policy = reconcile(&live, &mut next, &nothing_held(), &no_flows());
         let plain = diff(&live, &same);
 
         assert_eq!(with_policy.added_nodes.len(), plain.added_nodes.len());
@@ -640,6 +793,247 @@ mod tests {
         assert!(!live.contains(&doomed));
     }
 
+    // ------------------------------------------------------------------
+    // Tier 2
+    // ------------------------------------------------------------------
+
+    /// Traffic to somewhere the fixtures never mention, so the overlay's
+    /// contribution is unambiguous.
+    fn observed(src: &str, dst: &str, at: i64) -> FlowObservation {
+        FlowObservation {
+            source: CollectionSource::Aws,
+            scope: "us-east-1".to_owned(),
+            src: Node::GenericIpAddress(src.into()),
+            dst: Node::GenericIpAddress(dst.into()),
+            resources: Vec::new(),
+            packets: 12,
+            bytes: 900,
+            action: Some(FlowAction::Accepted),
+            observed_at: at,
+        }
+    }
+
+    fn state_with(graph: GraphBuilder) -> AppState {
+        AppState::new(graph, CollectionReport::default(), FlowIndex::default())
+    }
+
+    /// The latency win that justifies the tier: observed traffic reaches the
+    /// graph — and a connected client — without waiting for a reconciliation.
+    #[tokio::test]
+    async fn a_flow_batch_adds_traffic_without_waiting_for_a_scan() {
+        let state = state_with(demo_graph(2));
+        let mut patches = state.patches.subscribe();
+
+        ingest_flows(
+            &state,
+            stream::FlowBatch {
+                observations: vec![observed("10.10.1.10", "192.0.2.5", T0)],
+                report: CollectionReport::default(),
+            },
+        )
+        .await;
+
+        let patch = patches.try_recv().expect("a patch was broadcast");
+        assert!(patch.added_edges.iter().any(|e| e.kind == "TrafficFlow"));
+        assert!(
+            !patch.observations.is_empty(),
+            "the freshness rides along with the edge"
+        );
+        assert!(state.live.read().await.has_edge(
+            &Node::GenericIpAddress("10.10.1.10".into()),
+            &Node::GenericIpAddress("192.0.2.5".into()),
+            &Edge::TrafficFlow
+        ));
+    }
+
+    /// Tier 2 sees only what crossed the network, so it can never conclude
+    /// anything is gone. Removal stays Tier 3's alone.
+    #[tokio::test]
+    async fn a_flow_batch_never_removes_anything() {
+        let state = state_with(demo_graph(2));
+        let before = state.live.read().await.graph.node_count();
+        let mut patches = state.patches.subscribe();
+
+        ingest_flows(
+            &state,
+            stream::FlowBatch {
+                observations: vec![observed("10.10.1.10", "192.0.2.5", T0)],
+                report: CollectionReport::default(),
+            },
+        )
+        .await;
+
+        let patch = patches.try_recv().expect("a patch was broadcast");
+        assert!(patch.removed_nodes.is_empty() && patch.removed_edges.is_empty());
+        assert!(state.live.read().await.graph.node_count() > before);
+    }
+
+    /// A flow feed we cannot read makes liveness stale and nothing else. Rolling
+    /// it into the scan report would make an unreachable bucket suspend
+    /// deletions across all of AWS — the same mistake, one tier along.
+    #[tokio::test]
+    async fn a_broken_flow_feed_is_reported_without_touching_scan_health() {
+        let state = state_with(demo_graph(2));
+        let mut broken = CollectionReport::default();
+        broken.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/flow-logs",
+            "bucket unreachable",
+        );
+
+        ingest_flows(
+            &state,
+            stream::FlowBatch {
+                observations: Vec::new(),
+                report: broken,
+            },
+        )
+        .await;
+
+        assert!(!state.flow_report.read().await.is_complete());
+        assert!(
+            state.report.read().await.is_complete(),
+            "the scan read every provider end to end"
+        );
+        assert!(
+            state
+                .flow_report
+                .read()
+                .await
+                .unreadable_sources()
+                .contains(&CollectionSource::Aws),
+            "the feed's own health still names what it could not read"
+        );
+    }
+
+    /// A message we could not parse means the queue was read perfectly well and
+    /// one thing on it was not understood. Backing off there punishes a healthy
+    /// feed for its contents — and a bucket configured for Parquet makes *every*
+    /// object malformed, which would pin a fully readable feed at the ceiling
+    /// for as long as the server runs.
+    #[test]
+    fn a_malformed_message_does_not_back_the_feed_off() {
+        let mut malformed = CollectionReport::default();
+        malformed.note(
+            CollectionSource::Aws,
+            FailureKind::Malformed,
+            "us-east-1/flow-logs",
+            "Parquet-formatted flow logs are not supported",
+        );
+
+        assert!(!malformed.is_complete(), "something was still lost");
+        assert!(healthy(&malformed), "but the feed itself was readable");
+
+        let mut unreachable = CollectionReport::default();
+        unreachable.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/flow-logs",
+            "timed out",
+        );
+        assert!(!healthy(&unreachable), "this is what backoff is for");
+    }
+
+    /// `evict` retires keys as a side effect of `observe`, so a lapse that
+    /// outlived its patch could be contradicted before it was ever sent:
+    /// re-observe the evicted key in a later batch and the next tick would
+    /// announce an expiry for a flow that is live again, darkening it on every
+    /// client until it happened to be seen once more.
+    #[tokio::test]
+    async fn a_batch_that_evicts_announces_the_lapse_in_its_own_patch() {
+        let state = AppState::new(
+            demo_graph(2),
+            CollectionReport::default(),
+            FlowIndex::new(Duration::from_secs(3600), 4),
+        );
+        let mut patches = state.patches.subscribe();
+        let observations = (0..12)
+            .map(|i| observed("10.10.1.10", &format!("192.0.2.{i}"), T0 + i))
+            .collect();
+
+        ingest_flows(
+            &state,
+            stream::FlowBatch {
+                observations,
+                report: CollectionReport::default(),
+            },
+        )
+        .await;
+
+        let patch = patches.try_recv().expect("a patch was broadcast");
+        assert!(
+            !patch.expired.is_empty(),
+            "the batch evicted flows and must say so in the same patch"
+        );
+    }
+
+    /// The scan graph is rebuilt from scratch every tick and knows nothing about
+    /// traffic, so without the overlay being folded back on, every
+    /// reconciliation would delete every flow edge and the next batch would put
+    /// them back — flapping forever.
+    #[test]
+    fn a_reconciliation_does_not_wipe_traffic_the_scan_cannot_see() {
+        let mut flows = FlowIndex::default();
+        flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
+
+        let mut live = demo_graph(2);
+        flows.overlay(&mut live);
+        let mut next = demo_graph(2);
+
+        let patch = reconcile(&live.graph, &mut next, &nothing_held(), &flows);
+
+        assert!(patch.is_empty(), "a settled tick must change nothing");
+    }
+
+    /// And the other half: expiry works *through* the differ. Nothing in Tier 2
+    /// removes anything itself; the overlay simply stops claiming the flow.
+    #[test]
+    fn an_observation_that_lapses_is_removed_by_the_next_reconciliation() {
+        let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
+        flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
+
+        let mut live = demo_graph(2);
+        flows.overlay(&mut live);
+        flows.expire(T0 + 11 * 60 * 1000);
+
+        let mut next = demo_graph(2);
+        let patch = reconcile(&live.graph, &mut next, &nothing_held(), &flows);
+
+        assert!(
+            patch
+                .removed_edges
+                .iter()
+                .any(|key| key.starts_with("TrafficFlow|")),
+            "the lapsed flow's edge must go"
+        );
+    }
+
+    /// Retention holds what an *unreadable provider* could not confirm. A
+    /// traffic edge was never confirmed by a provider in the first place, so
+    /// holding it would suspend the overlay's own expiry for as long as any
+    /// collector is unhealthy — liveness frozen by an unrelated outage.
+    #[test]
+    fn an_incomplete_scan_does_not_hold_traffic_edges() {
+        let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
+        flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
+
+        let mut live = demo_graph(2);
+        flows.overlay(&mut live);
+        flows.expire(T0 + 11 * 60 * 1000);
+
+        let mut next = demo_graph(2);
+        let patch = reconcile(&live.graph, &mut next, &holding_aws(), &flows);
+
+        assert!(
+            patch
+                .removed_edges
+                .iter()
+                .any(|key| key.starts_with("TrafficFlow|")),
+            "an AWS outage says nothing about whether traffic is still flowing"
+        );
+    }
+
     /// The documented race, pinned so it stays a known trade and not a
     /// surprise: the next reconciliation installs the estate as the scan saw
     /// it, which puts back a resource an event deleted mid-scan. The graph is
@@ -657,7 +1051,7 @@ mod tests {
         );
 
         let mut next = demo_graph(2);
-        let patch = reconcile(&live.graph, &mut next, &nothing_held());
+        let patch = reconcile(&live.graph, &mut next, &nothing_held(), &no_flows());
 
         assert!(
             patch

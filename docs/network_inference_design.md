@@ -19,7 +19,28 @@ For services without direct API integration, we infer their presence using secur
 - **Graph path**: `AwsEc2SecurityGroup -> RoutesTo -> GenericIpAddress -> ResolvesTo -> ExternalService`.
 
 ## 3. Lightweight Network Telemetry
-Future live flow metrics (packet counts, blocked status) will be stored as properties (weights) on the edges.
-- **Edge Definition**: Extend `Edge` (e.g., adding a `TrafficFlow` variant) to store `status`, `packet_count`, `last_seen`.
-- **Ingestion**: Avoid polling. Use cloud-native streaming (AWS EventBridge/Kinesis, GCP Log Router -> Pub/Sub) for flow logs.
-- **Performance**: In-memory graph edge updates are exceptionally fast, decoupling cloud log ingestion from graph liveness state.
+**Built** — `atlas-lib/src/atlas/flow.rs`, Tier 2 of `change_monitoring_design.md`.
+
+- **Edge Definition**: `Edge::TrafficFlow` marks traffic that was *observed*
+  between two endpoints. It carries no payload, which is a correction to this
+  document's original sketch: `Edge` is the graph's identity type — hashed,
+  deduplicated on insert, diffed by value — so storing `packet_count` on it
+  would make every metric update a different edge, duplicating past
+  `GraphBuilder::add_edge`'s dedup and emitting a remove-then-add of the same
+  `edge_key` in every reconciliation patch. `status`, `packets`, `bytes` and
+  `last_seen` therefore live in `flow::FlowIndex` beside the graph, keyed by the
+  same stable `node_key`/`edge_key`. The same mechanism carries *node*
+  freshness, which could never have been a field on `Node` for the same reason.
+- **Ingestion**: No polling of the network itself. VPC Flow Logs deliver to S3,
+  whose event notifications land on an SQS queue that `cloud/amazon/flow_logs.rs`
+  drains (`--aws-flow-log-queue`). GCP's Log Router → Pub/Sub and Azure's VNet
+  flow logs normalize into the same `FlowObservation`.
+- **Cross-cloud, for free**: both endpoints are `GenericIpAddress` pivots, so a
+  flow from an AWS instance to an address the Azure scan also reported becomes a
+  real edge between the two estates — §1's merge, arrived at from the data plane
+  instead of from DNS.
+- **Performance**: edge updates are in-memory and the overlay is bounded and
+  expiring, which is what decouples log ingestion volume from the size of the
+  twin. An observation that lapses stops being folded into the scan graph, and
+  the ordinary Tier-3 differ removes its edge — this tier never deletes anything
+  itself.

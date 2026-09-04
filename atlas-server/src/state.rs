@@ -5,6 +5,7 @@
 //! readers that also subscribe to the broadcast for incremental patches.
 
 use atlas_lib::atlas::collection::CollectionReport;
+use atlas_lib::atlas::flow::FlowIndex;
 use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::GraphPatch;
 use std::sync::Arc;
@@ -36,16 +37,28 @@ pub struct AppState {
     /// report would make an unreachable queue suspend removals across all of
     /// AWS, which is precisely backwards.
     pub stream_report: Arc<RwLock<CollectionReport>>,
+    /// The Tier-2 flow overlay: which endpoints have been seen talking, and how
+    /// recently. Held beside the graph rather than inside it because `Node` and
+    /// `Edge` are identity types — see `atlas::flow` — and because freshness
+    /// changes on a completely different cadence from topology.
+    pub flows: Arc<RwLock<FlowIndex>>,
+    /// What the flow feed could not read, kept separate from both other reports
+    /// for the same reason they are separate from each other: an unreachable
+    /// flow-log bucket makes *liveness* stale. It leaves the topology entirely
+    /// correct, so it must never suspend a removal.
+    pub flow_report: Arc<RwLock<CollectionReport>>,
 }
 
 impl AppState {
-    pub fn new(initial: GraphBuilder, report: CollectionReport) -> Self {
+    pub fn new(initial: GraphBuilder, report: CollectionReport, flows: FlowIndex) -> Self {
         let (patches, _) = broadcast::channel(PATCH_CHANNEL_CAPACITY);
         Self {
             live: Arc::new(RwLock::new(initial)),
             patches,
             report: Arc::new(RwLock::new(report)),
             stream_report: Arc::new(RwLock::new(CollectionReport::default())),
+            flows: Arc::new(RwLock::new(flows)),
+            flow_report: Arc::new(RwLock::new(CollectionReport::default())),
         }
     }
 }

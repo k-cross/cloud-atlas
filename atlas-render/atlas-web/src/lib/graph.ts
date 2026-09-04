@@ -9,8 +9,9 @@ import { DEFAULT_EDGE_COLOR, EDGE_COLORS, nodeSize, PROVIDER_COLORS, providerOf 
 // Must match atlas-lib's `export::SNAPSHOT_VERSION` and atlas-layout's
 // `graph::SNAPSHOT_VERSION`. v2 added the stable `key` fields the live backend
 // uses to reference specific nodes/edges across rebuilds; graphology nodes are
-// keyed by `key` so patches can locate them.
-export const SNAPSHOT_VERSION = 2;
+// keyed by `key` so patches can locate them. v3 added `observations`, the
+// Tier-2 liveness overlay, keyed by those same node/edge keys.
+export const SNAPSHOT_VERSION = 3;
 
 export interface SnapshotNode {
 	id: number;
@@ -32,10 +33,27 @@ export interface SnapshotEdge {
 	kind: string;
 }
 
+// Liveness for one node or edge, keyed by the same stable `key` it carries.
+// A key naming nothing in the graph is ignored: the flow feed can observe a
+// resource before any scan has found it, and inventing a node for it is the
+// server's job, not ours.
+export interface SnapshotObservation {
+	key: string;
+	last_seen: number;
+	// Volume is present on flow edges only. A node omits it: there it would be
+	// an undirected sum over every flow that touched the node, and one record
+	// names several nodes, so it would count the same traffic more than once.
+	// Sum a node's incident TrafficFlow edges instead.
+	packets?: number;
+	bytes?: number;
+	status: string;
+}
+
 export interface Snapshot {
 	version: number;
 	nodes: SnapshotNode[];
 	edges: SnapshotEdge[];
+	observations?: SnapshotObservation[];
 }
 
 export interface GraphPatch {
@@ -44,6 +62,10 @@ export interface GraphPatch {
 	removed_nodes: string[];
 	added_edges: SnapshotEdge[];
 	removed_edges: string[];
+	// Freshness that changed, and keys whose observation lapsed. Both are
+	// optional so a server that predates the overlay still applies cleanly.
+	observations?: SnapshotObservation[];
+	expired?: string[];
 }
 
 function edgeColor(kind: string): string {
@@ -86,10 +108,44 @@ function resize(graph: Graph, keys: Iterable<string>) {
 	}
 }
 
+// Liveness lives on the graphology entity itself, so a renderer can style by
+// freshness without a second lookup structure to keep in sync with patches.
+// Observations arrive on their own cadence — far more often than topology
+// changes — which is why they travel as their own list rather than as fields
+// on the node.
+function observe(graph: Graph, observations: SnapshotObservation[]) {
+	for (const o of observations) {
+		const attrs: Record<string, unknown> = {
+			lastSeen: o.last_seen,
+			flowStatus: o.status,
+		};
+		if (o.packets !== undefined) attrs.packets = o.packets;
+		if (o.bytes !== undefined) attrs.bytes = o.bytes;
+		if (graph.hasNode(o.key)) graph.mergeNodeAttributes(o.key, attrs);
+		else if (graph.hasEdge(o.key)) graph.mergeEdgeAttributes(o.key, attrs);
+	}
+}
+
+// A lapsed observation has to be cleared, not just left stale: a client that
+// keeps the last freshness it heard shows a silent resource as live forever.
+function clearObservations(graph: Graph, keys: string[]) {
+	const attrs = {
+		lastSeen: undefined,
+		packets: undefined,
+		bytes: undefined,
+		flowStatus: undefined,
+	};
+	for (const key of keys) {
+		if (graph.hasNode(key)) graph.mergeNodeAttributes(key, attrs);
+		else if (graph.hasEdge(key)) graph.mergeEdgeAttributes(key, attrs);
+	}
+}
+
 export function buildGraph(snapshot: Snapshot): Graph {
 	const graph = new Graph({ multi: true, type: "directed" });
 	for (const node of snapshot.nodes) addNode(graph, node);
 	for (const edge of snapshot.edges) addEdge(graph, edge);
+	observe(graph, snapshot.observations ?? []);
 	resize(
 		graph,
 		snapshot.nodes.map((n) => n.key),
@@ -131,6 +187,11 @@ export function applyPatch(graph: Graph, patch: GraphPatch) {
 		touched.add(edge.source_key);
 		touched.add(edge.target_key);
 	}
+
+	// After the topology, so an observation about something the same patch
+	// added lands on an entity that now exists.
+	clearObservations(graph, patch.expired ?? []);
+	observe(graph, patch.observations ?? []);
 
 	resize(graph, touched);
 }

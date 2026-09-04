@@ -17,14 +17,49 @@ use serde::Serialize;
 /// Wire-format version shared with `atlas-layout` and `atlas-web`. v2 added a
 /// stable `key` to every node and edge so the live backend can reference a
 /// specific resource across full-scan rebuilds (petgraph indices are not
-/// stable). Bump all three sides together when the shape changes.
-pub const SNAPSHOT_VERSION: u32 = 2;
+/// stable). v3 added `observations`, the Tier-2 liveness overlay. Bump all
+/// three sides together when the shape changes.
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 #[derive(Serialize)]
 pub struct RenderSnapshot {
     pub version: u32,
     pub nodes: Vec<RenderNode>,
     pub edges: Vec<RenderEdge>,
+    /// Liveness for the nodes and edges traffic was observed on (v3). Keyed by
+    /// the same stable `key` the node/edge carries, and deliberately a separate
+    /// list rather than fields on `RenderNode`/`RenderEdge`: freshness changes
+    /// far more often than topology does, so it has to be patchable on its own
+    /// without re-announcing the resource.
+    pub observations: Vec<RenderObservation>,
+}
+
+/// What the flow overlay has observed about one node or edge.
+///
+/// The `key` is a `node_key` or an `edge_key` — whichever the observation is
+/// about — so a consumer looks it up in the graph it already holds. A key that
+/// names nothing is simply ignored: an observation can name a resource no scan
+/// has found yet, and inventing a node for it is Tier 3's job, not Tier 2's.
+#[derive(Clone, Debug, Serialize)]
+pub struct RenderObservation {
+    pub key: String,
+    /// Epoch milliseconds of the newest flow record that mentioned it — the
+    /// freshness the health overlay reads. Present on nodes and edges alike,
+    /// because it composes as a maximum: recording it against every key one
+    /// record names is idempotent.
+    pub last_seen: i64,
+    /// Volume, on flow *edges* only — absent on a node, where it would be an
+    /// undirected sum over every flow that touched it, and where recording it
+    /// would count one record's traffic once per key the record names. Derive a
+    /// node's throughput from its incident `TrafficFlow` edges instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packets: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// `accepted`, `rejected`, `mixed`, or `observed` — whether the traffic got
+    /// through. A security group says traffic *could* flow; this says whether
+    /// it did.
+    pub status: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -100,7 +135,18 @@ pub fn edge_key(source_key: &str, target_key: &str, edge: &Edge) -> String {
     format!("{}|{}->{}", edge.kind(), source_key, target_key)
 }
 
+/// A snapshot of topology alone. The batch CLI path has no flow overlay, so
+/// its `observations` are empty — which reads as "nothing observed", not as
+/// "everything is dark", because a client that never sees an observation for
+/// any key has no liveness information to overlay in the first place.
 pub fn render_snapshot(graph: &Graph<Node, Edge>) -> RenderSnapshot {
+    render_snapshot_with(graph, Vec::new())
+}
+
+pub fn render_snapshot_with(
+    graph: &Graph<Node, Edge>,
+    observations: Vec<RenderObservation>,
+) -> RenderSnapshot {
     let nodes = graph
         .node_indices()
         .map(|i| RenderNode::new(&graph[i], i.index() as u32))
@@ -121,6 +167,7 @@ pub fn render_snapshot(graph: &Graph<Node, Edge>) -> RenderSnapshot {
         version: SNAPSHOT_VERSION,
         nodes,
         edges,
+        observations,
     }
 }
 

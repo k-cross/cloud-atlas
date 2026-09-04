@@ -19,7 +19,14 @@ pub enum Node {
     AwsEc2Subnet(std::sync::Arc<str>),
     AwsEc2AvailabilityZone(std::sync::Arc<str>),
     AwsEc2SecurityGroup(std::sync::Arc<str>),
-    AwsEc2Eni(std::sync::Arc<str>), // New for pivot
+    /// Keyed by the ENI's own `eni-` id, which is what every source that
+    /// mentions an interface actually carries — flow logs' `interface-id`,
+    /// Config items, the `networkInterfaces` list on a described instance. The
+    /// instance it belongs to is the `Edge::HasIp` pointing at it, not part of
+    /// its identity: an ENI can be detached and reattached elsewhere, and most
+    /// ENIs (NAT gateways, load balancer nodes, RDS, in-VPC Lambda) belong to
+    /// no instance at all.
+    AwsEc2Eni(std::sync::Arc<str>),
     // L3 routing / egress plane
     AwsEc2RouteTable(std::sync::Arc<str>),
     AwsEc2InternetGateway(std::sync::Arc<str>),
@@ -108,7 +115,7 @@ impl fmt::Display for Node {
             Node::AwsEc2Subnet(id) => write!(f, "AWS::EC2::Subnet({})", id),
             Node::AwsEc2AvailabilityZone(id) => write!(f, "AWS::EC2::AvailabilityZone({})", id),
             Node::AwsEc2SecurityGroup(id) => write!(f, "AWS::Ec2SecurityGroup({})", id),
-            Node::AwsEc2Eni(id) => write!(f, "AWS::Ec2Eni({}-eni)", id), // preserve the -eni suffix for visual display without allocation
+            Node::AwsEc2Eni(id) => write!(f, "AWS::Ec2Eni({})", id),
             Node::AwsEc2RouteTable(id) => write!(f, "AWS::EC2::RouteTable({})", id),
             Node::AwsEc2InternetGateway(id) => write!(f, "AWS::EC2::InternetGateway({})", id),
             Node::AwsEc2NatGateway(id) => write!(f, "AWS::EC2::NatGateway({})", id),
@@ -197,6 +204,14 @@ pub enum Edge {
     HasIp,      // Semantic IP relationship (e.g. Instance -> HasIp)
     RoutesTo,   // Traffic routing
     ResolvesTo, // DNS resolution
+    /// Traffic that was actually *observed* between two endpoints, from the
+    /// Tier-2 flow-log overlay (`atlas::flow`) rather than from any provider's
+    /// control plane. Deliberately carries no payload: `Edge` is the graph's
+    /// identity type, so a packet counter inside it would make every metric
+    /// update a different edge — parallel edges past `add_edge`'s dedup, and a
+    /// remove/add of the same `edge_key` out of every diff. The metrics live
+    /// beside the graph in `flow::FlowIndex`, keyed by that same stable key.
+    TrafficFlow,
 }
 
 impl fmt::Display for Edge {
@@ -329,5 +344,13 @@ owned_kinds!(
 );
 
 kinds!(
-    Edge, Contains, ConnectsTo, DependsOn, AttachedTo, HasIp, RoutesTo, ResolvesTo,
+    Edge,
+    Contains,
+    ConnectsTo,
+    DependsOn,
+    AttachedTo,
+    HasIp,
+    RoutesTo,
+    ResolvesTo,
+    TrafficFlow,
 );

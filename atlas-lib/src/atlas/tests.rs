@@ -92,8 +92,10 @@ mod tests {
         projector::build(&mut builder, &fixtures::aws(), &fixtures::settings());
 
         let instance = Node::AwsEc2Instance("i-globex-web-01".into());
-        let eni = Node::AwsEc2Eni("i-globex-web-01".into());
+        let eni = Node::AwsEc2Eni("eni-globex-web-01a".into());
+        let second_eni = Node::AwsEc2Eni("eni-globex-web-01b".into());
         let subnet = Node::AwsEc2Subnet("subnet-public-1a".into());
+        let private_subnet = Node::AwsEc2Subnet("subnet-private-1a".into());
         let vpc = Node::AwsEc2Vpc("vpc-globex".into());
         let az = Node::AwsEc2AvailabilityZone("us-east-1a".into());
         let region = Node::AwsRegion(fixtures::REGION.into());
@@ -116,6 +118,12 @@ mod tests {
         // Core ENI pivot: Instance -> HasIp -> ENI -> AttachedTo -> Subnet
         assert_edge(&builder, &instance, &eni, &Edge::HasIp);
         assert_edge(&builder, &eni, &subnet, &Edge::AttachedTo);
+
+        // Multi-homing: the second interface is a node of its own, attached to
+        // a different subnet than the instance's primary one. Keying the ENI by
+        // its instance could represent neither.
+        assert_edge(&builder, &instance, &second_eni, &Edge::HasIp);
+        assert_edge(&builder, &second_eni, &private_subnet, &Edge::AttachedTo);
         assert_edge(&builder, &region, &vpc, &Edge::Contains);
         assert_edge(&builder, &vpc, &subnet, &Edge::Contains);
         assert_edge(&builder, &az, &instance, &Edge::Contains);
@@ -690,7 +698,7 @@ mod tests {
         // rendering layer can style by resource type.
         let json = crate::atlas::export::snapshot_json(&builder.graph).unwrap();
         assert!(json.contains("\"kind\":\"AwsEc2Eni\""));
-        assert!(json.contains("\"version\":2"));
+        assert!(json.contains("\"version\":3"));
 
         // Every node carries a stable key (v2), unique across the graph.
         let keys: std::collections::HashSet<&str> =
@@ -955,6 +963,41 @@ mod tests {
                 &node_key(&fresh_dst),
                 &Edge::ResolvesTo
             )));
+    }
+
+    /// The flow overlay creates a pivot node per unrecognised remote address,
+    /// and those are bounded by the overlay's capacity rather than the graph's.
+    /// Carrying an edgeless one forward on every tick would let a single long
+    /// outage accumulate an unbounded orphan population in the live graph and
+    /// in every client's snapshot.
+    #[test]
+    fn carry_forward_drops_pivots_nothing_points_at_any_more() {
+        use crate::atlas::patch::carry_forward;
+
+        let anchored = Node::GenericIpAddress("10.0.0.1".into());
+        let orphan = Node::GenericIpAddress("203.0.113.7".into());
+        let traffic_only = Node::GenericIpAddress("203.0.113.8".into());
+
+        let mut live = GraphBuilder::new();
+        // A pivot a projector produced, still held up by the edge that made it.
+        let instance = live.get_or_add_node(Node::AwsEc2Instance("i-1".into()));
+        live.link_to(instance, anchored.clone(), Edge::ConnectsTo);
+        // A pivot the overlay left behind when its flow lapsed.
+        live.get_or_add_node(orphan.clone());
+        // And one whose only support is observed traffic, which carry-forward
+        // does not hold either — the overlay re-folds it on the same tick if it
+        // is still live.
+        live.link_to(instance, traffic_only.clone(), Edge::TrafficFlow);
+
+        let mut next = GraphBuilder::new();
+        carry_forward(&mut next, &live.graph, &all_sources());
+
+        assert!(
+            next.contains(&anchored),
+            "a referenced pivot is still needed"
+        );
+        assert!(!next.contains(&orphan));
+        assert!(!next.contains(&traffic_only));
     }
 
     #[test]

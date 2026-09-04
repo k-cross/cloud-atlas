@@ -163,11 +163,25 @@ impl GraphBuilder {
         self.merge_where(other, |_| true);
     }
 
-    /// `merge`, restricted to the nodes `keep` accepts. An edge crosses over
-    /// only when at least one endpoint was kept on purpose *and* both endpoints
-    /// are present here — a rejected node is never resurrected as the endpoint
-    /// of an edge, and no edge is left dangling.
+    /// `merge`, restricted to the nodes `keep` accepts.
     pub fn merge_where(&mut self, other: &Graph<Node, Edge>, keep: impl Fn(&Node) -> bool) {
+        self.merge_selected(other, keep, |_| true);
+    }
+
+    /// `merge_where` with a say over edges too. An edge crosses over only when
+    /// `keep_edge` accepts it, at least one endpoint was kept on purpose, *and*
+    /// both endpoints are present here — a rejected node is never resurrected
+    /// as the endpoint of an edge, and no edge is left dangling.
+    ///
+    /// The edge predicate exists for the parts of the graph that are not
+    /// derived from a provider scan at all (`Edge::TrafficFlow`), and which a
+    /// scan-retention policy therefore has no business holding on to.
+    pub fn merge_selected(
+        &mut self,
+        other: &Graph<Node, Edge>,
+        keep: impl Fn(&Node) -> bool,
+        keep_edge: impl Fn(&Edge) -> bool,
+    ) {
         // Carry over every node first — this covers standalone nodes that never
         // appear as an edge endpoint.
         for node in other.node_weights() {
@@ -176,6 +190,9 @@ impl GraphBuilder {
             }
         }
         for edge_idx in other.edge_indices() {
+            if !keep_edge(&other[edge_idx]) {
+                continue;
+            }
             if let Some((a, b)) = other.edge_endpoints(edge_idx) {
                 let (source, target) = (&other[a], &other[b]);
                 if !keep(source) && !keep(target) {

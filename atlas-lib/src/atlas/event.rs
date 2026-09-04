@@ -25,11 +25,10 @@
 
 use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::{Edge, Node};
-use crate::atlas::export::{RenderEdge, RenderNode, edge_key, node_key};
+use crate::atlas::export::{edge_key, node_key};
 use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::patch::GraphPatch;
+use crate::atlas::patch::{GraphPatch, merge_additions};
 use petgraph::graph::Graph;
-use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -265,6 +264,13 @@ impl EventApplier {
             return;
         }
 
+        // Entries sharing the cutoff timestamp are dropped together, so this
+        // can trim below the low-water mark. That is the safe direction and it
+        // is deliberate: retaining them instead (`>=`) can leave the map above
+        // `MAX_TRACKED`, which puts this sort back on *every* subsequent event
+        // — the per-event cost the budget exists to avoid. Over-trimming only
+        // forgets ordering for resources that have been quiet, which the
+        // reconciliation scan corrects anyway.
         let mut times: Vec<i64> = self.applied.values().map(|&(at, _)| at).collect();
         times.sort_unstable();
         let cutoff = times[times.len() - Self::LOW_WATER];
@@ -273,56 +279,12 @@ impl EventApplier {
 }
 
 /// A creation or modification: fold the event's context into the live graph and
-/// report only what was genuinely new. Novelty has to be measured *before* the
-/// merge, since `GraphBuilder::merge` deduplicates silently and afterwards
-/// there is no way to tell what it added.
+/// report only what was genuinely new. The novelty bookkeeping is
+/// [`merge_additions`], shared with the Tier-2 flow overlay — both tiers add a
+/// subgraph to the live graph and must announce only the parts of it the graph
+/// did not already hold.
 fn merge_context(live: &mut GraphBuilder, event: &ChangeEvent) -> GraphPatch {
-    let context = &event.context;
-
-    let new_nodes: Vec<Node> = context
-        .node_weights()
-        .filter(|node| !live.contains(node))
-        .cloned()
-        .collect();
-    let new_edges: Vec<(Node, Node, Edge)> = context
-        .edge_references()
-        .filter(|e| !live.has_edge(&context[e.source()], &context[e.target()], e.weight()))
-        .map(|e| {
-            (
-                context[e.source()].clone(),
-                context[e.target()].clone(),
-                e.weight().clone(),
-            )
-        })
-        .collect();
-
-    live.merge(context);
-
-    // Indices only exist after the merge, and the render payload needs them.
-    let index_of =
-        |live: &GraphBuilder, node: &Node| live.index_of(node).map_or(0, |idx| idx.index() as u32);
-    let added_nodes = new_nodes
-        .iter()
-        .map(|node| RenderNode::new(node, index_of(live, node)))
-        .collect();
-    let added_edges = new_edges
-        .iter()
-        .map(|(source, target, edge)| {
-            RenderEdge::new(
-                source,
-                target,
-                edge,
-                index_of(live, source),
-                index_of(live, target),
-            )
-        })
-        .collect();
-
-    GraphPatch {
-        added_nodes,
-        added_edges,
-        ..GraphPatch::empty()
-    }
+    merge_additions(live, &event.context)
 }
 
 /// A deletion: take the node out along with every edge that touched it. The

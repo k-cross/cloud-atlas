@@ -6,13 +6,17 @@
 //! removed, keyed by the stable [`node_key`]/[`edge_key`] identity so a
 //! consumer can apply it without a full rebuild.
 //!
-//! Node *property updates* are represented as a remove + add of the same key
-//! (the typed `Node` encodes its config, so a changed resource is a different
-//! value). Richer update semantics are deferred to the liveness work.
+//! Node *property updates* are represented as a remove + add of the same key:
+//! the typed `Node` encodes its config, so a changed resource is a different
+//! value. The one property that does *not* work that way is Tier-2 liveness,
+//! which changes constantly and must not churn the topology — it rides along in
+//! `observations`/`expired`, keyed by the same stable identity (`atlas::flow`).
 
 use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 use crate::atlas::definition::{Edge, Node};
-use crate::atlas::export::{RenderEdge, RenderNode, SNAPSHOT_VERSION, edge_key, node_key};
+use crate::atlas::export::{
+    RenderEdge, RenderNode, RenderObservation, SNAPSHOT_VERSION, edge_key, node_key,
+};
 use crate::atlas::graph_builder::GraphBuilder;
 use petgraph::graph::Graph;
 use petgraph::visit::EdgeRef;
@@ -29,6 +33,15 @@ pub struct GraphPatch {
     pub removed_nodes: Vec<String>,
     pub added_edges: Vec<RenderEdge>,
     pub removed_edges: Vec<String>,
+    /// Tier-2 liveness for nodes and edges whose freshness changed. Carried
+    /// separately from the topology lists because it is a different kind of
+    /// change: an observation neither creates nor destroys anything, and on a
+    /// busy estate it is the only thing changing most ticks.
+    pub observations: Vec<RenderObservation>,
+    /// Keys whose observation has lapsed. Without this a client keeps showing
+    /// the last freshness it heard, forever — an unobserved resource would
+    /// stay lit rather than going dark.
+    pub expired: Vec<String>,
 }
 
 impl GraphPatch {
@@ -43,6 +56,8 @@ impl GraphPatch {
             removed_nodes: Vec::new(),
             added_edges: Vec::new(),
             removed_edges: Vec::new(),
+            observations: Vec::new(),
+            expired: Vec::new(),
         }
     }
 
@@ -79,6 +94,22 @@ impl GraphPatch {
         }
         self.added_nodes.extend(other.added_nodes);
         self.added_edges.extend(other.added_edges);
+
+        // Liveness is last-writer-wins within a batch, both ways round: a fresh
+        // observation supersedes a pending expiry for its key, and an expiry
+        // supersedes a pending observation. Appending both would leave the
+        // consumer to guess, and it applies the two lists in a fixed order.
+        for key in other.expired {
+            cancel(&mut self.observations, &key, |o| &o.key);
+            if !self.expired.contains(&key) {
+                self.expired.push(key);
+            }
+        }
+        for observation in other.observations {
+            self.expired.retain(|key| key != &observation.key);
+            cancel(&mut self.observations, &observation.key, |o| &o.key);
+            self.observations.push(observation);
+        }
     }
 
     /// A patch that touches nothing — the common case between polls, and the
@@ -88,6 +119,8 @@ impl GraphPatch {
             && self.removed_nodes.is_empty()
             && self.added_edges.is_empty()
             && self.removed_edges.is_empty()
+            && self.observations.is_empty()
+            && self.expired.is_empty()
     }
 }
 
@@ -160,11 +193,66 @@ pub fn diff(old: &Graph<Node, Edge>, new: &Graph<Node, Edge>) -> GraphPatch {
         .collect();
 
     GraphPatch {
-        version: SNAPSHOT_VERSION,
         added_nodes,
         removed_nodes,
         added_edges,
         removed_edges,
+        ..GraphPatch::empty()
+    }
+}
+
+/// Fold `context` into `live` and report only what was genuinely new.
+///
+/// Both live tiers need exactly this: Tier 1 merges the neighbourhood an event
+/// described, Tier 2 merges the flow edges a batch of records described, and
+/// neither may re-announce what the graph already held or every redelivery
+/// would wake up every connected client. Novelty has to be measured *before*
+/// the merge — `GraphBuilder::merge` deduplicates silently, and afterwards
+/// there is no way to tell what it added.
+pub fn merge_additions(live: &mut GraphBuilder, context: &Graph<Node, Edge>) -> GraphPatch {
+    let new_nodes: Vec<Node> = context
+        .node_weights()
+        .filter(|node| !live.contains(node))
+        .cloned()
+        .collect();
+    let new_edges: Vec<(Node, Node, Edge)> = context
+        .edge_references()
+        .filter(|e| !live.has_edge(&context[e.source()], &context[e.target()], e.weight()))
+        .map(|e| {
+            (
+                context[e.source()].clone(),
+                context[e.target()].clone(),
+                e.weight().clone(),
+            )
+        })
+        .collect();
+
+    live.merge(context);
+
+    // Indices only exist after the merge, and the render payload needs them.
+    let index_of =
+        |live: &GraphBuilder, node: &Node| live.index_of(node).map_or(0, |idx| idx.index() as u32);
+    let added_nodes = new_nodes
+        .iter()
+        .map(|node| RenderNode::new(node, index_of(live, node)))
+        .collect();
+    let added_edges = new_edges
+        .iter()
+        .map(|(source, target, edge)| {
+            RenderEdge::new(
+                source,
+                target,
+                edge,
+                index_of(live, source),
+                index_of(live, target),
+            )
+        })
+        .collect();
+
+    GraphPatch {
+        added_nodes,
+        added_edges,
+        ..GraphPatch::empty()
     }
 }
 
@@ -185,18 +273,46 @@ pub fn diff(old: &Graph<Node, Edge>, new: &Graph<Node, Edge>) -> GraphPatch {
 /// including its deletions, so a collector that fails on every tick can no
 /// longer stop the rest of the graph from converging.
 ///
-/// The fold itself is [`GraphBuilder::merge_where`] — the scan's own builder
+/// [`Edge::TrafficFlow`] is the one thing deliberately *not* carried forward.
+/// It comes from the Tier-2 flow overlay, not from any provider scan, so a
+/// provider going dark says nothing about whether traffic is still flowing —
+/// and holding those edges would suspend the overlay's own expiry for as long
+/// as any collector is unhealthy. The overlay re-folds every flow it still
+/// believes in on the same tick, so nothing live is lost.
+///
+/// The fold itself is [`GraphBuilder::merge_selected`] — the scan's own builder
 /// already carries the node index this needs, and node/edge duplicate identity
 /// stays defined in exactly one place.
+/// An owner-less node is retained only while something other than observed
+/// traffic still points at it. They are held at all because any provider may
+/// reference them, but the flow overlay creates one per unrecognised remote
+/// address, and those are bounded by [`FlowIndex`]'s capacity rather than by
+/// the graph's: carrying an edgeless pivot forward on every tick would let a
+/// single long outage accumulate an unbounded population of orphan nodes in
+/// the live graph and in every client's snapshot. A pivot a projector produced
+/// keeps the edge that produced it and so survives; one the overlay left
+/// behind has nothing and goes.
+///
+/// [`FlowIndex`]: crate::atlas::flow::FlowIndex
 pub fn carry_forward(
     next: &mut GraphBuilder,
     previous: &Graph<Node, Edge>,
     unreadable: &HashSet<CollectionSource>,
 ) {
-    next.merge_where(previous, |node| match node.owner() {
-        Some(source) => unreadable.contains(&source),
-        None => true,
-    });
+    let anchored: HashSet<&Node> = previous
+        .edge_references()
+        .filter(|e| e.weight() != &Edge::TrafficFlow)
+        .flat_map(|e| [&previous[e.source()], &previous[e.target()]])
+        .collect();
+
+    next.merge_selected(
+        previous,
+        |node| match node.owner() {
+            Some(source) => unreadable.contains(&source),
+            None => anchored.contains(node),
+        },
+        |edge| *edge != Edge::TrafficFlow,
+    );
 }
 
 /// How long a source may go unread before the graph stops waiting for it.

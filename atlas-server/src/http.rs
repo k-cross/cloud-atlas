@@ -5,7 +5,7 @@
 use crate::state::AppState;
 use crate::ws;
 use atlas_lib::atlas::collection::CollectionReport;
-use atlas_lib::atlas::export::render_snapshot;
+use atlas_lib::atlas::export::render_snapshot_with;
 use axum::Router;
 use axum::extract::State;
 use axum::response::{IntoResponse, Json};
@@ -23,7 +23,8 @@ pub fn router(state: AppState) -> Router {
 
 async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
     let live = state.live.read().await;
-    Json(render_snapshot(&live.graph))
+    let flows = state.flows.read().await;
+    Json(render_snapshot_with(&live.graph, flows.observations()))
 }
 
 /// How much of the last scan is actually trustworthy. The snapshot alone cannot
@@ -33,10 +34,22 @@ async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
 async fn collection(State(state): State<AppState>) -> impl IntoResponse {
     let report = state.report.read().await;
     let stream = state.stream_report.read().await;
-    Json(collection_value(&report, &stream))
+    let flows = state.flow_report.read().await;
+    let observed = state.flows.read().await;
+    Json(collection_value(
+        &report,
+        &stream,
+        &flows,
+        observed.flow_count(),
+    ))
 }
 
-fn collection_value(report: &CollectionReport, stream: &CollectionReport) -> serde_json::Value {
+fn collection_value(
+    report: &CollectionReport,
+    stream: &CollectionReport,
+    flows: &CollectionReport,
+    observed_flows: usize,
+) -> serde_json::Value {
     // `complete` and `unreadable` are not the same question. A scan that read
     // every provider but could not map one drifted row is incomplete — the
     // client lost something — yet still authoritative about what exists, so
@@ -61,6 +74,15 @@ fn collection_value(report: &CollectionReport, stream: &CollectionReport) -> ser
             "healthy": stream.is_complete(),
             "failures": stream.failures,
         },
+        // The Tier-2 feed, separate again for the same reason. A flow feed we
+        // cannot read leaves the topology entirely correct and only the
+        // liveness stale — so `observed` going to zero while `healthy` is false
+        // means "we stopped looking", not "the network went quiet".
+        "flows": {
+            "healthy": flows.is_complete(),
+            "failures": flows.failures,
+            "observed": observed_flows,
+        },
     })
 }
 
@@ -68,6 +90,10 @@ fn collection_value(report: &CollectionReport, stream: &CollectionReport) -> ser
 mod tests {
     use super::*;
     use atlas_lib::atlas::collection::{CollectionSource, FailureKind};
+
+    fn clean() -> CollectionReport {
+        CollectionReport::default()
+    }
 
     #[test]
     fn a_partial_scan_reports_its_attributed_failures() {
@@ -79,7 +105,7 @@ mod tests {
             "throttled",
         );
 
-        let value = collection_value(&report, &CollectionReport::default());
+        let value = collection_value(&report, &CollectionReport::default(), &clean(), 0);
 
         assert_eq!(value["complete"].as_bool(), Some(false));
         let failures = value["failures"].as_array().expect("failures array");
@@ -90,7 +116,7 @@ mod tests {
 
     #[test]
     fn a_clean_scan_is_reported_as_complete() {
-        let value = collection_value(&CollectionReport::default(), &CollectionReport::default());
+        let value = collection_value(&clean(), &clean(), &clean(), 0);
 
         assert_eq!(value["complete"].as_bool(), Some(true));
         assert!(value["failures"].as_array().expect("array").is_empty());
@@ -110,7 +136,7 @@ mod tests {
             "queue unreachable",
         );
 
-        let value = collection_value(&CollectionReport::default(), &stream);
+        let value = collection_value(&clean(), &stream, &clean(), 0);
 
         assert_eq!(value["complete"].as_bool(), Some(true));
         assert!(value["unreadable"].as_array().expect("array").is_empty());
@@ -119,5 +145,27 @@ mod tests {
             value["stream"]["failures"].as_array().expect("array").len(),
             1
         );
+    }
+
+    /// A flow-log bucket we cannot reach leaves the graph entirely correct and
+    /// only the liveness stale, so it must not read as a scan problem — and a
+    /// client has to be able to tell it from a genuinely quiet network.
+    #[test]
+    fn a_degraded_flow_feed_is_reported_apart_from_both_others() {
+        let mut flows = CollectionReport::default();
+        flows.record(
+            CollectionSource::Aws,
+            FailureKind::Unavailable,
+            "us-east-1/flow-logs",
+            "bucket unreachable",
+        );
+
+        let value = collection_value(&clean(), &clean(), &flows, 0);
+
+        assert_eq!(value["complete"].as_bool(), Some(true));
+        assert!(value["unreadable"].as_array().expect("array").is_empty());
+        assert_eq!(value["stream"]["healthy"].as_bool(), Some(true));
+        assert_eq!(value["flows"]["healthy"].as_bool(), Some(false));
+        assert_eq!(value["flows"]["observed"].as_u64(), Some(0));
     }
 }

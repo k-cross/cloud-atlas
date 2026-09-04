@@ -39,7 +39,9 @@ use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::event::{ChangeEvent, ChangeOp};
 use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::projector::aws::{InstanceFacts, project_instance, use_aws_resource, use_global};
+use crate::atlas::projector::aws::{
+    EniFacts, InstanceFacts, project_instance, use_aws_resource, use_global,
+};
 use aws_smithy_types::date_time::{DateTime, Format};
 use petgraph::graph::Graph;
 use serde::Deserialize;
@@ -244,7 +246,19 @@ struct InstanceConfiguration {
     placement: Option<Placement>,
     #[serde(rename = "securityGroups")]
     security_groups: Option<Vec<GroupRef>>,
+    #[serde(rename = "networkInterfaces")]
+    network_interfaces: Option<Vec<NetworkInterfaceRef>>,
     tags: Option<Vec<TagPair>>,
+}
+
+/// One interface as EC2 reports it on the wire, in the shape Config's
+/// `networkInterfaces` and CloudTrail's `networkInterfaceSet` share.
+#[derive(Deserialize)]
+struct NetworkInterfaceRef {
+    #[serde(rename = "networkInterfaceId")]
+    network_interface_id: Option<String>,
+    #[serde(rename = "subnetId")]
+    subnet_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -360,9 +374,14 @@ fn config_op(status: Option<&str>) -> Option<ChangeOp> {
 /// worse than no node: it never matches what the scan produces, so it is
 /// deleted at every reconciliation and recreated by every event.
 ///
-/// - `AWS::EC2::NetworkInterface` — the projector keys an ENI by the *instance*
-///   it belongs to (`Instance -> HasIp -> ENI`), not by its `eni-` id, so a
-///   Config ENI item has no node to map onto.
+/// - `AWS::EC2::NetworkInterface` — the node is keyed by `eni-` id and would
+///   match, but the full scan only learns about interfaces through the
+///   `networkInterfaces` list on a described *instance*. Config also reports
+///   the ENIs of NAT gateways, load balancers, RDS and in-VPC Lambda, and a
+///   node for one of those is a node no scan produces — deleted at every
+///   reconciliation, recreated by every event. This arm opens up as soon as a
+///   `DescribeNetworkInterfaces` collector makes the scan authoritative for all
+///   of them.
 /// - `AWS::Route53::HostedZone` — the Route 53 API returns ids as
 ///   `/hostedzone/Z123` and the projector stores them that way; Config reports
 ///   the bare id.
@@ -513,6 +532,32 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
         security_group_ids = item.related_all("AWS::EC2::SecurityGroup");
     }
 
+    // Same two-sources-for-one-fact shape as the fields above. The
+    // relationships list gives ids without subnets, which is enough: the ENI
+    // then attaches to the instance's own subnet.
+    let mut network_interfaces: Vec<EniFacts<'_>> = config
+        .network_interfaces
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|eni| {
+            Some(EniFacts {
+                id: eni.network_interface_id.as_deref()?,
+                subnet_id: eni.subnet_id.as_deref(),
+            })
+        })
+        .collect();
+    if network_interfaces.is_empty() {
+        network_interfaces = item
+            .related_all("AWS::EC2::NetworkInterface")
+            .into_iter()
+            .map(|id| EniFacts {
+                id,
+                subnet_id: None,
+            })
+            .collect();
+    }
+
     let mut builder = GraphBuilder::new();
     let region_idx = builder.get_or_add_node(Node::AwsRegion(region.into()));
     project_instance(
@@ -529,6 +574,7 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
                 .or(item.availability_zone.as_deref()),
             private_ip: config.private_ip_address.as_deref(),
             security_group_ids,
+            network_interfaces,
             tags: config
                 .tags
                 .as_deref()
@@ -624,6 +670,8 @@ struct TrailInstance {
     placement: Option<Placement>,
     #[serde(rename = "groupSet")]
     group_set: Option<ItemSet<GroupRef>>,
+    #[serde(rename = "networkInterfaceSet")]
+    network_interface_set: Option<ItemSet<NetworkInterfaceRef>>,
 }
 
 /// CloudTrail is the broadest feed and the least uniform one: the id of the
@@ -809,6 +857,19 @@ fn launched_instances(
                         .filter_map(|group| group.group_id.as_deref())
                         .collect(),
                     tags: Vec::new(),
+                    network_interfaces: instance
+                        .network_interface_set
+                        .as_ref()
+                        .and_then(|set| set.items.as_deref())
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(|eni| {
+                            Some(EniFacts {
+                                id: eni.network_interface_id.as_deref()?,
+                                subnet_id: eni.subnet_id.as_deref(),
+                            })
+                        })
+                        .collect(),
                 },
             );
             Some(

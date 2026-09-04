@@ -1,9 +1,10 @@
 //! Cloud Atlas live backend.
 //!
-//! Owns the in-memory graph, keeps it current from two directions — the
-//! Tier-1 event feed (`stream`) and the Tier-3 reconciliation scan, both driven
-//! by the single writer in `poll` — and pushes incremental patches to the
-//! frontend over WebSocket (`ws`). See `docs/change_monitoring_design.md` §7.
+//! Owns the in-memory graph and keeps it current from three directions — the
+//! Tier-1 event feed, the Tier-2 flow feed (both in `stream`) and the Tier-3
+//! reconciliation scan, all driven by the single writer in `poll` — then pushes
+//! incremental patches to the frontend over WebSocket (`ws`). See
+//! `docs/change_monitoring_design.md` §7.
 
 mod http;
 mod poll;
@@ -15,6 +16,7 @@ use crate::poll::Source;
 use crate::state::AppState;
 use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::engine::AtlasEngine;
+use atlas_lib::atlas::flow::FlowIndex;
 use atlas_lib::atlas::patch::Retention;
 use atlas_lib::fixtures;
 use clap::Parser;
@@ -72,6 +74,22 @@ pub struct Opt {
     /// region, which is where its EventBridge rule lives.
     #[clap(long)]
     aws_event_queue: Option<String>,
+
+    /// URL of an SQS queue subscribed to a VPC Flow Logs bucket's S3 event
+    /// notifications, to consume as the Tier-2 liveness feed.
+    ///
+    /// Optional, and orthogonal to the other two tiers: without it the graph is
+    /// complete and correct but carries no liveness, so nothing can say whether
+    /// any of it is actually passing traffic.
+    #[clap(long)]
+    aws_flow_log_queue: Option<String>,
+
+    /// How long an observed flow counts as current. Past this, the traffic edge
+    /// is removed and the resources it touched stop reporting as live.
+    /// Generous by default relative to flow logs' own aggregation and delivery
+    /// lag, which is minutes.
+    #[clap(long, default_value_t = FlowIndex::DEFAULT_TTL.as_secs())]
+    flow_ttl_secs: u64,
 }
 
 #[tokio::main]
@@ -84,9 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // The Tier-1 feed is read in the region whose EventBridge rule targets the
-    // queue: the first configured region, before `regions` is moved into the
-    // engine's settings.
+    // Both live feeds are read in the region whose rule or bucket notification
+    // targets their queue: the first configured region, captured before
+    // `regions` is moved into the engine's settings.
     let event_region = opt.regions.first().cloned().unwrap_or_default();
 
     // Seed the graph once up front so the very first client gets a populated
@@ -123,6 +141,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (scan.builder, scan.report, Source::Live(Box::new(engine)))
     };
 
+    let flows = match (&opt.aws_flow_log_queue, opt.demo) {
+        (Some(queue_url), false) => {
+            tracing::info!(region = %event_region, "consuming AWS VPC flow logs from {queue_url}");
+            stream::FlowSource::aws(&event_region, queue_url).await
+        }
+        // The demo observes the fixtures' own flows on every reconciliation
+        // tick instead; a queue is meaningless when nothing reaches AWS.
+        (Some(_), true) => {
+            tracing::warn!("--aws-flow-log-queue is ignored in --demo mode");
+            stream::FlowSource::Disabled
+        }
+        (None, _) => stream::FlowSource::Disabled,
+    };
+
     let events = match (&opt.aws_event_queue, opt.demo) {
         (Some(queue_url), false) => {
             tracing::info!(region = %event_region, "consuming AWS change events from {queue_url}");
@@ -137,7 +169,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (None, _) => stream::Source::Disabled,
     };
 
-    let state = AppState::new(initial, initial_report);
+    let flow_index = FlowIndex::new(
+        Duration::from_secs(opt.flow_ttl_secs),
+        FlowIndex::DEFAULT_CAPACITY,
+    );
+    let state = AppState::new(initial, initial_report, flow_index);
     let app = http::router(state.clone());
     let addr = format!("0.0.0.0:{}", opt.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -151,6 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state,
         source,
         events,
+        flows,
         Duration::from_secs(opt.poll_secs),
         Retention::new(opt.retain_scans),
     );

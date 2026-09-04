@@ -9,10 +9,11 @@ Cloud Atlas builds a **continuous live property graph** of multi-cloud infrastru
 ## Architecture Rules
 
 1. **Always use strongly typed enums.** The graph is `petgraph::Graph<Node, Edge>`. All node and edge types are defined in `atlas-lib/src/atlas/definition.rs`. Never use raw strings or hashmaps to represent resources.
-2. **ENI is the core networking pivot.** Semantic paths start from the Elastic Network Interface: `Instance -> HasIp -> ENI -> AttachedTo -> Subnet`.
+2. **ENI is the core networking pivot.** Semantic paths start from the Elastic Network Interface: `Instance -> HasIp -> ENI -> AttachedTo -> Subnet`. `Node::AwsEc2Eni` is keyed by the interface's own `eni-` id — the identity every source that mentions an interface actually carries (`DescribeInstances`' `networkInterfaces`, Config items, flow logs' `interface-id`). The owning instance is the `HasIp` edge, never part of the key: an ENI can be reattached elsewhere, an instance can be multi-homed across subnets, and most ENIs (NAT gateways, load balancer nodes, RDS, in-VPC Lambda) belong to no instance at all. An instance that reports no interfaces therefore gets no ENI and no path to its subnet — substituting a direct `Instance -> Subnet` edge would be a shape no other producer emits.
 3. **`Display` is required on every new type.** Every new `Node` or `Edge` variant must implement `std::fmt::Display` for clean `.dot` output. Follow the existing `Type::SubType(id)` format pattern.
 4. **Never let a failure look like an absence.** This is a live graph, so "we could not read it" and "it is gone" must stay distinguishable all the way to the differ — see the `CollectionReport` contract under Live Server.
 5. **Cross-cloud stitching via generic nodes.** Use `Node::GenericIpAddress` and `Node::GenericHostname` as cross-cloud integration points. Connect to them with `Edge::RoutesTo` (traffic) or `Edge::ResolvesTo` (DNS). Graph deduplication is automatic — `GraphBuilder` merges identical generic nodes from different clouds via its `HashMap<Node, NodeIndex>`.
+6. **`Node` and `Edge` carry identity, never mutable state.** Both are `Hash + Eq` and that *is* their identity: `GraphBuilder` dedups on it, `patch::diff` compares on it, and `node_key`/`edge_key` derive the wire id from it. A field that changes while the resource stays the same — a packet counter, a `last_seen` — would make every update a different value: duplicates past `add_edge`'s dedup, and a remove-then-add of the same key out of every diff. Such properties go beside the graph, keyed by the stable key. `atlas::flow::FlowIndex` is the one instance, and the reason `Edge::TrafficFlow` is payload-free.
 
 ## Testing Without Cloud Credentials
 
@@ -109,6 +110,10 @@ cargo run -p atlas-server -- --retain-scans 3          # give up on an unreadabl
                                                        #   provider after 3 scans
 cargo run -p atlas-server -- --aws-event-queue https://sqs.us-east-1.amazonaws.com/111/atlas-events
                                                        # Tier-1 live change feed (below)
+cargo run -p atlas-server -- --aws-flow-log-queue https://sqs.us-east-1.amazonaws.com/111/atlas-flows
+                                                       # Tier-2 liveness overlay (below)
+cargo run -p atlas-server -- --flow-ttl-secs 300       # how long an observed flow
+                                                       #   counts as current
 ```
 
 ### Tier 1: the live event feed (`--aws-event-queue`)
@@ -120,9 +125,9 @@ live graph between reconciliation scans. `cloud/amazon/events.rs` is the first
 real adapter: an EventBridge rule targets an SQS queue, and `EventQueue` reads
 AWS Config configuration items, EC2 instance state changes and CloudTrail
 management events off it. `poll::run` is a `select!` over the reconciliation
-ticker and the feed, so both tiers share one writer and mutation stays
-serialized. Four rules hold this together — break any of them and the two tiers
-start undoing each other:
+ticker and both live feeds, so all three tiers share one writer and mutation
+stays serialized. Four rules hold this together — break any of them and the two
+tiers start undoing each other:
 
 1. **An adapter may only produce nodes and edges the full-scan projector would
    also produce.** Tier 3 diffs the whole graph and is authoritative, so an edge
@@ -133,8 +138,11 @@ start undoing each other:
    attaches), and the Config catch-all node reuses the scan's own
    `use_aws_resource`/`use_global` filters. A resource type whose identity the
    graph keys differently from Config is deliberately **not** mapped rather than
-   mapped approximately: ENIs (the graph keys them by instance), Route 53 hosted
-   zones (`/hostedzone/` prefix), SQS queues (keyed by URL). The
+   mapped approximately: ENIs (keyed correctly, but the full scan only learns
+   about interfaces attached to a described *instance*, so a Config item for a
+   NAT gateway's ENI would be a node no scan produces — this arm opens up once a
+   `DescribeNetworkInterfaces` collector exists), Route 53 hosted zones
+   (`/hostedzone/` prefix), SQS queues (keyed by URL). The
    `an_instance_event_produces_only_what_a_full_scan_would` test pins this by
    projecting the same instance both ways and asserting containment.
 2. **Events add; only Tier 3 garbage-collects.** A create/modify never removes
@@ -162,13 +170,68 @@ Adapter tests replay canned EventBridge bodies (`cloud/amazon/events/tests.rs`),
 and the SQS transport is covered end to end with `StaticReplayClient` — queue
 message → `ChangeEvent` → graph mutation → `GraphPatch`, no credentials.
 
-- `GET /snapshot.json` — full current snapshot (v2). `GET /collection.json` — `complete` (did the scan lose anything at all), `unreadable` (which sources could not be read, and so are suspending removals), `failures` (each attributed to its source/scope and stamped with its `kind`), and `stream` (the Tier-1 feed's own health, deliberately separate — see above). This is the only way a client can tell "this provider holds nothing" from "this provider could not be reached" from "we read it but dropped a row" — it matters most at start-up, when an outage makes the first partial collection the baseline. `GET /ws` — WebSocket hub.
+### Tier 2: the liveness overlay (`--aws-flow-log-queue`)
+
+The control plane says what exists; only flow logs say whether any of it is
+doing anything. `atlas::flow` is that overlay — `FlowObservation` is the
+normalized record every provider's flow feed translates into, and `FlowIndex`
+is the bounded, expiring store the live server keeps beside the graph
+(`AppState::flows`). `cloud/amazon/flow_logs.rs` is the first adapter: VPC Flow
+Logs deliver to S3, S3 notifies an SQS queue, and the queue is drained,
+gunzipped and parsed. Four rules hold it together:
+
+1. **Metrics live beside the graph, not inside it** — architecture rule 6
+   above. `Edge::TrafficFlow` means only "traffic was seen here"; `FlowIndex`
+   holds the numbers, keyed by `node_key`/`edge_key`. Node freshness works the
+   same way because it has no other option. Volume and freshness are split
+   deliberately: a flow edge gets `FlowStats` (`last_seen` + `packets`/`bytes`),
+   a node gets `Liveness` (`last_seen` + verdict) and **no volume**. One record
+   names up to four keys, so counting its packets against each would report the
+   same traffic four times, and a node's "packets" would be an undirected sum
+   across every flow touching it regardless. `last_seen` survives that treatment
+   because it composes as a maximum, not a sum.
+2. **An observation may create only the nodes no provider owns.** A flow record
+   carries an IP and an interface id, not a type, tags, subnet or security
+   groups, so a typed node built from one is topology reconstructed from
+   shadows. `GenericIpAddress` and its siblings (`Node::owner()` is `None`) are
+   the exception — the projectors already emit them for addresses they did not
+   recognise either, which is what makes a cross-cloud flow land as a real edge
+   between two estates. A typed endpoint the scan has not found is *skipped*,
+   never invented.
+3. **Expiry deletes, and Tier 3 applies it.** `poll::reconcile` folds
+   `FlowIndex::overlay` into the scanned graph before diffing, so a flow that
+   goes quiet is simply absent from the next graph and the ordinary differ
+   removes its edge. The corollary: `Edge::TrafficFlow` is the one thing
+   `patch::carry_forward` refuses to hold, because a provider going dark says
+   nothing about whether traffic is still flowing.
+4. **Flow health is its own report** (`AppState::flow_report`, `/collection.json`'s
+   `flows` key). An unreachable bucket makes liveness stale and leaves the
+   topology entirely correct, so it must never enter `unreadable_sources()` —
+   the same rule as the Tier-1 `stream` report, one tier along.
+
+Record parsing reads the object's own header line for the field layout and only
+falls back to the version-2 default order when there is none: flow-log format is
+chosen field by field, and assuming the default is how a custom format silently
+reads bytes as ports. A record with no `action` column yields
+`FlowObservation::action == None` (status `observed`) rather than a fabricated
+verdict. `interface-id` and `instance-id` are each read straight off the record
+and never derived from one another: the first is in the v2 default set and is the
+subject of every record, the second needs a v3 format and is absent for every
+interface that belongs to something other than an instance. Neither buys a node —
+the overlay attributes freshness only to resources a scan already found.
+
+Adapter tests replay canned flow-log objects and a full SQS + S3 conversation
+through `StaticReplayClient` (`cloud/amazon/flow_logs/tests.rs`); the overlay's
+own policy is covered in `atlas/flow.rs`. `--demo` re-observes
+`fixtures::flows()` every tick, so the whole path runs credential-free.
+
+- `GET /snapshot.json` — full current snapshot (v3: nodes, edges, and the flow overlay's `observations`). `GET /collection.json` — `complete` (did the scan lose anything at all), `unreadable` (which sources could not be read, and so are suspending removals), `failures` (each attributed to its source/scope and stamped with its `kind`), `stream` (the Tier-1 feed's own health) and `flows` (the Tier-2 feed's, plus how many flows are currently observed) — the last two deliberately separate, see above. This is the only way a client can tell "this provider holds nothing" from "this provider could not be reached" from "we read it but dropped a row" — it matters most at start-up, when an outage makes the first partial collection the baseline. `GET /ws` — WebSocket hub.
 - WS is **bidirectional**: server pushes `snapshot` then `patch`es; the client can pull `get_snapshot` / `get_neighbors` on demand.
 - Point the frontend at it: run `bun dev` in `atlas-render/atlas-web/` (assets on :4680) which connects by default to `ws://<host>:4681/ws`; override with `?server=ws://…` or force offline with `?static`.
 
 ## Rendering Workspace (`atlas-render/`)
 
-Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate cargo workspace** — `atlas-render/` is `exclude`d from the root workspace and must never depend on `atlas-lib` (the cloud SDK tree doesn't build for wasm, and rendering stays decoupled from graph building). The only contract is the versioned render snapshot JSON (and the `GraphPatch` delta of the same shape). It now has **three consumers** that pin `SNAPSHOT_VERSION`: the producer `atlas-lib/src/atlas/export.rs`, the Rust layout consumer `atlas-render/atlas-layout/src/graph.rs`, and the TS frontend `atlas-render/atlas-web/src/graph.ts`. When the shape changes, **bump the version in all three and rebuild the wasm** (`bun run wasm` in `atlas-render/atlas-web/`) — the compiled layout engine bakes in the version and rejects mismatched snapshots at runtime.
+Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate cargo workspace** — `atlas-render/` is `exclude`d from the root workspace and must never depend on `atlas-lib` (the cloud SDK tree doesn't build for wasm, and rendering stays decoupled from graph building). The only contract is the versioned render snapshot JSON (and the `GraphPatch` delta of the same shape). It now has **three consumers** that pin `SNAPSHOT_VERSION` (currently **v3**, which added the Tier-2 `observations` list on the snapshot and `observations`/`expired` on the patch): the producer `atlas-lib/src/atlas/export.rs`, the Rust layout consumer `atlas-render/atlas-layout/src/graph.rs`, and the TS frontend `atlas-render/atlas-web/src/graph.ts`. When the shape changes, **bump the version in all three and rebuild the wasm** (`bun run wasm` in `atlas-render/atlas-web/`) — the compiled layout engine bakes in the version and rejects mismatched snapshots at runtime.
 
 - `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` position buffer); `parallel` feature enables rayon natively.
 - `atlas-layout-wasm` — wasm-bindgen bridge; builds with `cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`.
@@ -203,5 +266,7 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
 - Projectors: `project_leaf!` macro in `projector/{azure,gcp}.rs` for resources that only add a standalone node.
 - `GraphBuilder::add_edge` deduplicates identical edges automatically, and `GraphBuilder::merge(&graph)` is the single definition of folding one graph into another by node identity — `patch::carry_forward` is a thin policy wrapper over it, so never hand-roll a node/edge dedup pass. `GraphBuilder::remove_node` is the matching removal: it reports every edge that died with the node (the patch needs to name them) and repairs `node_map` after petgraph's swap-remove, which silently moves the last node onto the removed index. Never call `graph.remove_node` directly on a builder-owned graph.
 - Event adapters: `atlas::event::ChangeEvent` is the normalized shape every provider's live feed translates into, and `EventApplier` is the only thing that applies one (idempotency + ordering live there, not at the call sites). A new adapter builds its `context` subgraph with the *projector's* own functions — see `projector::aws::project_instance` and `InstanceFacts` — so it cannot emit a shape the full scan would disagree with.
+- Flow adapters: `atlas::flow::FlowObservation` is the Tier-2 equivalent, and `FlowIndex` is the only thing that stores one — the admission rule (which endpoints may become nodes), expiry and the capacity bound all live there, not at the call sites.
+- `patch::merge_additions` is the single definition of "fold this subgraph into the live graph and report only what was genuinely new". Both live tiers use it; novelty has to be measured before the merge, since `GraphBuilder::merge` dedups silently.
 
 `docs/audit_findings.md` records resolved audit findings — patterns to avoid reintroducing.
