@@ -20,7 +20,7 @@ Cloud Atlas builds a **continuous live property graph** of multi-cloud infrastru
 No live cloud credentials are available locally. All projection testing runs against the fake "Globex" environment in `atlas-lib/src/fixtures.rs`, which populates **every collection variant of every provider** plus deliberate cross-cloud seams. Do not write tests that require real cloud API calls.
 
 - `cargo nextest run` — includes exhaustiveness guards: every `Node`/`Edge` kind must appear in the fixture graph. Adding an enum variant forces an update to the `kinds!` list in `definition.rs` (compile error otherwise), and the guard test then fails until fixtures + a projector actually produce it.
-- `cargo run --example demo` — credential-free verification simulation: projects the fixtures, writes `multi_cloud_demo.dot`, prints a per-kind coverage table, exits non-zero if any kind is missing.
+- `cargo run --example demo` — credential-free verification simulation: projects the fixtures, folds the Tier-2 overlay on top, writes `multi_cloud_demo.dot` and a render snapshot carrying its `observations`, prints a per-kind coverage table plus every observed flow, and exits non-zero if any kind is missing *or* the overlay is empty. `fixtures::build_graph()` is the two halves together; `fixtures::topology()` and `fixtures::observed()` are each half on its own, for a consumer that needs the numbers as well as the graph.
 
 When adding a resource type: add the `Node` variant + `Display` + `owned_kinds!` entry, the projector mapping, and fixture data — the guard tests enforce all three. `Node`'s list is grouped by owning `CollectionSource` (`owned_kinds!` generates `kind()`, `ALL_KINDS`, and `owner()` from it), so a new variant must be filed under the provider whose scan is authoritative for it — that grouping is what scopes carry-forward on an incomplete scan.
 
@@ -113,8 +113,44 @@ cargo run -p atlas-server -- --aws-event-queue https://sqs.us-east-1.amazonaws.c
 cargo run -p atlas-server -- --aws-flow-log-queue https://sqs.us-east-1.amazonaws.com/111/atlas-flows
                                                        # Tier-2 liveness overlay (below)
 cargo run -p atlas-server -- --flow-ttl-secs 300       # how long an observed flow
-                                                       #   counts as current
+                                                       #   counts as current; unset, the
+                                                       #   collection source answers
 ```
+
+### Demo mode is a module, not a mode flag threaded through the code
+
+`--demo` is one `Source` variant and one module. **Everything the credential-free
+run actually does lives in `atlas-server/src/demo.rs`** — the sentinel pair that
+flips by tick parity, the burst-flow cadence, the seed graph, and how long a
+demo observation counts as current. `poll::Source` only chooses between `Live`
+and `Demo` and delegates; `main.rs` holds no demo constants at all.
+
+The rule this protects: **a demo detail must never become a production default.**
+`--flow-ttl-secs` is the worked example. The demo needs a short TTL so its burst
+flow visibly lapses, but writing that as "under `--demo`, default to three poll
+intervals" would have put a demo cadence inside the flag that configures a real
+deployment, and into its `--help`. Instead the flag is simply unset-able, and
+`Source::default_flow_ttl` asks the source: a real feed answers
+`FlowIndex::DEFAULT_TTL`, the demo answers `demo::flow_ttl(poll)`. Adding a
+third source would answer for itself too, and neither the flag nor the loop
+would change.
+
+The one thing deliberately *not* in this module is the Globex data itself
+(`fixtures::flows`, `fixtures::burst_flow`). Fixture data belongs with the rest
+of the fake environment in `atlas-lib`, where the projector tests use it too;
+what belongs here is the *behaviour* — when it is observed, and for how long it
+counts.
+
+`demo::graph` returns `fixtures::topology()`, **not** `fixtures::build_graph()`,
+and the difference is the whole tier split. `build_graph` folds the overlay into
+the graph it returns, which is right for a static snapshot and wrong for a scan:
+traffic baked into the scanned topology is traffic the differ can never remove,
+so the demo would draw flow edges that no `FlowIndex` backs and that no TTL can
+expire. Instead the demo's flows reach the graph the way a real deployment's do
+— through the index, folded in by `poll::reconcile` — and `Source::seed_flows`
+primes a fresh index at start-up so the first snapshot still carries them
+without waiting a poll interval. `the_scan_graph_carries_no_traffic_of_its_own`
+pins it.
 
 ### Tier 1: the live event feed (`--aws-event-queue`)
 
@@ -223,7 +259,22 @@ the overlay attributes freshness only to resources a scan already found.
 Adapter tests replay canned flow-log objects and a full SQS + S3 conversation
 through `StaticReplayClient` (`cloud/amazon/flow_logs/tests.rs`); the overlay's
 own policy is covered in `atlas/flow.rs`. `--demo` re-observes
-`fixtures::flows()` every tick, so the whole path runs credential-free.
+`fixtures::flows()` every tick, so the whole path runs credential-free, and
+adds `fixtures::burst_flow()` on one tick in four — the only part of the demo
+that shows the whole lifecycle, since it goes quiet and the *reconciliation*
+differ is what removes it. **That cadence lives in `atlas-server/src/demo.rs`,
+not in the reconciliation loop** — see Demo mode below.
+
+The frontend renders the overlay rather than merely carrying it: a flow edge
+takes its verdict's color and a log-scaled width from its packet count, every
+node heard from gets a pulsing halo, and packets animate along each flow edge
+on a separate `canvas.traffic-layer` above Sigma's own — bright beads over the
+edge's own hue, since a bead in the edge's colour vanishes into a wide one.
+Bead count and transit time are both log-scaled off `packets`: real volumes
+span orders of magnitude, and a linear mapping either saturates at the cap or
+leaves every flow at one bead. That canvas is excluded
+from the "settled graph is rock-still" e2e regression on purpose — its motion
+is the feature, and a second test asserts it *does* change frame to frame.
 
 - `GET /snapshot.json` — full current snapshot (v3: nodes, edges, and the flow overlay's `observations`). `GET /collection.json` — `complete` (did the scan lose anything at all), `unreadable` (which sources could not be read, and so are suspending removals), `failures` (each attributed to its source/scope and stamped with its `kind`), `stream` (the Tier-1 feed's own health) and `flows` (the Tier-2 feed's, plus how many flows are currently observed) — the last two deliberately separate, see above. This is the only way a client can tell "this provider holds nothing" from "this provider could not be reached" from "we read it but dropped a row" — it matters most at start-up, when an outage makes the first partial collection the baseline. `GET /ws` — WebSocket hub.
 - WS is **bidirectional**: server pushes `snapshot` then `patch`es; the client can pull `get_snapshot` / `get_neighbors` on demand.
@@ -236,7 +287,7 @@ Interactive rendering (`docs/graph_rendering_design.md`) lives in a **separate c
 - `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` position buffer); `parallel` feature enables rayon natively.
 - `atlas-layout-wasm` — wasm-bindgen bridge; builds with `cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`.
 - `atlas-web` — Sigma.js WebGL frontend, a **bun** app (use bun, not node/npm): `bun install && bun run wasm && bun dev` inside `atlas-render/atlas-web/` serves at `http://localhost:4680`. By default it connects to `atlas-server` over WebSocket (`ws://<host>:4681/ws`) for a live snapshot-then-patches feed; with no server it falls back to a static `/snapshot.json` fetch (or force that with `?static`).
-- Test with `cargo nextest run` **inside `atlas-render/`** (the root run does not cover it — it is a separate workspace). Static end-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (view at `http://localhost:4680/?static`). Live end-to-end: `cargo run -p atlas-server -- --demo` (root) + `bun dev` (in `atlas-render/atlas-web/`) to watch patches apply as the demo graph churns.
+- Test with `cargo nextest run` **inside `atlas-render/`** (the root run does not cover it — it is a separate workspace). Static end-to-end without credentials: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev` (view at `http://localhost:4680/?static`). Live end-to-end: `cargo run -p atlas-server -- --demo` (root) + `bun dev` (in `atlas-render/atlas-web/`) to watch patches apply as the demo graph churns, including one burst flow per four ticks that arrives, pulls in the endpoint node no scan owns, then lapses and is removed by the differ.
 
 ## Auth (reference only — not available locally)
 

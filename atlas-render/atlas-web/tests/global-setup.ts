@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { copyFileSync, existsSync } from "node:fs";
+import { copyFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,10 +15,12 @@ export default function globalSetup() {
 	// Build the wasm engine if stale (fast no-op when fresh).
 	execSync("cargo xtask wasm", { cwd: repoRoot, stdio: "inherit" });
 
-	// Generate the Globex demo snapshot once, then serve it as the static fixture.
+	// Regenerate the Globex demo snapshot unconditionally, then serve it as the
+	// static fixture. Reusing an existing file silently pins the suite to
+	// whatever the fixtures looked like when it was written — a snapshot from
+	// before the flow overlay parses fine and simply carries no observations,
+	// so the traffic assertions fail against stale data rather than real drift.
 	const demo = resolve(repoRoot, "multi_cloud_demo.json");
-	if (!existsSync(demo)) {
-		execSync("cargo run -p atlas-lib --example demo", { cwd: repoRoot, stdio: "inherit" });
-	}
+	execSync("cargo run -p atlas-lib --example demo", { cwd: repoRoot, stdio: "inherit" });
 	copyFileSync(demo, resolve(web, "static/snapshot.json"));
 }

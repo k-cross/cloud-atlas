@@ -10,7 +10,7 @@ import {
 	type SnapshotObservation,
 	snapshotFromGraph,
 } from "./graph";
-import { nodeSize, PROVIDER_COLORS } from "./style";
+import { EDGE_COLORS, FLOW_STATUS_COLORS, flowSize, nodeSize, PROVIDER_COLORS } from "./style";
 
 function node(key: string, kind: string, id = 0): SnapshotNode {
 	return { id, key, label: key, kind };
@@ -269,6 +269,35 @@ describe("observations", () => {
 		const graph = buildGraph(snapshot({ nodes: [node("ip-a", "GenericIpAddress")] }));
 		applyPatch(graph, patch({ added_nodes: [node("ip-b", "GenericIpAddress")] }));
 		expect(graph.order).toBe(2);
+	});
+
+	// A rejected flow and an accepted one are the same `TrafficFlow` edge and
+	// mean opposite things, so the verdict has to outrank the kind's color.
+	test("a flow edge takes its verdict's color and a volume-scaled width", () => {
+		const flow = edge("ip-a", "ip-b", "TrafficFlow");
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress"), node("ip-b", "GenericIpAddress")],
+				edges: [flow],
+				observations: [{ key: flow.key, last_seen: 1, packets: 999, bytes: 1, status: "rejected" }],
+			}),
+		);
+		expect(graph.getEdgeAttribute(flow.key, "color")).toBe(FLOW_STATUS_COLORS.rejected);
+		expect(graph.getEdgeAttribute(flow.key, "size")).toBe(flowSize(999));
+	});
+
+	test("an expired flow edge goes back to its kind's plain styling", () => {
+		const flow = edge("ip-a", "ip-b", "TrafficFlow");
+		const graph = buildGraph(
+			snapshot({
+				nodes: [node("ip-a", "GenericIpAddress"), node("ip-b", "GenericIpAddress")],
+				edges: [flow],
+				observations: [{ key: flow.key, last_seen: 1, packets: 999, bytes: 1, status: "accepted" }],
+			}),
+		);
+		applyPatch(graph, patch({ expired: [flow.key] }));
+		expect(graph.getEdgeAttribute(flow.key, "color")).toBe(EDGE_COLORS.TrafficFlow);
+		expect(graph.getEdgeAttribute(flow.key, "size")).toBe(1);
 	});
 
 	// Volume belongs to the flow, because one record names several nodes and

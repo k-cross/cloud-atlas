@@ -4,7 +4,16 @@
 // free given its inputs.
 
 import Graph from "graphology";
-import { DEFAULT_EDGE_COLOR, EDGE_COLORS, nodeSize, PROVIDER_COLORS, providerOf } from "./style";
+import {
+	DEFAULT_EDGE_COLOR,
+	EDGE_COLORS,
+	flowColor,
+	flowSize,
+	nodeSize,
+	PROVIDER_COLORS,
+	providerOf,
+} from "./style";
+import { FLOW_KIND } from "./traffic";
 
 // Must match atlas-lib's `export::SNAPSHOT_VERSION` and atlas-layout's
 // `graph::SNAPSHOT_VERSION`. v2 added the stable `key` fields the live backend
@@ -121,23 +130,34 @@ function observe(graph: Graph, observations: SnapshotObservation[]) {
 		};
 		if (o.packets !== undefined) attrs.packets = o.packets;
 		if (o.bytes !== undefined) attrs.bytes = o.bytes;
-		if (graph.hasNode(o.key)) graph.mergeNodeAttributes(o.key, attrs);
-		else if (graph.hasEdge(o.key)) graph.mergeEdgeAttributes(o.key, attrs);
+		if (graph.hasNode(o.key)) {
+			graph.mergeNodeAttributes(o.key, attrs);
+		} else if (graph.hasEdge(o.key)) {
+			if (graph.getEdgeAttribute(o.key, "kind") === FLOW_KIND) {
+				attrs.color = flowColor(o.status);
+				attrs.size = flowSize(o.packets);
+			}
+			graph.mergeEdgeAttributes(o.key, attrs);
+		}
 	}
 }
 
 // A lapsed observation has to be cleared, not just left stale: a client that
 // keeps the last freshness it heard shows a silent resource as live forever.
 function clearObservations(graph: Graph, keys: string[]) {
-	const attrs = {
+	const attrs: Record<string, unknown> = {
 		lastSeen: undefined,
 		packets: undefined,
 		bytes: undefined,
 		flowStatus: undefined,
 	};
 	for (const key of keys) {
-		if (graph.hasNode(key)) graph.mergeNodeAttributes(key, attrs);
-		else if (graph.hasEdge(key)) graph.mergeEdgeAttributes(key, attrs);
+		if (graph.hasNode(key)) {
+			graph.mergeNodeAttributes(key, attrs);
+		} else if (graph.hasEdge(key)) {
+			const kind = graph.getEdgeAttribute(key, "kind") as string;
+			graph.mergeEdgeAttributes(key, { ...attrs, color: edgeColor(kind), size: 1 });
+		}
 	}
 }
 

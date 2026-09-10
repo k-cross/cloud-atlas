@@ -6,14 +6,28 @@ import { expect, type Page, test } from "@playwright/test";
 // Counts come from the same fixture global-setup serves at /snapshot.json, so
 // assertions track the fixture instead of hard-coding numbers. Read lazily:
 // the fixture is written by global-setup, which runs after test discovery.
-function fixtureCounts(): { nodes: number; edges: number } {
-	const snap = JSON.parse(
+function fixture(): {
+	nodes: unknown[];
+	edges: unknown[];
+	observations?: { packets?: number }[];
+} {
+	return JSON.parse(
 		readFileSync(
 			resolve(dirname(fileURLToPath(import.meta.url)), "../static/snapshot.json"),
 			"utf8",
 		),
-	) as { nodes: unknown[]; edges: unknown[] };
+	);
+}
+
+function fixtureCounts(): { nodes: number; edges: number } {
+	const snap = fixture();
 	return { nodes: snap.nodes.length, edges: snap.edges.length };
+}
+
+// Volume rides on flow edges only, so an observation carrying packets is a
+// flow and one without is a node that was merely heard from.
+function fixtureFlows(): number {
+	return (fixture().observations ?? []).filter((o) => o.packets !== undefined).length;
 }
 
 const STATUS = ".status";
@@ -88,6 +102,49 @@ test.describe("render pipeline (static)", () => {
 		expect(errors).toEqual([]);
 	});
 
+	test("shows the observed-traffic panel with the fixture's flows", async ({ page }) => {
+		// Tier 2 reaches the client as its own `observations` list; this is the
+		// only assertion that it survives the whole pipeline into the UI.
+		await page.goto(STATIC);
+		await expect(page.locator(".traffic")).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(".traffic")).toContainText(`${fixtureFlows()} flows`);
+		await expect(page.locator(".chip").first()).toBeVisible();
+	});
+
+	test("traffic animates on its own canvas while the layout stays still", async ({ page }) => {
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
+		await page.waitForTimeout(300);
+
+		const moved: number = await page.evaluate(
+			() =>
+				new Promise<number>((resolve) => {
+					const canvas = document.querySelector(
+						".graph-container canvas.traffic-layer",
+					) as HTMLCanvasElement;
+					const W = 300;
+					const H = 220;
+					const off = document.createElement("canvas");
+					off.width = W;
+					off.height = H;
+					const ctx = off.getContext("2d")!;
+					const grab = (): Uint8ClampedArray => {
+						ctx.clearRect(0, 0, W, H);
+						ctx.drawImage(canvas, 0, 0, W, H);
+						return ctx.getImageData(0, 0, W, H).data;
+					};
+					const first = grab();
+					setTimeout(() => {
+						const later = grab();
+						let sum = 0;
+						for (let i = 0; i < later.length; i += 4) sum += Math.abs(later[i] - first[i]);
+						resolve(sum);
+					}, 700);
+				}),
+		);
+		expect(moved).toBeGreaterThan(0);
+	});
+
 	test("shows the error overlay on a snapshot version mismatch", async ({ page }) => {
 		// Guards the SNAPSHOT_VERSION check — the contract that catches an
 		// atlas-lib export drift the frontend can't read.
@@ -143,7 +200,8 @@ test.describe("render pipeline (static)", () => {
 
 	test("settled graph is rock-still — no per-frame render churn", async ({ page }) => {
 		// The core "shaking" regression. Once settled, with a static camera, the
-		// rendered image must not change frame-to-frame.
+		// rendered image must not change frame-to-frame. The traffic overlay is
+		// excluded: its motion is the point, and it is a separate canvas.
 		await page.goto(STATIC);
 		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
 		await page.waitForTimeout(300);
@@ -152,7 +210,9 @@ test.describe("render pipeline (static)", () => {
 			() =>
 				new Promise<number>((resolve) => {
 					const host = document.querySelector(".graph-container") as HTMLElement;
-					const canvases = Array.from(host.querySelectorAll("canvas")) as HTMLCanvasElement[];
+					const canvases = Array.from(
+						host.querySelectorAll("canvas:not(.traffic-layer)"),
+					) as HTMLCanvasElement[];
 					const W = 300;
 					const H = 220;
 					const off = document.createElement("canvas");

@@ -32,6 +32,7 @@ use crate::cloud::definition::{
 use std::collections::HashMap;
 
 pub const REGION: &str = "us-east-1";
+const AVERAGE_PACKET_BYTES: u64 = 128;
 pub const GCP_PROJECT: &str = "globex-prod";
 pub const AZURE_SUBSCRIPTION: &str = "sub-globex";
 
@@ -61,77 +62,152 @@ pub fn all() -> Vec<Provider> {
 /// observed-traffic overlay on top — the same two steps, in the same order, the
 /// live server performs on every reconciliation tick.
 pub fn build_graph() -> GraphBuilder {
+    let mut builder = topology();
+    observed().overlay(&mut builder);
+    builder
+}
+
+pub fn topology() -> GraphBuilder {
     let s = settings();
     let mut builder = GraphBuilder::new();
     for provider in all() {
         projector::build(&mut builder, &provider, &s);
     }
-
-    let mut observed = FlowIndex::default();
-    for flow in flows() {
-        observed.observe(&flow);
-    }
-    observed.overlay(&mut builder);
-
     builder
+}
+
+pub fn observed() -> FlowIndex {
+    let mut index = FlowIndex::default();
+    for flow in flows() {
+        index.observe(&flow);
+    }
+    index
 }
 
 /// Traffic the fake environment has been observed carrying — what a flow-log
 /// feed would deliver, already normalized.
 ///
-/// Three deliberate shapes:
-/// - `10.10.1.10 -> 198.51.100.10` crosses a seam. The destination is already
-///   in the graph as the Azure public IP *and* the Cloudflare A record, so the
-///   observed flow lands as a real edge from the AWS estate into the other two
-///   without any API-level correlation.
+/// Every endpoint but one is a `GenericIpAddress` some projector already
+/// emitted, so the overlay spans the whole estate rather than decorating one
+/// corner of it — which is the point of a demo whose subject is traffic. The
+/// deliberate shapes:
+/// - `10.10.1.10 -> 198.51.100.10` and `10.10.1.11 -> 10.20.0.5` cross seams.
+///   Each destination is already in the graph twice over (the Azure public IP
+///   *and* the Cloudflare A record; the GCP Cloud SQL private IP *and* the
+///   Azure NSG rule), so the observed flow lands as a real edge from the AWS
+///   estate into the others without any API-level correlation.
 /// - `10.10.1.11 -> 203.0.113.77` goes somewhere no scan reported, which is the
 ///   case for a `GenericIpAddress` created by the overlay alone.
 /// - the same pair, rejected, which is the interesting half: a security group
 ///   says traffic *could* flow, and only this says it was turned away.
+/// - volumes span four orders of magnitude, because the renderer scales both
+///   edge width and packet animation logarithmically and a demo where every
+///   flow carries the same count exercises neither.
 ///
 /// `observed_at` is stamped at call time rather than fixed, so an overlay built
 /// from these is current whenever it is built. The *graph* stays deterministic
 /// — [`crate::atlas::definition::Edge::TrafficFlow`] carries no payload.
 pub fn flows() -> Vec<FlowObservation> {
     let now = now_millis();
-    let flow = |src: &str, dst: &str, resources: Vec<Node>, action| FlowObservation {
+    let flow = |src: &str, dst: &str, resources: Vec<Node>, packets: u64, action| FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
         src: Node::GenericIpAddress(src.into()),
         dst: Node::GenericIpAddress(dst.into()),
         resources,
-        packets: 128,
-        bytes: 16_384,
+        packets,
+        bytes: packets.saturating_mul(AVERAGE_PACKET_BYTES),
         action,
         observed_at: now,
+    };
+    let web01 = || {
+        vec![
+            Node::AwsEc2Instance("i-globex-web-01".into()),
+            Node::AwsEc2Eni("eni-globex-web-01a".into()),
+        ]
+    };
+    let web02 = || {
+        vec![
+            Node::AwsEc2Instance("i-globex-web-02".into()),
+            Node::AwsEc2Eni("eni-globex-web-02a".into()),
+        ]
     };
 
     vec![
         flow(
             "10.10.1.10",
             "198.51.100.10",
-            vec![
-                Node::AwsEc2Instance("i-globex-web-01".into()),
-                Node::AwsEc2Eni("eni-globex-web-01a".into()),
-            ],
+            web01(),
+            184_000,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "10.10.1.11",
+            "10.20.0.5",
+            web02(),
+            96_400,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "192.0.2.55",
+            "10.10.1.10",
+            web01(),
+            61_200,
             Some(FlowAction::Accepted),
         ),
         flow(
             "10.10.1.11",
             "203.0.113.77",
-            vec![
-                Node::AwsEc2Instance("i-globex-web-02".into()),
-                Node::AwsEc2Eni("eni-globex-web-02a".into()),
-            ],
+            web02(),
+            42_800,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "203.0.113.10",
+            "34.120.0.9",
+            Vec::new(),
+            12_500,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "2001:db8::10",
+            "198.51.100.10",
+            Vec::new(),
+            7_400,
             Some(FlowAction::Accepted),
         ),
         flow(
             "10.10.1.11",
             "203.0.113.77",
             Vec::new(),
+            940,
+            Some(FlowAction::Rejected),
+        ),
+        flow(
+            "203.0.113.50",
+            "10.10.1.11",
+            Vec::new(),
+            310,
             Some(FlowAction::Rejected),
         ),
     ]
+}
+
+pub fn burst_flow() -> FlowObservation {
+    FlowObservation {
+        source: CollectionSource::Aws,
+        scope: REGION.to_owned(),
+        src: Node::GenericIpAddress("192.0.2.99".into()),
+        dst: Node::GenericIpAddress("10.10.1.10".into()),
+        resources: vec![
+            Node::AwsEc2Instance("i-globex-web-01".into()),
+            Node::AwsEc2Eni("eni-globex-web-01a".into()),
+        ],
+        packets: 4_800,
+        bytes: 4_800 * AVERAGE_PACKET_BYTES,
+        action: Some(FlowAction::Rejected),
+        observed_at: now_millis(),
+    }
 }
 
 fn now_millis() -> i64 {

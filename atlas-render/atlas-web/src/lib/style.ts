@@ -39,6 +39,32 @@ export const EDGE_COLORS: Record<string, string> = {
 	TrafficFlow: "#3f8f6f",
 };
 
+export const FLOW_STATUS_COLORS: Record<string, string> = {
+	accepted: "#3fbf87",
+	rejected: "#e0576a",
+	mixed: "#e0a83f",
+	observed: "#7f8ea3",
+};
+
+export const FLOW_PACKET_COLORS: Record<string, string> = {
+	accepted: "#d6ffee",
+	rejected: "#ffd8de",
+	mixed: "#ffeccb",
+	observed: "#e3ebf6",
+};
+
+export function packetColor(status: string | undefined): string {
+	return (status && FLOW_PACKET_COLORS[status]) || FLOW_PACKET_COLORS.observed;
+}
+
+export function flowColor(status: string | undefined): string {
+	return (status && FLOW_STATUS_COLORS[status]) || EDGE_COLORS.TrafficFlow;
+}
+
+export function flowSize(packets: number | undefined): number {
+	return 1 + Math.log10((packets ?? 0) + 1);
+}
+
 // Degree-scaled size: hubs (VPCs, subnets, zones) stand out, leaves stay
 // small enough that ten-thousand-node graphs don't turn into a solid disc.
 export function nodeSize(degree: number): number {

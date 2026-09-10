@@ -10,6 +10,8 @@ import {
 	snapshotFromGraph,
 } from "./graph";
 import { PROVIDER_COLORS, type Provider, providerOf } from "./style";
+import { TrafficLayer } from "./TrafficLayer";
+import type { TrafficSummary } from "./traffic";
 
 const SETTLE_BUDGET_MS = 10;
 const SETTLE_STEP = 20;
@@ -56,6 +58,7 @@ export interface GraphControllerOptions {
 	container: HTMLElement;
 	onStatusChange: (statusText: string) => void;
 	onLegendChange: (legend: LegendCount[]) => void;
+	onTrafficChange: (traffic: TrafficSummary) => void;
 	onError: (error: string) => void;
 }
 
@@ -70,6 +73,7 @@ export class GraphController {
 	private bboxPinned = false;
 	private options: GraphControllerOptions;
 	private socket: WebSocket | null = null;
+	private traffic: TrafficLayer | null = null;
 
 	constructor(options: GraphControllerOptions) {
 		this.options = options;
@@ -89,6 +93,9 @@ export class GraphController {
 				init({ module_or_path: "/pkg/atlas_layout_wasm_bg.wasm" }),
 				whenSized(this.options.container),
 			]);
+
+			this.traffic = new TrafficLayer(this.renderer, this.graph, this.options.onTrafficChange);
+			this.traffic.start();
 
 			(window as unknown as { atlas: unknown }).atlas = {
 				graph: this.graph,
@@ -310,6 +317,7 @@ export class GraphController {
 
 	public destroy() {
 		if (this.anim) cancelAnimationFrame(this.anim);
+		this.traffic?.destroy();
 		this.engine?.free();
 		this.renderer.kill();
 		this.socket?.close();

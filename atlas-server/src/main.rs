@@ -6,6 +6,7 @@
 //! incremental patches to the frontend over WebSocket (`ws`). See
 //! `docs/change_monitoring_design.md` §7.
 
+mod demo;
 mod http;
 mod poll;
 mod state;
@@ -18,7 +19,6 @@ use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::flow::FlowIndex;
 use atlas_lib::atlas::patch::Retention;
-use atlas_lib::fixtures;
 use clap::Parser;
 use std::time::Duration;
 
@@ -86,10 +86,11 @@ pub struct Opt {
 
     /// How long an observed flow counts as current. Past this, the traffic edge
     /// is removed and the resources it touched stop reporting as live.
-    /// Generous by default relative to flow logs' own aggregation and delivery
-    /// lag, which is minutes.
-    #[clap(long, default_value_t = FlowIndex::DEFAULT_TTL.as_secs())]
-    flow_ttl_secs: u64,
+    /// Unset, the collection source answers: fifteen minutes for a real flow
+    /// feed, generous on purpose relative to flow logs' own aggregation and
+    /// delivery lag, which is minutes.
+    #[clap(long)]
+    flow_ttl_secs: Option<u64>,
 }
 
 #[tokio::main]
@@ -109,13 +110,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Seed the graph once up front so the very first client gets a populated
     // snapshot, and choose the reconciliation source.
-    let (initial, initial_report, source) = if opt.demo {
+    let (mut initial, initial_report, source) = if opt.demo {
         tracing::info!("demo mode: serving credential-free Globex fixtures");
-        (
-            fixtures::build_graph(),
-            CollectionReport::default(),
-            Source::Demo,
-        )
+        (demo::graph(0), CollectionReport::default(), Source::Demo)
     } else {
         let settings = atlas_lib::Settings {
             regions: opt.regions,
@@ -169,10 +166,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (None, _) => stream::Source::Disabled,
     };
 
-    let flow_index = FlowIndex::new(
-        Duration::from_secs(opt.flow_ttl_secs),
-        FlowIndex::DEFAULT_CAPACITY,
-    );
+    let poll_interval = Duration::from_secs(opt.poll_secs);
+    let flow_ttl = opt
+        .flow_ttl_secs
+        .map_or_else(|| source.default_flow_ttl(poll_interval), Duration::from_secs);
+    tracing::info!(ttl = ?flow_ttl, "observed flows count as current for");
+    let mut flow_index = FlowIndex::new(flow_ttl, FlowIndex::DEFAULT_CAPACITY);
+    source.seed_flows(&mut flow_index);
+    flow_index.overlay(&mut initial);
     let state = AppState::new(initial, initial_report, flow_index);
     let app = http::router(state.clone());
     let addr = format!("0.0.0.0:{}", opt.port);
@@ -188,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         source,
         events,
         flows,
-        Duration::from_secs(opt.poll_secs),
+        poll_interval,
         Retention::new(opt.retain_scans),
     );
     tokio::select! {

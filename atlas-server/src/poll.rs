@@ -31,6 +31,7 @@
 //! replaying post-scan events over the scan result, which needs per-node
 //! provenance the graph does not carry yet.
 
+use crate::demo;
 use crate::state::AppState;
 use crate::stream;
 use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
@@ -40,17 +41,18 @@ use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
 use atlas_lib::atlas::flow::{FlowIndex, FlowObservation};
 use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff, merge_additions};
-use atlas_lib::fixtures;
 use petgraph::graph::Graph;
 use std::collections::HashSet;
 use std::time::Duration;
 
-/// Where each reconciliation tick's graph comes from.
+/// Where each reconciliation tick's graph comes from. Everything the
+/// credential-free variant actually *does* lives in [`crate::demo`]; this enum
+/// only chooses between the two, so no demo cadence, sentinel or timing leaks
+/// into the reconciliation path or into the flags that configure a real run.
 pub enum Source {
     /// Real collection from configured cloud providers.
     Live(Box<AtlasEngine>),
-    /// Credential-free fixtures with a sentinel that flips in and out every
-    /// other tick, so the live-patch path is exercised without any cloud calls.
+    /// Credential-free fixtures, for local development and demos.
     Demo,
 }
 
@@ -64,33 +66,42 @@ impl Source {
                 let scan = engine.collect().await;
                 (scan.builder, scan.report)
             }
-            Source::Demo => (demo_graph(tick), CollectionReport::default()),
+            Source::Demo => (demo::graph(tick), CollectionReport::default()),
         }
     }
 
     /// Traffic this source observes without a feed. Only the demo has any: it
     /// re-observes the fixtures' flows every tick so a credential-free run
     /// carries live-looking liveness, exactly as the real path does off
-    /// `stream::FlowSource`.
-    fn observations(&self) -> Vec<FlowObservation> {
+    /// `stream::FlowSource`. A real source observes nothing here -- its traffic
+    /// arrives on the Tier-2 feed or not at all.
+    fn observations(&self, tick: u64) -> Vec<FlowObservation> {
         match self {
             Source::Live(_) => Vec::new(),
-            Source::Demo => fixtures::flows(),
+            Source::Demo => demo::observations(tick),
         }
     }
-}
 
-/// The fixtures graph, plus a small connected sentinel pair on odd ticks. The
-/// resulting alternation (add on odd, remove on even) makes every kind of patch
-/// — added/removed nodes and edges — flow past a connected frontend.
-fn demo_graph(tick: u64) -> GraphBuilder {
-    let mut builder = fixtures::build_graph();
-    if tick % 2 == 1 {
-        let host = builder.get_or_add_node(Node::GenericHostname("live-demo.internal".into()));
-        let ip = builder.get_or_add_node(Node::GenericIpAddress("198.51.100.42".into()));
-        builder.add_edge(host, ip, Edge::ResolvesTo);
+    /// Prime a fresh index with whatever this source already knows it has seen,
+    /// so the very first snapshot carries the same overlay a reconciled one
+    /// would. A real source knows nothing until its feed delivers, and seeds
+    /// nothing.
+    pub fn seed_flows(&self, flows: &mut FlowIndex) {
+        for observation in self.observations(0) {
+            flows.observe(&observation);
+        }
     }
-    builder
+
+    /// How long an observation counts as current when the operator has not said.
+    /// A real feed's default is generous relative to flow logs' own delivery lag
+    /// (`FlowIndex::DEFAULT_TTL`); the demo answers for itself, since its
+    /// traffic is synthesised on the reconciliation tick rather than delivered.
+    pub fn default_flow_ttl(&self, poll: Duration) -> Duration {
+        match self {
+            Source::Live(_) => FlowIndex::DEFAULT_TTL,
+            Source::Demo => demo::flow_ttl(poll),
+        }
+    }
 }
 
 /// Turn a scan into the patch to broadcast. A complete scan is authoritative
@@ -263,7 +274,7 @@ async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Reten
     // ever saw as permanently current.
     {
         let mut flows = state.flows.write().await;
-        for observation in &source.observations() {
+        for observation in &source.observations(tick) {
             flows.observe(observation);
         }
         flows.expire(now_millis());
@@ -489,7 +500,7 @@ mod tests {
     /// retention budget — because one resource drifted from its model.
     #[test]
     fn a_malformed_row_does_not_suspend_removals() {
-        let live = demo_graph(1).graph;
+        let live = demo::graph(1).graph;
         let report = azure_drifted_row();
 
         assert!(
@@ -580,7 +591,7 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_never_removes() {
-        let live = demo_graph(1).graph;
+        let live = demo::graph(1).graph;
         let dropped = "AwsEc2Instance";
 
         let mut next = without_kind(&live, dropped);
@@ -619,7 +630,7 @@ mod tests {
     /// deletions never converge for that provider.
     #[test]
     fn a_source_that_never_recovers_stops_blocking_removals() {
-        let live = demo_graph(1).graph;
+        let live = demo::graph(1).graph;
         let mut retention = Retention::new(2);
 
         for scan in 1..=2 {
@@ -656,8 +667,8 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_still_applies_additions() {
-        let live = demo_graph(2).graph;
-        let mut next = without_kind(&demo_graph(3).graph, "AwsEc2Instance");
+        let live = demo::graph(2).graph;
+        let mut next = without_kind(&demo::graph(3).graph, "AwsEc2Instance");
 
         let patch = reconcile(&live, &mut next, &holding_aws(), &no_flows());
 
@@ -672,8 +683,8 @@ mod tests {
 
     #[test]
     fn a_complete_scan_is_unaffected_by_carry_forward() {
-        let live = demo_graph(2).graph;
-        let mut next = demo_graph(3);
+        let live = demo::graph(2).graph;
+        let mut next = demo::graph(3);
         let same = next.graph.clone();
 
         let with_policy = reconcile(&live, &mut next, &nothing_held(), &no_flows());
@@ -702,31 +713,43 @@ mod tests {
         assert!(partial.summary().contains("us-east-1/dynamodb"));
     }
 
-    #[test]
-    fn demo_graph_toggles_sentinel_by_parity() {
-        let even = demo_graph(2).graph;
-        let odd = demo_graph(3).graph;
-        // The sentinel host+ip and their edge are present only on odd ticks.
-        assert_eq!(odd.node_count(), even.node_count() + 2);
+    #[tokio::test]
+    async fn a_burst_flow_arrives_then_lapses_back_out_of_the_graph() {
+        let ttl = Duration::from_millis(50);
+        let state = AppState::new(
+            demo::graph(1),
+            CollectionReport::default(),
+            FlowIndex::new(ttl, FlowIndex::DEFAULT_CAPACITY),
+        );
+        let mut retention = Retention::new(Retention::DEFAULT_BUDGET);
 
-        // Diffing an even→odd transition yields exactly the sentinel additions,
-        // and the reverse yields the removals — the live path the demo drives.
-        let added = diff(&even, &odd);
-        assert_eq!(added.added_nodes.len(), 2);
-        assert_eq!(added.added_edges.len(), 1);
-        assert!(added.removed_nodes.is_empty() && added.removed_edges.is_empty());
+        reconcile_tick(&state, &Source::Demo, &mut retention, 1).await;
+        // Whichever endpoint the burst tick adds over a steady one -- the
+        // address itself is the demo module's business, not this test's.
+        let steady: HashSet<Node> = demo::observations(2).into_iter().map(|o| o.src).collect();
+        let burst = demo::observations(1)
+            .into_iter()
+            .map(|o| o.src)
+            .find(|src| !steady.contains(src))
+            .expect("the burst tick observes an endpoint the steady tick does not");
+        assert!(
+            state.live.read().await.node_map.contains_key(&burst),
+            "the burst's endpoint should be pulled in by the overlay"
+        );
 
-        let removed = diff(&odd, &even);
-        assert_eq!(removed.removed_nodes.len(), 2);
-        assert_eq!(removed.removed_edges.len(), 1);
-        assert!(removed.added_nodes.is_empty() && removed.added_edges.is_empty());
+        tokio::time::sleep(ttl * 2).await;
+        reconcile_tick(&state, &Source::Demo, &mut retention, 2).await;
+        assert!(
+            !state.live.read().await.node_map.contains_key(&burst),
+            "a lapsed flow should be removed by the ordinary differ"
+        );
     }
 
     /// The point of Tier 1: a change reaches the graph without waiting for a
     /// scan, and the patch says exactly what it did.
     #[test]
     fn an_event_batch_changes_the_graph_and_reports_what_it_changed() {
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         let mut applier = EventApplier::new();
         let new_instance = Node::AwsEc2Instance("i-brand-new".into());
 
@@ -745,7 +768,7 @@ mod tests {
     /// times.
     #[test]
     fn a_burst_of_events_produces_a_single_patch() {
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         let mut applier = EventApplier::new();
         let events: Vec<_> = (0..5)
             .map(|i| created(Node::AwsEc2Instance(format!("i-burst-{i}").into()), T0 + i))
@@ -761,7 +784,7 @@ mod tests {
     /// mentioned — that is Tier 3's job alone.
     #[test]
     fn events_never_garbage_collect() {
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         let before = live.graph.node_count();
         let mut applier = EventApplier::new();
 
@@ -779,7 +802,7 @@ mod tests {
     /// edges that died with it — the latency win that justifies the tier.
     #[test]
     fn a_deletion_event_removes_a_resource_the_scan_still_believes_in() {
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         let doomed = some_fixture_instance(&live.graph);
         let mut applier = EventApplier::new();
 
@@ -821,7 +844,7 @@ mod tests {
     /// graph — and a connected client — without waiting for a reconciliation.
     #[tokio::test]
     async fn a_flow_batch_adds_traffic_without_waiting_for_a_scan() {
-        let state = state_with(demo_graph(2));
+        let state = state_with(demo::graph(2));
         let mut patches = state.patches.subscribe();
 
         ingest_flows(
@@ -850,7 +873,7 @@ mod tests {
     /// anything is gone. Removal stays Tier 3's alone.
     #[tokio::test]
     async fn a_flow_batch_never_removes_anything() {
-        let state = state_with(demo_graph(2));
+        let state = state_with(demo::graph(2));
         let before = state.live.read().await.graph.node_count();
         let mut patches = state.patches.subscribe();
 
@@ -873,7 +896,7 @@ mod tests {
     /// deletions across all of AWS — the same mistake, one tier along.
     #[tokio::test]
     async fn a_broken_flow_feed_is_reported_without_touching_scan_health() {
-        let state = state_with(demo_graph(2));
+        let state = state_with(demo::graph(2));
         let mut broken = CollectionReport::default();
         broken.record(
             CollectionSource::Aws,
@@ -943,7 +966,7 @@ mod tests {
     #[tokio::test]
     async fn a_batch_that_evicts_announces_the_lapse_in_its_own_patch() {
         let state = AppState::new(
-            demo_graph(2),
+            demo::graph(2),
             CollectionReport::default(),
             FlowIndex::new(Duration::from_secs(3600), 4),
         );
@@ -977,9 +1000,9 @@ mod tests {
         let mut flows = FlowIndex::default();
         flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
 
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         flows.overlay(&mut live);
-        let mut next = demo_graph(2);
+        let mut next = demo::graph(2);
 
         let patch = reconcile(&live.graph, &mut next, &nothing_held(), &flows);
 
@@ -993,11 +1016,11 @@ mod tests {
         let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
         flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
 
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         flows.overlay(&mut live);
         flows.expire(T0 + 11 * 60 * 1000);
 
-        let mut next = demo_graph(2);
+        let mut next = demo::graph(2);
         let patch = reconcile(&live.graph, &mut next, &nothing_held(), &flows);
 
         assert!(
@@ -1018,11 +1041,11 @@ mod tests {
         let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
         flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
 
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         flows.overlay(&mut live);
         flows.expire(T0 + 11 * 60 * 1000);
 
-        let mut next = demo_graph(2);
+        let mut next = demo::graph(2);
         let patch = reconcile(&live.graph, &mut next, &holding_aws(), &flows);
 
         assert!(
@@ -1041,7 +1064,7 @@ mod tests {
     /// graph that was installed.
     #[test]
     fn a_reconciliation_scan_overrules_an_event_it_could_not_have_seen() {
-        let mut live = demo_graph(2);
+        let mut live = demo::graph(2);
         let doomed = some_fixture_instance(&live.graph);
         let mut applier = EventApplier::new();
         apply_events(
@@ -1050,7 +1073,7 @@ mod tests {
             &[change(ChangeOp::Deleted, doomed.clone(), T0)],
         );
 
-        let mut next = demo_graph(2);
+        let mut next = demo::graph(2);
         let patch = reconcile(&live.graph, &mut next, &nothing_held(), &no_flows());
 
         assert!(
