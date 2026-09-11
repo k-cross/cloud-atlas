@@ -11,9 +11,6 @@ pub fn aws_projector(
     aws_data: &[(String, AmazonCollection)],
     opts: &Settings,
 ) {
-    // Each (region, collection) tuple is independent, so project them into
-    // thread-local sub-graphs in parallel, then merge serially (cheap) in the
-    // input order to keep the output deterministic.
     let sub_graphs: Vec<GraphBuilder> = aws_data
         .par_iter()
         .map(|(region, collection)| {
@@ -64,8 +61,7 @@ fn project_amazon_collection(
                             .iter()
                             .filter_map(|tag| tag.key.as_deref().zip(tag.value.as_deref()))
                             .collect(),
-                        // `DescribeInstances` already carries every interface's
-                        // real id, so the ENI pivot costs no extra API call.
+
                         network_interfaces: inst
                             .network_interfaces()
                             .iter()
@@ -345,10 +341,7 @@ fn project_amazon_collection(
             nat_gateways,
             addresses,
         }) => {
-            // Elastic IPs: a managed public IP, stitched to the generic IP
-            // space so egress can be followed across clouds.
             for addr in addresses {
-                // Prefer the stable allocation id; fall back to the public IP.
                 if let Some(alloc) = addr.allocation_id().or_else(|| addr.public_ip()) {
                     let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
                     if let Some(public_ip) = addr.public_ip() {
@@ -361,7 +354,6 @@ fn project_amazon_collection(
                 }
             }
 
-            // Internet gateways: the public egress door, attached to a VPC.
             for igw in internet_gateways {
                 if let Some(igw_id) = igw.internet_gateway_id() {
                     let igw_idx =
@@ -378,8 +370,6 @@ fn project_amazon_collection(
                 }
             }
 
-            // NAT gateways: private-subnet egress, living in a subnet and
-            // holding an Elastic IP.
             for nat in nat_gateways {
                 if let Some(nat_id) = nat.nat_gateway_id() {
                     let nat_idx = builder.get_or_add_node(Node::AwsEc2NatGateway(nat_id.into()));
@@ -400,8 +390,6 @@ fn project_amazon_collection(
                 }
             }
 
-            // Route tables tie it together: a subnet is associated with a
-            // route table, whose routes point at an IGW or NAT gateway.
             for rt in route_tables {
                 if let Some(rt_id) = rt.route_table_id() {
                     let rt_idx = builder.get_or_add_node(Node::AwsEc2RouteTable(rt_id.into()));
@@ -452,7 +440,6 @@ fn project_amazon_collection(
                     for perm in sg.ip_permissions() {
                         for pair in perm.user_id_group_pairs() {
                             if let Some(referenced_group_id) = pair.group_id() {
-                                // The referenced group allows traffic TO this group
                                 builder.link_from(
                                     idx,
                                     Node::AwsEc2SecurityGroup(referenced_group_id.into()),
@@ -492,17 +479,6 @@ fn project_amazon_collection(
     }
 }
 
-/// Everything the graph takes from one EC2 instance, independent of where it
-/// was read from.
-///
-/// The full-scan collector reads an `aws_sdk_ec2::types::Instance`; the Tier-1
-/// event adapter reads an AWS Config configuration item or a CloudTrail
-/// `RunInstances` record. Those are three different wire shapes describing the
-/// same thing, and if each grew its own idea of how an instance attaches to the
-/// graph, the event path would emit edges the full scan does not — which the
-/// next reconciliation would delete and the next event re-add, forever. Reduce
-/// to these facts, and [`project_instance`] stays the single definition of the
-/// shape.
 pub(crate) struct InstanceFacts<'a> {
     pub id: Option<&'a str>,
     pub vpc_id: Option<&'a str>,
@@ -511,33 +487,14 @@ pub(crate) struct InstanceFacts<'a> {
     pub private_ip: Option<&'a str>,
     pub security_group_ids: Vec<&'a str>,
     pub tags: Vec<(&'a str, &'a str)>,
-    /// Every interface the instance holds, by its real `eni-` id. Plural
-    /// because an instance can be multi-homed, and each interface can sit in a
-    /// different subnet from the instance's primary one.
     pub network_interfaces: Vec<EniFacts<'a>>,
 }
 
-/// One interface, as any of the three wire shapes describes it.
 pub(crate) struct EniFacts<'a> {
     pub id: &'a str,
-    /// The interface's own subnet, which is not always the instance's — a
-    /// second ENI is frequently placed in another subnet on purpose.
     pub subnet_id: Option<&'a str>,
 }
 
-/// Attach one instance to the graph: the `Instance -> HasIp -> ENI ->
-/// AttachedTo -> Subnet` pivot from CLAUDE.md, plus its VPC/AZ containment,
-/// private IP, tags and security groups.
-///
-/// The VPC and subnet are created even when the instance itself has no id, so a
-/// half-described instance still contributes the containment it did report.
-///
-/// An instance that reports no interfaces gets no ENI, and therefore no path to
-/// its subnet. That is deliberate: the ENI is keyed by its own `eni-` id, so
-/// there is nothing to invent one from, and substituting a direct
-/// `Instance -> Subnet` edge would be a shape no other producer emits — every
-/// reconciliation would delete it and every event would put it back. The
-/// containment the instance did report (VPC, subnet, AZ) still lands.
 pub(crate) fn project_instance(
     builder: &mut GraphBuilder,
     region_idx: NodeIndex,
@@ -561,13 +518,8 @@ pub(crate) fn project_instance(
         inst_idx = Some(idx);
 
         for eni in &facts.network_interfaces {
-            // Instance -> HasIp -> ENI -> AttachedTo -> Subnet
             let eni_idx = builder.link_to(idx, Node::AwsEc2Eni(eni.id.into()), Edge::HasIp);
-            // The interface's own subnet wins over the instance's primary one,
-            // and lands under the same VPC either way. An interface that did
-            // not report one attaches to nothing: a second ENI is usually in a
-            // *different* subnet, so substituting the instance's would
-            // contradict the scan and flap.
+
             let attached = match eni.subnet_id {
                 Some(subnet_id) if Some(subnet_id) != facts.subnet_id => Some(builder.link_to(
                     vpc_idx,
@@ -619,13 +571,8 @@ pub(crate) fn project_instance(
     }
 }
 
-/// Whether the AWS Config catch-all representation of a resource type earns a
-/// node. Shared with the Tier-1 event adapter, so a Config change notification
-/// files the same resource types the full scan does — a type the scan skips
-/// must not arrive by event only to be deleted at the next reconciliation.
 pub(crate) fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
     match name {
-        // false assoc. unclear if needed
         "AWS::RDS::DBClusterSnapshot" => false,
         "AWS::StepFunctions::StateMachine" => false,
         "AWS::ApiGateway::Stage" => false,
@@ -633,15 +580,11 @@ pub(crate) fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
         "AWS::EC2::NetworkAcl" => false,
         "AWS::EC2::EIP" => false,
         "AWS::EC2::NetworkInterface" => false,
-        // Routing plane is now modeled structurally via AmazonNetworking, so
-        // skip the edge-less AWS Config catch-all representation.
         "AWS::EC2::NatGateway" => false,
         "AWS::SNS::Topic" => false,
-        // true assoc.
         "AWS::RDS::DBCluster" => true,
         "AWS::S3::Bucket" => true,
         "AWS::SQS::Queue" => true,
-        // Modeled structurally via AmazonNetworking (route tables + gateways).
         "AWS::EC2::RouteTable" => false,
         "AWS::EC2::VPC" => true,
         "AWS::EC2::Instance" => true,
@@ -650,19 +593,18 @@ pub(crate) fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
         "AWS::Redshift::ClusterSubnetGroup" => true,
         "AWS::RDS::DBSubnetGroup" => true,
         "AWS::EC2::Subnet" => true,
-        // Modeled structurally via AmazonNetworking.
         "AWS::EC2::InternetGateway" => false,
         "AWS::ECS::Cluster" => true,
         "AWS::Lambda::Function" => true,
         "AWS::RDS::DBInstance" => true,
         "AWS::EKS::Cluster" => true,
         "AWS::ElasticLoadBalancingV2::Listener" => true,
+
         // TODO: below are unclear if actually wanted/needed
         "AWS::Route53Resolver::ResolverRuleAssociation" => true,
         "AWS::EC2::VPCEndpoint" => true,
         "AWS::Route53Resolver::ResolverRule" => true,
         "AWS::DynamoDB::Table" => true,
-        // exclude by default
         _ => !exclude_by_default,
     }
 }

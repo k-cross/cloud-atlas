@@ -1,36 +1,19 @@
-//! ForceAtlas2 (Jacomy, Venturini, Heymann, Bastian — PLoS ONE 2014) with
-//! the paper's adaptive speed scheme. One `step()` is one physics iteration;
-//! the caller (native test, wasm bridge, or a future worker loop) owns the
-//! cadence, so a browser can interleave steps with rendering frames.
-
 use crate::graph::LayoutGraph;
 use crate::quadtree::QuadTree;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Below this many nodes exact pairwise repulsion is cheaper than building
-/// the quadtree every iteration.
 const BARNES_HUT_CUTOFF: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct LayoutSettings {
-    /// Repulsion strength (kr). Larger spreads the graph out.
     pub repulsion: f32,
-    /// Pull toward the origin, scaled by node mass. Keeps disconnected
-    /// components from drifting off to infinity.
     pub gravity: f32,
-    /// Gravity proportional to distance instead of constant — compacts very
-    /// sparse graphs.
     pub strong_gravity: bool,
-    /// Attraction grows with log(1 + d) instead of d — tightens clusters.
     pub lin_log: bool,
-    /// Barnes-Hut opening criterion. 0 = exact, larger = faster and coarser.
     pub theta: f32,
-    /// Use Barnes-Hut approximation for repulsion (above the size cutoff).
     pub barnes_hut: bool,
-    /// Tolerance to swinging in the adaptive speed controller. Larger
-    /// converges faster but less precisely.
     pub jitter_tolerance: f32,
 }
 
@@ -51,28 +34,13 @@ impl Default for LayoutSettings {
 pub struct ForceAtlas2 {
     graph: LayoutGraph,
     settings: LayoutSettings,
-    /// Interleaved [x0, y0, x1, y1, ..] — the buffer handed across the wasm
-    /// boundary as a Float32Array.
     positions: Vec<f32>,
-    /// Forces of the current and previous iteration (same interleaving).
-    /// Both are kept because the speed controller measures per-node
-    /// "swinging" — the disagreement between successive force directions.
     forces: Vec<f32>,
     prev_forces: Vec<f32>,
-    /// Per-node mass-weighted swing, cached by `integrate` so the totals pass
-    /// and the displacement pass don't each recompute it.
     swings: Vec<f32>,
     masses: Vec<f32>,
-    /// Warm-started nodes are pinned: they exert forces (repulsion mass,
-    /// attraction anchors) but are never displaced, and are excluded from the
-    /// adaptive-speed totals. This is what keeps an incremental update from
-    /// re-flowing the whole layout — FA2 has no equilibrium, so re-running it
-    /// over free nodes always drifts everything; pinning makes "only the
-    /// change moves" a hard guarantee.
     fixed: Vec<bool>,
     free_count: usize,
-    /// Reused across iterations so the Barnes-Hut tree isn't reallocated every
-    /// step; empty until the first tree-based iteration.
     tree: QuadTree,
     speed: f32,
     speed_efficiency: f32,
@@ -83,8 +51,6 @@ impl ForceAtlas2 {
         let n = graph.node_count();
         let positions = Self::initial_positions(&graph, n);
 
-        // A node that arrived with warm-start coordinates is pinned; only the
-        // engine-placed (fresh) nodes are free to move.
         let warm = graph.initial_positions();
         let fixed: Vec<bool> = if warm.len() == 2 * n {
             (0..n)
@@ -107,26 +73,17 @@ impl ForceAtlas2 {
             fixed,
             free_count,
             tree: QuadTree::new(),
-            // Nothing can move ⇒ already converged; callers polling `speed()`
-            // see "settled" immediately instead of spinning to an iteration cap.
             speed: if free_count == 0 && n > 0 { 0.0 } else { 1.0 },
             speed_efficiency: 1.0,
         }
     }
 
-    /// A phyllotaxis-spiral point of the given index around `(cx, cy)`.
-    /// Deterministic, evenly spread, and no two indices coincide.
     fn spiral_point(index: usize, cx: f32, cy: f32) -> (f32, f32) {
         let radius = 10.0 * (index as f32).sqrt();
-        let angle = (index as f32) * 2.399_963_2; // golden angle in radians
+        let angle = (index as f32) * 2.399_963_2;
         (cx + radius * angle.cos(), cy + radius * angle.sin())
     }
 
-    /// Starting positions: warm-start coordinates from the graph where present,
-    /// with any unplaced (`NaN`) nodes spiralled around the centroid of the
-    /// placed ones so freshly-added nodes appear inside the existing cloud
-    /// rather than flying in from the origin. With no warm-start data every
-    /// node is spiralled from the origin (the deterministic cold start).
     fn initial_positions(graph: &LayoutGraph, n: usize) -> Vec<f32> {
         let warm = graph.initial_positions();
         if warm.len() != 2 * n {
@@ -139,7 +96,6 @@ impl ForceAtlas2 {
             return positions;
         }
 
-        // Centroid of the already-placed nodes anchors the newcomers.
         let (mut sx, mut sy, mut count) = (0.0f32, 0.0f32, 0usize);
         for i in 0..n {
             let (x, y) = (warm[2 * i], warm[2 * i + 1]);
@@ -186,8 +142,6 @@ impl ForceAtlas2 {
         &self.positions
     }
 
-    /// Current adaptive global speed — a rough convergence signal (drops as
-    /// the layout settles).
     pub fn speed(&self) -> f32 {
         self.speed
     }
@@ -198,8 +152,6 @@ impl ForceAtlas2 {
         }
     }
 
-    /// One full ForceAtlas2 iteration: repulsion + gravity + attraction into
-    /// the force buffer, then adaptive-speed integration.
     pub fn step(&mut self) {
         let n = self.graph.node_count();
         if n == 0 || self.free_count == 0 {
@@ -221,10 +173,6 @@ impl ForceAtlas2 {
         let theta = self.settings.theta;
         let use_tree = self.settings.barnes_hut && n > BARNES_HUT_CUTOFF;
 
-        // Disjoint field borrows: the tree (and read-only positions/masses) are
-        // shared into the kernel while `forces` is written — in parallel under
-        // the `parallel` feature. Borrowing `tree` off `self` also lets it
-        // reuse its cell buffer across iterations instead of reallocating.
         let ForceAtlas2 {
             positions,
             masses,
@@ -242,10 +190,6 @@ impl ForceAtlas2 {
             None
         };
 
-        // Each node's force is computed independently from the shared
-        // read-only positions/tree, writing only its own force slot — the
-        // shape that lets the `parallel` feature fan the loop out with rayon
-        // (and, later, wasm threads) without locks.
         let kernel = |i: usize, force: &mut [f32]| {
             let (x, y, m) = (positions[2 * i], positions[2 * i + 1], masses[i]);
             let (fx, fy) = match tree {
@@ -257,8 +201,6 @@ impl ForceAtlas2 {
 
             let dist = (x * x + y * y).sqrt();
             if dist > 1e-9 {
-                // Toward the origin: constant magnitude kg*m, or
-                // distance-proportional in strong mode.
                 let factor = if strong { kg * m } else { kg * m / dist };
                 force[0] -= x * factor;
                 force[1] -= y * factor;
@@ -292,7 +234,7 @@ impl ForceAtlas2 {
                     0.0
                 }
             } else {
-                1.0 // linear attraction: force equals the delta vector
+                1.0
             };
             self.forces[s] -= dx * factor;
             self.forces[s + 1] -= dy * factor;
@@ -301,25 +243,18 @@ impl ForceAtlas2 {
         }
     }
 
-    /// The FA2 adaptive displacement: per-node "swinging" (disagreement
-    /// between successive forces) slows oscillating nodes down, while global
-    /// speed rises as the layout stabilizes.
     fn integrate(&mut self) {
         let n = self.graph.node_count();
         let mut total_swinging = 0.0f32;
         let mut total_traction = 0.0f32;
         for i in 0..n {
-            // Pinned nodes don't move, so their (still-changing) forces must
-            // not feed the speed controller — otherwise a mostly-pinned graph
-            // never registers as converged.
             if self.fixed[i] {
                 self.swings[i] = 0.0;
                 continue;
             }
             let (fx, fy) = (self.forces[2 * i], self.forces[2 * i + 1]);
             let (px, py) = (self.prev_forces[2 * i], self.prev_forces[2 * i + 1]);
-            // Mass-weighted swing is reused verbatim by the displacement pass
-            // below, so cache it rather than recomputing the sqrt per node.
+
             let swing = self.masses[i] * ((fx - px).powi(2) + (fy - py).powi(2)).sqrt();
             let traction = self.masses[i] * ((fx + px).powi(2) + (fy + py).powi(2)).sqrt() / 2.0;
             self.swings[i] = swing;
@@ -329,7 +264,6 @@ impl ForceAtlas2 {
         total_swinging = total_swinging.max(1e-9);
         total_traction = total_traction.max(1e-9);
 
-        // Jitter tolerance scales with graph size (per the FA2 paper).
         let estimated = 0.05 * (n as f32).sqrt();
         let min_jt = estimated.sqrt();
         let max_jt = 10.0;
@@ -351,8 +285,7 @@ impl ForceAtlas2 {
         } else if self.speed < 1000.0 {
             self.speed_efficiency *= 1.3;
         }
-        // Never rise more than 50% per iteration: a speed spike scatters the
-        // layout and it takes many iterations to recover.
+
         self.speed += (target_speed - self.speed).min(0.5 * self.speed);
 
         for i in 0..n {
@@ -385,7 +318,6 @@ mod tests {
 
     #[test]
     fn connected_nodes_end_up_closer_than_disconnected() {
-        // Two 3-node triangles with no link between them.
         let edges = vec![(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)];
         let graph = LayoutGraph::new(6, edges).unwrap();
         let mut layout = ForceAtlas2::new(graph, LayoutSettings::default());
@@ -411,9 +343,8 @@ mod tests {
 
     #[test]
     fn stays_finite_on_larger_graph() {
-        // Big enough to cross the Barnes-Hut cutoff.
         let mut edges: Vec<(u32, u32)> = (0..499).map(|i| (i, i + 1)).collect();
-        // A hub to create degree skew.
+
         edges.extend((1..100).map(|i| (0, i * 5)));
         let graph = LayoutGraph::new(500, edges).unwrap();
         let mut layout = ForceAtlas2::new(graph, LayoutSettings::default());
@@ -424,8 +355,6 @@ mod tests {
 
     #[test]
     fn barnes_hut_tracks_exact_layout() {
-        // Same graph, exact vs approximated repulsion: identical settings
-        // should land in qualitatively similar layouts (compare diameters).
         let diameter = |barnes_hut: bool| {
             let settings = LayoutSettings {
                 barnes_hut,
@@ -453,7 +382,7 @@ mod tests {
     #[test]
     fn warm_start_seeds_provided_positions_and_places_newcomers_nearby() {
         use crate::graph::LayoutGraph;
-        // Two placed nodes far from the origin, one freshly-added node (no x/y).
+
         let json = r#"{
             "version": 3,
             "nodes": [
@@ -466,11 +395,10 @@ mod tests {
         let graph = LayoutGraph::from_json(json).unwrap();
         let layout = ForceAtlas2::new(graph, LayoutSettings::default());
         let p = layout.positions();
-        // Placed nodes start exactly where they were.
+
         assert_eq!((p[0], p[1]), (100.0, 100.0));
         assert_eq!((p[2], p[3]), (120.0, 100.0));
-        // The newcomer is spiralled around the centroid (~110, 100), i.e. near
-        // the existing cloud — not back at the origin.
+
         assert!(
             distance(p, 2, 0) < 60.0 && distance(p, 2, 1) < 60.0,
             "new node landed far from the warm cluster: {:?}",
@@ -481,9 +409,7 @@ mod tests {
     #[test]
     fn warm_started_nodes_are_pinned_through_a_full_run() {
         use crate::graph::LayoutGraph;
-        // A settled-looking cluster plus one newcomer wired into it. Running
-        // the layout must move ONLY the newcomer: pinned nodes stay
-        // bit-identical, so incremental updates can never re-flow the cloud.
+
         let json = r#"{
             "version": 3,
             "nodes": [
@@ -517,8 +443,7 @@ mod tests {
     #[test]
     fn fully_pinned_graph_reports_settled_immediately() {
         use crate::graph::LayoutGraph;
-        // A removal-only update warm-starts every surviving node — nothing can
-        // move, so the engine must present as converged without iterating.
+
         let json = r#"{
             "version": 3,
             "nodes": [
@@ -537,7 +462,7 @@ mod tests {
     #[test]
     fn cold_start_without_positions_still_spirals_from_origin() {
         use crate::graph::LayoutGraph;
-        // No x/y anywhere → the first node sits at the spiral origin.
+
         let json = r#"{
             "version": 3,
             "nodes": [

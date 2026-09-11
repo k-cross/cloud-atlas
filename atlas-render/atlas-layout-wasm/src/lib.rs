@@ -1,18 +1,3 @@
-//! JavaScript bindings for the layout engine.
-//!
-//! The contract with the rendering layer (Sigma.js in Phase 2) is a flat
-//! `Float32Array` of interleaved `[x0, y0, x1, y1, ..]` coordinates indexed
-//! by snapshot node order. Typical frame loop:
-//!
-//! ```js
-//! const engine = new LayoutEngine(await (await fetch("atlas.json")).text());
-//! function frame() {
-//!   engine.step(5);                      // physics budget per frame
-//!   draw(engine.positionsView());        // zero-copy view into wasm memory
-//!   requestAnimationFrame(frame);
-//! }
-//! ```
-
 use atlas_layout::{ForceAtlas2, LayoutGraph, LayoutSettings};
 use js_sys::Float32Array;
 use wasm_bindgen::prelude::*;
@@ -24,8 +9,6 @@ pub struct LayoutEngine {
 
 #[wasm_bindgen]
 impl LayoutEngine {
-    /// Build from a render snapshot JSON document (`atlas.json`) as exported
-    /// by atlas-lib.
     #[wasm_bindgen(constructor)]
     pub fn new(snapshot_json: &str) -> Result<LayoutEngine, JsError> {
         let graph =
@@ -35,8 +18,6 @@ impl LayoutEngine {
         })
     }
 
-    /// Build straight from buffers: `edges` is a flat
-    /// `[source0, target0, source1, target1, ..]` Uint32Array.
     #[wasm_bindgen(js_name = fromEdgeList)]
     pub fn from_edge_list(node_count: u32, edges: &[u32]) -> Result<LayoutEngine, JsError> {
         if !edges.len().is_multiple_of(2) {
@@ -50,28 +31,20 @@ impl LayoutEngine {
         })
     }
 
-    /// Run `iterations` physics steps.
     pub fn step(&mut self, iterations: u32) {
         self.layout.run(iterations);
     }
 
-    /// Zero-copy view of the interleaved position buffer inside wasm linear
-    /// memory. Invalidated by any wasm memory growth — re-acquire it every
-    /// frame (it is cheap) rather than caching it on the JS side.
     #[wasm_bindgen(js_name = positionsView)]
     pub fn positions_view(&self) -> Float32Array {
         unsafe { Float32Array::view(self.layout.positions()) }
     }
 
-    /// Detached copy of the position buffer — safe to hold across frames,
-    /// e.g. for diffing or transferring to a worker.
     #[wasm_bindgen(js_name = positionsCopy)]
     pub fn positions_copy(&self) -> Float32Array {
         Float32Array::from(self.layout.positions())
     }
 
-    /// Adaptive global speed; falls as the layout converges, so the frame
-    /// loop can stop stepping once it drops below a threshold.
     pub fn speed(&self) -> f32 {
         self.layout.speed()
     }

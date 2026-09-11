@@ -10,8 +10,6 @@ use crate::cloud::google::provider::build_gcp;
 use petgraph::dot::Dot;
 use std::time::Duration;
 
-/// One collection pass: the projected graph plus what could not be read while
-/// producing it.
 pub struct Scan {
     pub builder: GraphBuilder,
     pub report: CollectionReport,
@@ -32,16 +30,6 @@ impl AtlasEngine {
         }
     }
 
-    /// Fetch from every configured provider and project into a fresh
-    /// `GraphBuilder`, without mutating `self` or writing any files. This is the
-    /// reusable core: the CLI wraps it with file export, and the live server
-    /// diffs its output against the persistent graph.
-    ///
-    /// The returned [`Scan`] carries a [`CollectionReport`] alongside the graph.
-    /// A source that errors is recorded there rather than silently yielding an
-    /// empty collection, so callers can tell "this cloud has no such resources"
-    /// apart from "we could not read this cloud" — the distinction the live
-    /// differ needs to avoid deleting resources on a transient API failure.
     pub async fn collect(&self) -> Scan {
         let mut builder = GraphBuilder::new();
         let mut report = CollectionReport::default();
@@ -94,16 +82,6 @@ impl AtlasEngine {
         Scan { builder, report }
     }
 
-    /// Full point-in-time refresh used by the CLI: re-collect and export to
-    /// disk. There is no diffing here — the live server is the incremental
-    /// path — but the same retention policy applies, because the exported files
-    /// are somebody's source of truth too. On an incomplete scan the previous
-    /// graph is folded forward for the sources that failed
-    /// (`patch::carry_forward`), so a daemon tick cannot rewrite `atlas.dot`
-    /// with every resource of a throttled collector deleted, only to put them
-    /// all back on the next tick. On a one-shot run the previous graph is empty
-    /// and this is a no-op: there is no prior truth to preserve, so the export
-    /// is partial and the warning is all we can offer.
     pub async fn update_graph(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let scan = self.collect().await;
         self.install(scan);
@@ -114,8 +92,6 @@ impl AtlasEngine {
     fn install(&mut self, mut scan: Scan) {
         let held = self.retention.hold(&scan.report);
         if !scan.report.is_complete() {
-            // Not necessarily "retaining": a scan whose only failures were
-            // malformed records was still read end to end, so it holds nothing.
             eprintln!(
                 "Warning: collection was incomplete ({} source(s) retained) -- {}",
                 held.len(),
@@ -188,9 +164,6 @@ mod tests {
         Node::CloudflareZone("zone-daemon".into())
     }
 
-    /// The daemon rewrites atlas.dot/atlas.json every tick, so an incomplete
-    /// scan must not export a graph with a throttled collector's resources
-    /// deleted -- while resources a healthy provider really did lose still go.
     #[test]
     fn an_incomplete_scan_does_not_export_phantom_deletions() {
         let mut engine = AtlasEngine::new(Settings::default());

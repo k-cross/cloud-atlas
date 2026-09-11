@@ -63,7 +63,7 @@
 <div class="panel glass-panel">
   <h1>cloud-atlas</h1>
   <div class="status">{statusText}</div>
-  
+
   <div class="legend">
     {#each legendCounts as { provider, color, count }}
       <div class="legend-row">
@@ -73,7 +73,7 @@
       </div>
     {/each}
   </div>
-  
+
   {#if traffic && traffic.flows > 0}
     <div class="traffic">
       <h2>Observed traffic</h2>

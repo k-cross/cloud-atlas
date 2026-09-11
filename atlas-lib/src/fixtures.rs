@@ -1,24 +1,3 @@
-//! A complete fake multi-cloud environment for the fictional company
-//! "Globex" — no cloud credentials required.
-//!
-//! Every collection variant of every provider is populated with at least one
-//! resource, so projecting `all()` exercises every projector arm and emits
-//! every `Node` kind (enforced by the exhaustiveness tests in
-//! `atlas::tests`). The demo example renders the same environment for manual
-//! verification.
-//!
-//! Cross-cloud seams (identical strings on purpose, so the graph merges the
-//! generic pivot nodes):
-//! - `app-globex.azurewebsites.net` — Azure App Service hostname, Cloudflare
-//!   CNAME target, and AWS Route53 CNAME value
-//! - `run.globex.app` — GCP Cloud Run URI and Cloudflare CNAME target
-//! - `198.51.100.10` — Azure Public IP and Cloudflare A record
-//! - `10.20.0.5` — GCP Cloud SQL private IP and Azure NSG outbound rule
-//!
-//! [`flows`] adds the Tier-2 data-plane layer on top: observed traffic the
-//! control plane cannot see, including one flow that crosses a seam and one
-//! that was rejected.
-
 use crate::Settings;
 use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::Node;
@@ -53,14 +32,10 @@ pub fn settings() -> Settings {
     }
 }
 
-/// All four providers, fully populated.
 pub fn all() -> Vec<Provider> {
     vec![aws(), gcp(), azure(), cloudflare()]
 }
 
-/// Project the entire fake environment onto a fresh graph, then fold the
-/// observed-traffic overlay on top — the same two steps, in the same order, the
-/// live server performs on every reconciliation tick.
 pub fn build_graph() -> GraphBuilder {
     let mut builder = topology();
     observed().overlay(&mut builder);
@@ -84,29 +59,6 @@ pub fn observed() -> FlowIndex {
     index
 }
 
-/// Traffic the fake environment has been observed carrying — what a flow-log
-/// feed would deliver, already normalized.
-///
-/// Every endpoint but one is a `GenericIpAddress` some projector already
-/// emitted, so the overlay spans the whole estate rather than decorating one
-/// corner of it — which is the point of a demo whose subject is traffic. The
-/// deliberate shapes:
-/// - `10.10.1.10 -> 198.51.100.10` and `10.10.1.11 -> 10.20.0.5` cross seams.
-///   Each destination is already in the graph twice over (the Azure public IP
-///   *and* the Cloudflare A record; the GCP Cloud SQL private IP *and* the
-///   Azure NSG rule), so the observed flow lands as a real edge from the AWS
-///   estate into the others without any API-level correlation.
-/// - `10.10.1.11 -> 203.0.113.77` goes somewhere no scan reported, which is the
-///   case for a `GenericIpAddress` created by the overlay alone.
-/// - the same pair, rejected, which is the interesting half: a security group
-///   says traffic *could* flow, and only this says it was turned away.
-/// - volumes span four orders of magnitude, because the renderer scales both
-///   edge width and packet animation logarithmically and a demo where every
-///   flow carries the same count exercises neither.
-///
-/// `observed_at` is stamped at call time rather than fixed, so an overlay built
-/// from these is current whenever it is built. The *graph* stays deterministic
-/// — [`crate::atlas::definition::Edge::TrafficFlow`] carries no payload.
 pub fn flows() -> Vec<FlowObservation> {
     let now = now_millis();
     let flow = |src: &str, dst: &str, resources: Vec<Node>, packets: u64, action| FlowObservation {
@@ -230,9 +182,6 @@ pub fn aws() -> Provider {
         .group_name("globex-web")
         .build();
 
-    // Two interfaces on the first instance, the second one in a *different*
-    // subnet — the multi-homed shape a single synthetic ENI per instance could
-    // not represent.
     let eni = |id: &str, subnet: &str| {
         InstanceNetworkInterface::builder()
             .network_interface_id(id)
@@ -345,7 +294,7 @@ pub fn aws() -> Provider {
         )
         .build()
         .unwrap();
-    // CNAME to the Azure App Service hostname — AWS -> Azure seam
+
     let record_cname = aws_sdk_route53::types::ResourceRecordSet::builder()
         .name("app.globex.io.")
         .r#type(aws_sdk_route53::types::RrType::Cname)
@@ -390,8 +339,6 @@ pub fn aws() -> Provider {
         .topic_arn("arn:aws:sns:us-east-1:123:globex-alerts")
         .build();
 
-    // DistributionSummary mirrors the CloudFront API contract, which marks
-    // most fields required — the projector only reads `id`.
     let cloudfront = {
         use aws_sdk_cloudfront::types::*;
         DistributionSummary::builder()
@@ -461,7 +408,6 @@ pub fn aws() -> Provider {
         )
         .build();
 
-    // Routing / egress plane: public subnet -> IGW, private subnet -> NAT -> EIP.
     let igw = InternetGateway::builder()
         .internet_gateway_id("igw-globex")
         .attachments(
@@ -613,7 +559,6 @@ pub fn gcp() -> Provider {
         name: Some("globex-analytics-db".to_owned()),
         ip_addresses: Some(vec![SqlIpAddress {
             ip_type: Some("PRIVATE".to_owned()),
-            // Azure's NSG outbound rule points at this same IP — Azure -> GCP seam
             ip_address: Some("10.20.0.5".to_owned()),
         }]),
         ..Default::default()
@@ -661,7 +606,6 @@ pub fn gcp() -> Provider {
             "projects/{}/locations/us-central1/services/globex-api",
             GCP_PROJECT
         )),
-        // Cloudflare CNAMEs data.globex.io to this — Cloudflare -> GCP seam
         uri: Some("https://run.globex.app".to_owned()),
         ..Default::default()
     };
@@ -747,7 +691,6 @@ pub fn azure() -> Provider {
         location: Some("eastus".to_owned()),
         properties: Some(NetworkSecurityGroupProperties {
             security_rules: Some(vec![
-                // -> GCP Cloud SQL private IP (cross-cloud seam)
                 SecurityRule {
                     properties: Some(SecurityRuleProperties {
                         direction: Some("Outbound".to_owned()),
@@ -755,7 +698,6 @@ pub fn azure() -> Provider {
                         destination_address_prefixes: None,
                     }),
                 },
-                // -> Azure service tag
                 SecurityRule {
                     properties: Some(SecurityRuleProperties {
                         direction: Some("Outbound".to_owned()),
@@ -770,7 +712,6 @@ pub fn azure() -> Provider {
     let pip = PublicIpAddress {
         id: Some(azure_id("Microsoft.Network/publicIPAddresses/pip-globex")),
         name: Some("pip-globex".to_owned()),
-        // Cloudflare A record db.globex.io points here — Cloudflare -> Azure seam
         ip_address: Some("198.51.100.10".to_owned()),
     };
 
@@ -808,7 +749,6 @@ pub fn azure() -> Provider {
         name: Some("app-globex".to_owned()),
         location: Some("eastus".to_owned()),
         properties: Some(AppServiceProperties {
-            // Cloudflare and Route53 CNAME here — inbound seams
             default_host_name: Some("app-globex.azurewebsites.net".to_owned()),
         }),
     };
@@ -941,18 +881,14 @@ pub fn cloudflare() -> Provider {
     };
 
     let records = vec![
-        // CNAME to Azure App Service — Cloudflare -> Azure seam
         dns_record(
             "rec-app",
             "app.globex.io",
             "CNAME",
             "app-globex.azurewebsites.net",
         ),
-        // CNAME to GCP Cloud Run — Cloudflare -> GCP seam
         dns_record("rec-data", "data.globex.io", "CNAME", "run.globex.app"),
-        // A record to the Azure public IP — Cloudflare -> Azure seam
         dns_record("rec-db", "db.globex.io", "A", "198.51.100.10"),
-        // AAAA record
         dns_record("rec-v6", "v6.globex.io", "AAAA", "2001:db8::10"),
     ];
 

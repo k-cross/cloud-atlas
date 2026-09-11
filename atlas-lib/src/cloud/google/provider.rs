@@ -39,8 +39,6 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
     let client = match authenticate().await {
         Ok(client) => client,
         Err(e) => {
-            // The OAuth2 flow itself failed, so nothing downstream can be read
-            // and no timer will fix it.
             report.record(SOURCE, FailureKind::Unauthorized, "auth", e);
             return ProviderScan {
                 provider: Provider::GCP(services),

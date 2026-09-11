@@ -26,7 +26,6 @@ pub async fn list_functions(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<CloudFunction>, Box<dyn std::error::Error>> {
-    // Cloud Functions v2 uses locations/- for all locations
     let url = client.endpoint(
         "https://cloudfunctions.googleapis.com",
         &format!("/v2/projects/{}/locations/-/functions", project),

@@ -21,7 +21,6 @@ pub async fn list_clusters(
     client: &GoogleApiClient,
     project: &str,
 ) -> Result<Vec<Cluster>, Box<dyn std::error::Error>> {
-    // GKE uses location='-' to mean all locations
     let url = client.endpoint(
         "https://container.googleapis.com",
         &format!("/v1/projects/{}/locations/-/clusters", project),

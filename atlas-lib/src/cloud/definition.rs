@@ -18,24 +18,14 @@ pub enum CloudError {
 #[derive(Debug)]
 pub enum Provider {
     AWS(Vec<(String, AmazonCollection)>),
-    /// Paired with the project each collection was read from. The scope has to
-    /// survive collection: without it the projector can only recover the
-    /// project by string-splitting a resource's `self_link`, which silently
-    /// yields no `GcpProject` node whenever that field is absent.
     GCP(Vec<(String, GoogleCollection)>),
     Azure(Vec<MicrosoftCollection>),
     Cloudflare(Box<CloudflareCollection>),
 }
 
-/// Identity of a Cloudflare zone, as the key of [`CloudflareCollection::dns_records`].
-/// A `Zone` carries both an `id` and a `name` and only the former keys the map,
-/// so the newtype is what stops a projector looking up by the wrong one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ZoneId(pub String);
 
-/// Identity of a Worker script. Script names are unique per *account*, not
-/// globally, so the account travels with the name — two accounts owning an
-/// "api" worker must not collide in [`CloudflareCollection::worker_bindings`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ScriptId {
     pub account: String,
@@ -77,15 +67,9 @@ pub enum AmazonCollection {
     AmazonSns(Vec<aws_sdk_sns::types::Topic>),
     AmazonCloudFront(Vec<aws_sdk_cloudfront::types::DistributionSummary>),
     AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),
-    // L3 routing / egress plane: how a subnet actually reaches the internet.
     AmazonNetworking(AWSNetworking),
 }
 
-/// The payload of a multi-API collector. Each is a named struct rather than an
-/// inline struct variant so that the variant is a *path*, which is what lets
-/// `amazon/provider.rs`'s `collectors!` list apply it to the collector's return
-/// value at the registration site. A collector that returns the wrong payload
-/// then fails to compile instead of registering under the wrong name.
 #[derive(Debug)]
 pub struct AWSLoadBalancing {
     pub load_balancers: Vec<AWSLoadBalancer>,

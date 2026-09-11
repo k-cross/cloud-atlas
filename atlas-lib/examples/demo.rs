@@ -1,17 +1,3 @@
-//! Credential-free verification simulation.
-//!
-//! Projects the complete fake "Globex" multi-cloud environment
-//! (`atlas_lib::fixtures`) onto a graph, folds the Tier-2 traffic overlay on
-//! top, renders both to a `.dot` file and a render snapshot, and prints a
-//! coverage report of every node and edge kind plus every observed flow. Exits
-//! non-zero if any kind fails to appear, or if the overlay is empty, so this
-//! doubles as a smoke test:
-//!
-//! ```sh
-//! cargo run --example demo
-//! dot -Tsvg multi_cloud_demo.dot -o demo.svg   # visualize
-//! ```
-
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::export::{RenderObservation, render_snapshot_with};
 use atlas_lib::fixtures;
@@ -26,19 +12,14 @@ fn main() -> ExitCode {
     let builder = fixtures::build_graph();
     let observed = fixtures::observed();
 
-    // Render the graph like the engine does (Display-formatted).
     let filename = "multi_cloud_demo.dot";
     let dot = format!("{}", Dot::with_config(&builder.graph, &[]));
     fs::write(filename, dot).expect("Failed to write dot file");
 
-    // Also emit the render snapshot consumed by the atlas-render workspace,
-    // so the interactive renderer can be exercised without credentials. The
-    // overlay rides along as `observations`, keyed to the same nodes and edges.
     let snapshot = render_snapshot_with(&builder.graph, observed.observations());
     let json = serde_json::to_string(&snapshot).expect("Failed to serialize render snapshot");
     fs::write("multi_cloud_demo.json", json).expect("Failed to write json file");
 
-    // Tally every node and edge kind present in the graph.
     let mut node_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for node in builder.graph.node_weights() {
         *node_counts.entry(node.kind()).or_default() += 1;
@@ -115,8 +96,6 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // An empty overlay is the failure the snapshot cannot show: the topology
-    // still renders, and the demo would silently stop exercising Tier 2.
     if flows.is_empty() || resources.is_empty() {
         eprintln!("TRAFFIC OVERLAY EMPTY — fixtures::flows() produced no observations.");
         return ExitCode::FAILURE;

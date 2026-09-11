@@ -1,36 +1,3 @@
-//! The graph's single writer, driving both live tiers.
-//!
-//! **Tier 3** is the reconciliation scan: periodically re-derive the whole
-//! graph, diff it against the live one, and broadcast the change set. It is
-//! authoritative — the only thing that can conclude a resource is gone because
-//! nothing mentioned it.
-//!
-//! **Tier 1** is the event feed (`stream::Source`): normalized `ChangeEvent`s
-//! applied the moment they arrive, seconds after the change instead of up to a
-//! poll interval later. It only ever says what it was told, so it can add a
-//! resource, and delete the one an event named, but never garbage-collect.
-//!
-//! **Tier 2** is the flow feed (`stream::FlowSource`): observed traffic, folded
-//! into `AppState::flows` and laid over the graph as `Edge::TrafficFlow` plus
-//! per-key freshness. It is the only tier that can say a resource is *doing*
-//! something, and the only one that never decides anything exists. Its edges
-//! are re-folded onto every scan before the diff, so an observation that lapses
-//! is removed by the ordinary differ rather than by a special path — see
-//! `atlas::flow`.
-//!
-//! All three run on *this* task, chosen by `select!`, which is what keeps
-//! mutation serialized (the graph-actor intent of
-//! `docs/change_monitoring_design.md` §7) without any tier taking a lock
-//! another is waiting on.
-//!
-//! Tiers 1 and 3 do race, and the resolution is deliberate: a reconciliation scan
-//! installs the estate as it looked when the scan *started*, so a resource
-//! created by an event mid-scan is removed by that tick's diff and re-added by
-//! the next one. Clients are never inconsistent — the patch always describes
-//! the graph that was installed — only briefly behind. Fixing it properly means
-//! replaying post-scan events over the scan result, which needs per-node
-//! provenance the graph does not carry yet.
-
 use crate::demo;
 use crate::state::AppState;
 use crate::stream;
@@ -45,21 +12,12 @@ use petgraph::graph::Graph;
 use std::collections::HashSet;
 use std::time::Duration;
 
-/// Where each reconciliation tick's graph comes from. Everything the
-/// credential-free variant actually *does* lives in [`crate::demo`]; this enum
-/// only chooses between the two, so no demo cadence, sentinel or timing leaks
-/// into the reconciliation path or into the flags that configure a real run.
 pub enum Source {
-    /// Real collection from configured cloud providers.
     Live(Box<AtlasEngine>),
-    /// Credential-free fixtures, for local development and demos.
     Demo,
 }
 
 impl Source {
-    /// Produce the graph for tick `n`, together with what could not be read
-    /// while producing it. The demo source is always complete -- it never
-    /// leaves the process.
     async fn scan(&self, tick: u64) -> (GraphBuilder, CollectionReport) {
         match self {
             Source::Live(engine) => {
@@ -70,11 +28,6 @@ impl Source {
         }
     }
 
-    /// Traffic this source observes without a feed. Only the demo has any: it
-    /// re-observes the fixtures' flows every tick so a credential-free run
-    /// carries live-looking liveness, exactly as the real path does off
-    /// `stream::FlowSource`. A real source observes nothing here -- its traffic
-    /// arrives on the Tier-2 feed or not at all.
     fn observations(&self, tick: u64) -> Vec<FlowObservation> {
         match self {
             Source::Live(_) => Vec::new(),
@@ -82,20 +35,12 @@ impl Source {
         }
     }
 
-    /// Prime a fresh index with whatever this source already knows it has seen,
-    /// so the very first snapshot carries the same overlay a reconciled one
-    /// would. A real source knows nothing until its feed delivers, and seeds
-    /// nothing.
     pub fn seed_flows(&self, flows: &mut FlowIndex) {
         for observation in self.observations(0) {
             flows.observe(&observation);
         }
     }
 
-    /// How long an observation counts as current when the operator has not said.
-    /// A real feed's default is generous relative to flow logs' own delivery lag
-    /// (`FlowIndex::DEFAULT_TTL`); the demo answers for itself, since its
-    /// traffic is synthesised on the reconciliation tick rather than delivered.
     pub fn default_flow_ttl(&self, poll: Duration) -> Duration {
         match self {
             Source::Live(_) => FlowIndex::DEFAULT_TTL,
@@ -104,21 +49,6 @@ impl Source {
     }
 }
 
-/// Turn a scan into the patch to broadcast. A complete scan is authoritative
-/// and diffs straight through, removals included. For each source in `held`,
-/// that source's live resources are folded forward first, so the tick is
-/// additive-only *for that source* while every other provider keeps deleting
-/// normally -- `next` is left as the exact graph the caller should install.
-///
-/// `held` is what [`Retention`] decided, not simply what failed: a source that
-/// has been unreadable for too long is no longer held, so the graph converges
-/// instead of waiting forever on a collector that never recovers.
-///
-/// The flow overlay is folded on *after* carry-forward and before the diff, so
-/// the scanned graph is compared against the live one with the same decoration
-/// on both sides. That ordering is what makes Tier-2 expiry work through the
-/// ordinary differ: a flow the overlay no longer believes in is simply absent
-/// from `next`, and the diff removes its edge like any other.
 fn reconcile(
     live: &Graph<Node, Edge>,
     next: &mut GraphBuilder,
@@ -132,12 +62,6 @@ fn reconcile(
     diff(live, &next.graph)
 }
 
-/// Apply a batch of Tier-1 events to the live graph, folding what each one
-/// changed into a single patch.
-///
-/// One patch rather than one per event because a burst — a deploy, an
-/// autoscaling event — is one thing happening to the estate, and fanning it out
-/// as a hundred frames makes every connected client re-layout a hundred times.
 fn apply_events(
     live: &mut GraphBuilder,
     applier: &mut EventApplier,
@@ -147,8 +71,6 @@ fn apply_events(
     for event in events {
         let change = applier.apply(live, event);
         if change.is_empty() {
-            // Routine: a redelivery, or a create we already have. Worth seeing
-            // at debug level, not worth a broadcast.
             tracing::debug!(
                 event = %event.id,
                 op = %event.op,
@@ -169,8 +91,6 @@ fn apply_events(
     patch
 }
 
-/// Broadcast a patch and log it. Returns nothing to do for an empty patch,
-/// which is the common case on both tiers.
 fn publish(state: &AppState, patch: GraphPatch, tier: &'static str) {
     if patch.is_empty() {
         return;
@@ -185,13 +105,10 @@ fn publish(state: &AppState, patch: GraphPatch, tier: &'static str) {
         expired = patch.expired.len(),
         "graph changed",
     );
-    // Err only means no subscribers are connected — nothing to do.
+
     let _ = state.patches.send(patch);
 }
 
-/// Run forever: reconcile every `interval`, and apply events from `events` as
-/// they arrive. Only non-empty changes mutate the live graph or hit the
-/// broadcast channel.
 pub async fn run(
     state: AppState,
     source: Source,
@@ -213,19 +130,10 @@ pub async fn run(
         tracing::info!("tier-2 flow feed enabled");
     }
 
-    // `interval` fires immediately on its first tick; the graph was just
-    // collected at start-up, so skip that one and keep the original cadence of
-    // "sleep, then scan".
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
 
-    // Pinned outside the loop, and deliberately not recreated per iteration.
-    // A drain deletes the messages it processed before returning them, so a
-    // receive dropped in that window loses those events for good — SQS has
-    // already forgotten them. Holding one future across iterations means a
-    // reconciliation tick winning the `select!` merely stops polling the drain;
-    // it resumes untouched next time round.
     let mut drain = Box::pin(events.next(backoff.delay()));
     let mut flow_drain = Box::pin(flows.next(flow_backoff.delay()));
 
@@ -249,29 +157,14 @@ pub async fn run(
     }
 }
 
-/// Whether a feed is worth going straight back to, as opposed to backing off.
-///
-/// Deliberately *not* `is_complete()`, which is false for any failure at all
-/// including [`FailureKind::Malformed`] — and a malformed message means the
-/// feed was read perfectly well and one thing on it could not be understood.
-/// Backing off there punishes a healthy queue for its contents: a poison
-/// message, a partial `DeleteMessageBatch`, or — worst — a flow-log bucket
-/// configured for Parquet, where *every* object is malformed and the feed
-/// would sit pinned at the backoff ceiling while being entirely readable.
 fn healthy(report: &CollectionReport) -> bool {
     report.unreadable_sources().is_empty()
 }
 
-/// One Tier-3 pass: scan, decide what is held, diff, install, broadcast.
 async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Retention, tick: u64) {
     let (mut next, report) = source.scan(tick).await;
     let held = retention.hold(&report);
 
-    // One instant for the whole tick, and the only place the overlay ages.
-    // Expiry is deliberately driven from the reconciliation clock rather than
-    // from the flow feed: a feed that has gone silent must still let its
-    // observations lapse, or a dead flow pipeline would pin the last traffic it
-    // ever saw as permanently current.
     {
         let mut flows = state.flows.write().await;
         for observation in &source.observations(tick) {
@@ -281,9 +174,6 @@ async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Reten
     }
 
     if !report.is_complete() {
-        // `held` rather than "holding": a scan can be incomplete without
-        // anything being held, when every failure was a malformed record
-        // in a response we did read.
         tracing::warn!(
             tick,
             failures = report.failures.len(),
@@ -303,21 +193,14 @@ async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Reten
         }
     }
 
-    // Diff under the read lock — no full-graph clone, and the critical
-    // section is just the comparison. WebSocket readers share the lock.
     let mut patch = {
         let live = state.live.read().await;
         let flows = state.flows.read().await;
         reconcile(&live.graph, &mut next, &held, &flows)
     };
 
-    // Published even when the graph is unchanged: a provider going dark
-    // changes what the snapshot *means* without changing a single node.
     *state.report.write().await = report;
 
-    // Whether to install `next` is a question about topology alone. Freshness
-    // rides on the same patch but changes nothing in the graph, so a tick that
-    // only refreshed liveness must not churn the installed node indices.
     let topology_changed = !patch.is_empty();
     {
         let mut flows = state.flows.write().await;
@@ -331,13 +214,6 @@ async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Reten
     publish(state, patch, "reconcile");
 }
 
-/// One Tier-2 batch: record what was observed, add the traffic edges it implies,
-/// and publish the feed's own health.
-///
-/// The edges go in immediately rather than waiting for the next reconciliation,
-/// for the same reason Tier 1 does not wait: a flow that has already been
-/// observed is not news a minute later. The next scan folds the same overlay in
-/// and agrees.
 async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
     if !batch.report.is_complete() {
         tracing::warn!(
@@ -346,9 +222,7 @@ async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
             batch.report.summary()
         );
     }
-    // Third report, third question. A flow feed we cannot read leaves the
-    // topology entirely correct and only the liveness stale, so it must not
-    // suspend a removal any more than a dead event feed may.
+
     *state.flow_report.write().await = batch.report;
 
     if batch.observations.is_empty() {
@@ -364,12 +238,7 @@ async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
         let context = flows.context(&live, &batch.observations);
         let mut patch = merge_additions(&mut live, &context);
         patch.observations = flows.drain_observations();
-        // Drained together with the observations, never left for the next
-        // reconciliation. `evict` retires keys as a side effect of `observe`,
-        // and a lapse that outlives the patch it belongs to can be contradicted
-        // before it is sent: re-observe the evicted key in a later batch and
-        // the tick would announce an expiry for a flow that is live again,
-        // darkening it on every client until it next happens to be seen.
+
         patch.expired = flows.drain_lapsed();
         patch
     };
@@ -383,7 +252,6 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
 }
 
-/// One Tier-1 batch: apply, broadcast, and publish the feed's own health.
 async fn ingest(state: &AppState, applier: &mut EventApplier, batch: stream::Batch) {
     if !batch.report.is_complete() {
         tracing::warn!(
@@ -392,8 +260,7 @@ async fn ingest(state: &AppState, applier: &mut EventApplier, batch: stream::Bat
             batch.report.summary()
         );
     }
-    // Kept apart from the scan report on purpose: a feed we cannot read makes
-    // the graph slow, not wrong, and must not suspend Tier-3 removals.
+
     *state.stream_report.write().await = batch.report;
 
     if batch.events.is_empty() {
@@ -447,14 +314,10 @@ mod tests {
         HashSet::new()
     }
 
-    /// A reconciliation with no observed traffic to lay over it. The overlay's
-    /// own behaviour is covered in `atlas::flow`; these tests are about the
-    /// retention policy, which must be unaffected by it.
     fn no_flows() -> FlowIndex {
         FlowIndex::default()
     }
 
-    /// AWS held back -- it owns the kind these tests drop.
     fn holding_aws() -> HashSet<CollectionSource> {
         HashSet::from([CollectionSource::Aws])
     }
@@ -481,8 +344,6 @@ mod tests {
         report
     }
 
-    /// A row ARG returned that would not deserialize. The query itself
-    /// succeeded, so Azure was read.
     fn azure_drifted_row() -> CollectionReport {
         let mut report = CollectionReport::default();
         report.note(
@@ -494,10 +355,6 @@ mod tests {
         report
     }
 
-    /// The failure that is *not* a read failure. ARG answers for the entire
-    /// tenant in one response, so treating an unmappable row as an unreadable
-    /// source froze deletions across every Azure resource for the whole
-    /// retention budget — because one resource drifted from its model.
     #[test]
     fn a_malformed_row_does_not_suspend_removals() {
         let live = demo::graph(1).graph;
@@ -530,8 +387,6 @@ mod tests {
         );
     }
 
-    /// Waiting out a throttle is sensible; waiting out a rejected credential
-    /// just claims resources nobody can verify, since polling will not fix it.
     #[test]
     fn an_unauthorized_source_is_released_sooner_than_an_unavailable_one() {
         let budget = Retention::DEFAULT_BUDGET;
@@ -559,8 +414,6 @@ mod tests {
         );
     }
 
-    /// Releasing early is only safe when the diagnosis is unambiguous. One
-    /// region forbidden while another is merely throttled may still recover.
     #[test]
     fn mixed_evidence_keeps_the_longer_budget() {
         let mut report = aws_refused();
@@ -580,8 +433,6 @@ mod tests {
         }
     }
 
-    /// `--retain-scans 0` means retain nothing. An auth failure is not an
-    /// exception that quietly lengthens it.
     #[test]
     fn a_zero_budget_holds_nothing_regardless_of_kind() {
         let mut retention = Retention::new(0);
@@ -625,9 +476,6 @@ mod tests {
         );
     }
 
-    /// Retention protects against a *transient* failure. A collector that fails
-    /// on every tick must not pin its resources in the graph forever, or
-    /// deletions never converge for that provider.
     #[test]
     fn a_source_that_never_recovers_stops_blocking_removals() {
         let live = demo::graph(1).graph;
@@ -724,8 +572,7 @@ mod tests {
         let mut retention = Retention::new(Retention::DEFAULT_BUDGET);
 
         reconcile_tick(&state, &Source::Demo, &mut retention, 1).await;
-        // Whichever endpoint the burst tick adds over a steady one -- the
-        // address itself is the demo module's business, not this test's.
+
         let steady: HashSet<Node> = demo::observations(2).into_iter().map(|o| o.src).collect();
         let burst = demo::observations(1)
             .into_iter()
@@ -745,8 +592,6 @@ mod tests {
         );
     }
 
-    /// The point of Tier 1: a change reaches the graph without waiting for a
-    /// scan, and the patch says exactly what it did.
     #[test]
     fn an_event_batch_changes_the_graph_and_reports_what_it_changed() {
         let mut live = demo::graph(2);
@@ -763,9 +608,6 @@ mod tests {
         assert!(live.contains(&new_instance));
     }
 
-    /// A whole burst is one patch, not one per event: a deploy that touches
-    /// fifty resources must not make every connected client re-layout fifty
-    /// times.
     #[test]
     fn a_burst_of_events_produces_a_single_patch() {
         let mut live = demo::graph(2);
@@ -779,9 +621,6 @@ mod tests {
         assert_eq!(patch.added_nodes.len(), 5);
     }
 
-    /// Tier 1 is not authoritative about absence. An event says what it was
-    /// told and nothing more, so a batch must never remove a resource no event
-    /// mentioned — that is Tier 3's job alone.
     #[test]
     fn events_never_garbage_collect() {
         let mut live = demo::graph(2);
@@ -798,8 +637,6 @@ mod tests {
         assert_eq!(live.graph.node_count(), before + 1);
     }
 
-    /// A deletion event takes the resource out immediately, along with the
-    /// edges that died with it — the latency win that justifies the tier.
     #[test]
     fn a_deletion_event_removes_a_resource_the_scan_still_believes_in() {
         let mut live = demo::graph(2);
@@ -816,12 +653,6 @@ mod tests {
         assert!(!live.contains(&doomed));
     }
 
-    // ------------------------------------------------------------------
-    // Tier 2
-    // ------------------------------------------------------------------
-
-    /// Traffic to somewhere the fixtures never mention, so the overlay's
-    /// contribution is unambiguous.
     fn observed(src: &str, dst: &str, at: i64) -> FlowObservation {
         FlowObservation {
             source: CollectionSource::Aws,
@@ -840,8 +671,6 @@ mod tests {
         AppState::new(graph, CollectionReport::default(), FlowIndex::default())
     }
 
-    /// The latency win that justifies the tier: observed traffic reaches the
-    /// graph — and a connected client — without waiting for a reconciliation.
     #[tokio::test]
     async fn a_flow_batch_adds_traffic_without_waiting_for_a_scan() {
         let state = state_with(demo::graph(2));
@@ -869,8 +698,6 @@ mod tests {
         ));
     }
 
-    /// Tier 2 sees only what crossed the network, so it can never conclude
-    /// anything is gone. Removal stays Tier 3's alone.
     #[tokio::test]
     async fn a_flow_batch_never_removes_anything() {
         let state = state_with(demo::graph(2));
@@ -891,9 +718,6 @@ mod tests {
         assert!(state.live.read().await.graph.node_count() > before);
     }
 
-    /// A flow feed we cannot read makes liveness stale and nothing else. Rolling
-    /// it into the scan report would make an unreachable bucket suspend
-    /// deletions across all of AWS — the same mistake, one tier along.
     #[tokio::test]
     async fn a_broken_flow_feed_is_reported_without_touching_scan_health() {
         let state = state_with(demo::graph(2));
@@ -930,11 +754,6 @@ mod tests {
         );
     }
 
-    /// A message we could not parse means the queue was read perfectly well and
-    /// one thing on it was not understood. Backing off there punishes a healthy
-    /// feed for its contents — and a bucket configured for Parquet makes *every*
-    /// object malformed, which would pin a fully readable feed at the ceiling
-    /// for as long as the server runs.
     #[test]
     fn a_malformed_message_does_not_back_the_feed_off() {
         let mut malformed = CollectionReport::default();
@@ -958,11 +777,6 @@ mod tests {
         assert!(!healthy(&unreachable), "this is what backoff is for");
     }
 
-    /// `evict` retires keys as a side effect of `observe`, so a lapse that
-    /// outlived its patch could be contradicted before it was ever sent:
-    /// re-observe the evicted key in a later batch and the next tick would
-    /// announce an expiry for a flow that is live again, darkening it on every
-    /// client until it happened to be seen once more.
     #[tokio::test]
     async fn a_batch_that_evicts_announces_the_lapse_in_its_own_patch() {
         let state = AppState::new(
@@ -991,10 +805,6 @@ mod tests {
         );
     }
 
-    /// The scan graph is rebuilt from scratch every tick and knows nothing about
-    /// traffic, so without the overlay being folded back on, every
-    /// reconciliation would delete every flow edge and the next batch would put
-    /// them back — flapping forever.
     #[test]
     fn a_reconciliation_does_not_wipe_traffic_the_scan_cannot_see() {
         let mut flows = FlowIndex::default();
@@ -1009,8 +819,6 @@ mod tests {
         assert!(patch.is_empty(), "a settled tick must change nothing");
     }
 
-    /// And the other half: expiry works *through* the differ. Nothing in Tier 2
-    /// removes anything itself; the overlay simply stops claiming the flow.
     #[test]
     fn an_observation_that_lapses_is_removed_by_the_next_reconciliation() {
         let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
@@ -1032,10 +840,6 @@ mod tests {
         );
     }
 
-    /// Retention holds what an *unreadable provider* could not confirm. A
-    /// traffic edge was never confirmed by a provider in the first place, so
-    /// holding it would suspend the overlay's own expiry for as long as any
-    /// collector is unhealthy — liveness frozen by an unrelated outage.
     #[test]
     fn an_incomplete_scan_does_not_hold_traffic_edges() {
         let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
@@ -1057,11 +861,6 @@ mod tests {
         );
     }
 
-    /// The documented race, pinned so it stays a known trade and not a
-    /// surprise: the next reconciliation installs the estate as the scan saw
-    /// it, which puts back a resource an event deleted mid-scan. The graph is
-    /// briefly behind, never inconsistent — the patch always describes the
-    /// graph that was installed.
     #[test]
     fn a_reconciliation_scan_overrules_an_event_it_could_not_have_seen() {
         let mut live = demo::graph(2);

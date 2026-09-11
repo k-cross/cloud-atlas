@@ -1,7 +1,3 @@
-//! HTTP surface: the one-shot snapshot (also handy for `curl`/static viewers)
-//! and the WebSocket upgrade. CORS is permissive so the bun dev server on a
-//! different port can talk to us during development.
-
 use crate::state::AppState;
 use crate::ws;
 use atlas_lib::atlas::collection::CollectionReport;
@@ -27,10 +23,6 @@ async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
     Json(render_snapshot_with(&live.graph, flows.observations()))
 }
 
-/// How much of the last scan is actually trustworthy. The snapshot alone cannot
-/// say whether a provider is absent because it holds nothing or because it
-/// could not be reached, and that distinction matters most right after start-up,
-/// when an outage makes the very first collection the baseline.
 async fn collection(State(state): State<AppState>) -> impl IntoResponse {
     let report = state.report.read().await;
     let stream = state.stream_report.read().await;
@@ -50,10 +42,6 @@ fn collection_value(
     flows: &CollectionReport,
     observed_flows: usize,
 ) -> serde_json::Value {
-    // `complete` and `unreadable` are not the same question. A scan that read
-    // every provider but could not map one drifted row is incomplete — the
-    // client lost something — yet still authoritative about what exists, so
-    // nothing is held. Only `unreadable` suspends removals.
     let mut unreadable: Vec<String> = report
         .unreadable_sources()
         .iter()
@@ -65,19 +53,12 @@ fn collection_value(
         "complete": report.is_complete(),
         "unreadable": unreadable,
         "failures": report.failures,
-        // The Tier-1 feed's health, reported separately because it answers a
-        // different question. A degraded event stream means changes reach the
-        // graph at the poll interval instead of in seconds; it does *not* make
-        // the scan any less authoritative, and must never be read as a reason
-        // to suspend removals.
+
         "stream": {
             "healthy": stream.is_complete(),
             "failures": stream.failures,
         },
-        // The Tier-2 feed, separate again for the same reason. A flow feed we
-        // cannot read leaves the topology entirely correct and only the
-        // liveness stale — so `observed` going to zero while `healthy` is false
-        // means "we stopped looking", not "the network went quiet".
+
         "flows": {
             "healthy": flows.is_complete(),
             "failures": flows.failures,
@@ -123,9 +104,6 @@ mod tests {
         assert_eq!(value["stream"]["healthy"].as_bool(), Some(true));
     }
 
-    /// A dead event feed and an unreadable provider are different problems with
-    /// different consequences, and a client has to be able to tell them apart:
-    /// one costs latency, the other suspends deletions.
     #[test]
     fn a_degraded_event_feed_does_not_make_the_scan_incomplete() {
         let mut stream = CollectionReport::default();
@@ -147,9 +125,6 @@ mod tests {
         );
     }
 
-    /// A flow-log bucket we cannot reach leaves the graph entirely correct and
-    /// only the liveness stale, so it must not read as a scan problem — and a
-    /// client has to be able to tell it from a genuinely quiet network.
     #[test]
     fn a_degraded_flow_feed_is_reported_apart_from_both_others() {
         let mut flows = CollectionReport::default();

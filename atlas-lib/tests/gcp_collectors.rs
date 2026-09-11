@@ -1,16 +1,8 @@
-//! Coverage for the GCP collectors: each `list_*` runs its real path (URL
-//! build, auth, pagination loop, deserialization, item extraction) against a
-//! `wiremock` server via the `base_url` seam, and asserts the fields the
-//! projector reads are populated. See `api/google/compute.rs` for the fuller
-//! reference (pagination + error paths); these are the per-collector fan-out.
-
 use atlas_lib::api::google::client::GoogleApiClient;
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Serve `body` for a single GET `p`, returning a client pinned to the mock.
-/// The server must stay in scope for the request to succeed.
 async fn serve(p: &str, body: Value) -> (MockServer, GoogleApiClient) {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

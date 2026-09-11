@@ -1,16 +1,3 @@
-//! WebSocket hub. The connection is bidirectional: the server streams patches
-//! as they happen, and the client can pull specific data on demand (the full
-//! snapshot, or the neighborhood of one node) rather than only listening.
-//!
-//! Protocol (JSON text frames):
-//!   client -> server: {"type":"subscribe"}            resend snapshot, then stream patches
-//!                      {"type":"get_snapshot"}         full current snapshot
-//!                      {"type":"get_neighbors","key"}  subgraph around one node
-//!   server -> client: {"type":"snapshot", version, nodes, edges}
-//!                      {"type":"patch", ...GraphPatch}
-//!                      {"type":"neighbors", version, key, nodes, edges}
-//!                      {"type":"error", message}
-
 use crate::state::AppState;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::export::{
@@ -45,20 +32,13 @@ async fn connection(socket: WebSocket, state: AppState) {
     pump(sink, stream, state).await;
 }
 
-/// The connection loop, generic over its two halves so it can be driven
-/// in-process by the tests — the resync-on-lag and teardown paths are the ones
-/// worth pinning, and neither is reachable through a concrete [`WebSocket`].
 async fn pump<Si, St, E>(mut sink: Si, mut stream: St, state: AppState)
 where
     Si: SinkExt<Message> + Unpin,
     St: StreamExt<Item = Result<Message, E>> + Unpin,
 {
-    // Subscribe *before* the first snapshot so no patch is missed in the gap
-    // (delivery is at-least-once; the frontend applies patches tolerantly).
     let mut patches = state.patches.subscribe();
 
-    // Push an initial snapshot immediately so a client that just connects and
-    // listens still renders without having to ask.
     if send_snapshot(&mut sink, &state).await.is_err() {
         return;
     }
@@ -72,7 +52,7 @@ where
                     }
                 }
                 Some(Ok(Message::Close(_))) | None => break,
-                Some(Ok(_)) => {} // ignore ping/pong/binary
+                Some(Ok(_)) => {}
                 Some(Err(_)) => break,
             },
             patch = patches.recv() => match patch {
@@ -83,7 +63,7 @@ where
                         break;
                     }
                 }
-                // Fell behind the buffer — resync with a full snapshot.
+
                 Err(RecvError::Lagged(_)) => {
                     if send_snapshot(&mut sink, &state).await.is_err() {
                         break;
@@ -135,9 +115,6 @@ async fn send_value(sink: &mut (impl SinkExt<Message> + Unpin), value: &Value) -
         .map_err(|_| ())
 }
 
-/// The node with `key` plus its immediate neighbors and the edges between them,
-/// in the same node/edge shape as the snapshot so the frontend can reuse its
-/// render path.
 fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
     let center = graph.node_indices().find(|&i| node_key(&graph[i]) == key);
 
@@ -203,7 +180,6 @@ mod tests {
     use serde_json::Value;
     use std::convert::Infallible;
 
-    /// A two-node graph plus the state that serves it.
     fn state_with_a_pair() -> (AppState, String) {
         let mut builder = GraphBuilder::new();
         let a = builder.get_or_add_node(Node::GenericHostname("center.example".into()));
@@ -216,7 +192,6 @@ mod tests {
         )
     }
 
-    /// Drive one client message and return every frame it produced.
     async fn frames_for(state: &AppState, text: &str) -> Vec<Value> {
         let (tx, rx) = mpsc::unbounded::<Message>();
         let mut sink = tx;
@@ -283,8 +258,6 @@ mod tests {
         assert_eq!(frames[0]["nodes"].as_array().map(Vec::len), Some(2));
     }
 
-    /// A client that sends nonsense must be told so and stay connected —
-    /// dropping the socket would cost it the patch stream over a typo.
     #[tokio::test]
     async fn a_malformed_message_is_answered_with_an_error_frame() {
         let (state, _) = state_with_a_pair();
@@ -304,8 +277,6 @@ mod tests {
         }
     }
 
-    /// A client that connects and only listens still has to render, so the
-    /// snapshot is pushed without being asked for.
     #[tokio::test]
     async fn a_connection_pushes_a_snapshot_before_the_client_asks() {
         let (state, _) = state_with_a_pair();
@@ -347,7 +318,6 @@ mod tests {
         task.await.expect("clean teardown");
     }
 
-    /// A close frame ends the loop; so does the stream simply running out.
     #[tokio::test]
     async fn a_closing_client_ends_the_loop() {
         for closer in [Some(Message::Close(None)), None] {
@@ -367,14 +337,10 @@ mod tests {
         }
     }
 
-    /// Patches are dropped for a client that falls too far behind. Replaying
-    /// them is not an option, so the contract is a fresh snapshot instead —
-    /// without it that client renders a graph that silently missed changes.
     #[tokio::test]
     async fn a_client_that_falls_behind_is_resynced_with_a_snapshot() {
         let (state, _) = state_with_a_pair();
-        // One slot, so the loop blocks in `send` and stops draining the
-        // broadcast — which is exactly how a real slow client falls behind.
+
         let (out_tx, mut out_rx) = mpsc::channel::<Message>(0);
         let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
 
@@ -384,14 +350,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Overrun the buffer while the loop is stuck on the occupied slot and
-        // cannot drain it.
         for _ in 0..(crate::state::PATCH_CHANNEL_CAPACITY + 8) {
             assert!(state.patches.send(a_patch()).is_ok(), "a live subscriber");
         }
 
-        // Whether the loop had already taken one patch off the channel before
-        // it blocked is a scheduling detail; that it resyncs is not.
         let mut kinds = Vec::new();
         loop {
             let Some(Message::Text(text)) = out_rx.next().await else {
@@ -465,11 +427,6 @@ mod tests {
         assert_eq!(value["version"].as_u64(), Some(SNAPSHOT_VERSION as u64));
     }
 
-    /// The frontend renders both payloads through one path, so the neighbors
-    /// subgraph must carry exactly the snapshot's fields. Both build through
-    /// `RenderNode`/`RenderEdge` to make that true by construction; this fails
-    /// if anyone hand-rolls the shape again and a `SNAPSHOT_VERSION` bump then
-    /// reaches only one of them.
     #[test]
     fn a_neighbors_payload_has_the_same_shape_as_a_snapshot() {
         use atlas_lib::atlas::export::render_snapshot;

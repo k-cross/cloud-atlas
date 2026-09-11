@@ -1,14 +1,10 @@
 use crate::atlas::collection::CollectionSource;
 use std::fmt;
 
-/// A node in the property graph, representing a semantic cloud resource.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Node {
-    // Generic
     GenericIpAddress(std::sync::Arc<str>),
     GenericHostname(std::sync::Arc<str>),
-
-    // AWS
     AwsRegion(std::sync::Arc<str>),
     AwsTag {
         key: std::sync::Arc<str>,
@@ -19,15 +15,7 @@ pub enum Node {
     AwsEc2Subnet(std::sync::Arc<str>),
     AwsEc2AvailabilityZone(std::sync::Arc<str>),
     AwsEc2SecurityGroup(std::sync::Arc<str>),
-    /// Keyed by the ENI's own `eni-` id, which is what every source that
-    /// mentions an interface actually carries — flow logs' `interface-id`,
-    /// Config items, the `networkInterfaces` list on a described instance. The
-    /// instance it belongs to is the `Edge::HasIp` pointing at it, not part of
-    /// its identity: an ENI can be detached and reattached elsewhere, and most
-    /// ENIs (NAT gateways, load balancer nodes, RDS, in-VPC Lambda) belong to
-    /// no instance at all.
     AwsEc2Eni(std::sync::Arc<str>),
-    // L3 routing / egress plane
     AwsEc2RouteTable(std::sync::Arc<str>),
     AwsEc2InternetGateway(std::sync::Arc<str>),
     AwsEc2NatGateway(std::sync::Arc<str>),
@@ -49,9 +37,7 @@ pub enum Node {
     AwsConfigResource {
         resource_type: std::sync::Arc<str>,
         id: std::sync::Arc<str>,
-    }, // Catch-all for AWS config
-
-    // GCP
+    },
     GcpProject(std::sync::Arc<str>),
     GcpComputeInstance(std::sync::Arc<str>),
     GcpComputeNetwork(std::sync::Arc<str>),
@@ -67,8 +53,6 @@ pub enum Node {
     GcpPubSubTopic(std::sync::Arc<str>),
     GcpPubSubSubscription(std::sync::Arc<str>),
     GcpCloudRunService(std::sync::Arc<str>),
-
-    // Azure
     AzureVirtualMachine(std::sync::Arc<str>),
     AzureVirtualNetwork(std::sync::Arc<str>),
     AzureSubnet(std::sync::Arc<str>),
@@ -76,7 +60,7 @@ pub enum Node {
     AzureNetworkSecurityGroup(std::sync::Arc<str>),
     AzurePublicIpAddress(std::sync::Arc<str>),
     AzureStorageAccount(std::sync::Arc<str>),
-    AzureManagedCluster(std::sync::Arc<str>), // AKS
+    AzureManagedCluster(std::sync::Arc<str>),
     AzureSqlServer(std::sync::Arc<str>),
     AzureAppService(std::sync::Arc<str>),
     AzureFunctionApp(std::sync::Arc<str>),
@@ -87,8 +71,6 @@ pub enum Node {
     AzureDnsZone(std::sync::Arc<str>),
     AzureCdnProfile(std::sync::Arc<str>),
     AzureServiceTag(std::sync::Arc<str>),
-
-    // Cloudflare
     CloudflareZone(std::sync::Arc<str>),
     CloudflareDnsRecord(std::sync::Arc<str>),
     CloudflareWorker(std::sync::Arc<str>),
@@ -101,13 +83,9 @@ pub enum Node {
 
 impl fmt::Display for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Output in the format: Type(ID)
         match self {
-            // Generic
             Node::GenericIpAddress(id) => write!(f, "Generic::IpAddress({})", id),
             Node::GenericHostname(id) => write!(f, "Generic::Hostname({})", id),
-
-            // AWS
             Node::AwsRegion(id) => write!(f, "AWS::Region({})", id),
             Node::AwsTag { key, value } => write!(f, "AWS::Tag({}={})", key, value),
             Node::AwsEc2Instance(id) => write!(f, "AWS::Ec2Instance({})", id),
@@ -137,8 +115,6 @@ impl fmt::Display for Node {
                 write!(f, "AWS::CloudFront::Distribution({})", id)
             }
             Node::AwsConfigResource { resource_type, id } => write!(f, "{}({})", resource_type, id),
-
-            // GCP
             Node::GcpProject(id) => write!(f, "GCP::Project({})", id),
             Node::GcpComputeInstance(id) => write!(f, "GCP::Compute::Instance({})", id),
             Node::GcpComputeNetwork(id) => write!(f, "GCP::Compute::Network({})", id),
@@ -154,8 +130,6 @@ impl fmt::Display for Node {
             Node::GcpPubSubTopic(id) => write!(f, "GCP::PubSub::Topic({})", id),
             Node::GcpPubSubSubscription(id) => write!(f, "GCP::PubSub::Subscription({})", id),
             Node::GcpCloudRunService(id) => write!(f, "GCP::CloudRun::Service({})", id),
-
-            // Azure
             Node::AzureVirtualMachine(id) => write!(f, "Azure::Compute::VirtualMachine({})", id),
             Node::AzureVirtualNetwork(id) => write!(f, "Azure::Network::VirtualNetwork({})", id),
             Node::AzureSubnet(id) => write!(f, "Azure::Network::Subnet({})", id),
@@ -180,8 +154,6 @@ impl fmt::Display for Node {
             Node::AzureDnsZone(id) => write!(f, "Azure::Network::DnsZone({})", id),
             Node::AzureCdnProfile(id) => write!(f, "Azure::Network::CdnProfile({})", id),
             Node::AzureServiceTag(id) => write!(f, "Azure::Network::ServiceTag({})", id),
-
-            // Cloudflare
             Node::CloudflareZone(id) => write!(f, "Cloudflare::Zone({})", id),
             Node::CloudflareDnsRecord(id) => write!(f, "Cloudflare::DnsRecord({})", id),
             Node::CloudflareWorker(id) => write!(f, "Cloudflare::Worker({})", id),
@@ -194,23 +166,15 @@ impl fmt::Display for Node {
     }
 }
 
-/// Edge types for the topology graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Edge {
-    Contains,   // Hierarchical containment (e.g. VPC -> Subnet)
-    ConnectsTo, // Routing/Traffic flow (e.g. Subnet -> ENI)
-    DependsOn,  // Logical dependency
-    AttachedTo, // Hardware/Logical attachment (e.g. ENI -> Subnet)
-    HasIp,      // Semantic IP relationship (e.g. Instance -> HasIp)
-    RoutesTo,   // Traffic routing
-    ResolvesTo, // DNS resolution
-    /// Traffic that was actually *observed* between two endpoints, from the
-    /// Tier-2 flow-log overlay (`atlas::flow`) rather than from any provider's
-    /// control plane. Deliberately carries no payload: `Edge` is the graph's
-    /// identity type, so a packet counter inside it would make every metric
-    /// update a different edge — parallel edges past `add_edge`'s dedup, and a
-    /// remove/add of the same `edge_key` out of every diff. The metrics live
-    /// beside the graph in `flow::FlowIndex`, keyed by that same stable key.
+    Contains,
+    ConnectsTo,
+    DependsOn,
+    AttachedTo,
+    HasIp,
+    RoutesTo,
+    ResolvesTo,
     TrafficFlow,
 }
 
@@ -220,10 +184,6 @@ impl fmt::Display for Edge {
     }
 }
 
-/// Generates `ALL_KINDS` and an exhaustive `kind()` from a single variant
-/// list. The `kind()` match is exhaustive, so adding an enum variant without
-/// listing it here is a compile error — and once listed, the fixture
-/// exhaustiveness tests require it to actually appear in the graph.
 macro_rules! kinds {
     ($ty:ident, $($variant:ident),* $(,)?) => {
         impl $ty {
@@ -238,13 +198,6 @@ macro_rules! kinds {
     };
 }
 
-/// `kinds!` plus `owner()`, from a variant list grouped by the collection
-/// source whose scan is authoritative for those resources. That grouping is
-/// what lets an incomplete scan carry forward only the failed provider's
-/// territory instead of freezing the whole graph. `None` marks the cross-cloud
-/// stitching nodes no single provider owns — they are never removed on an
-/// incomplete scan, since any provider may be the one that still references
-/// them.
 macro_rules! owned_kinds {
     ($ty:ident, $($owner:expr => [$($variant:ident),* $(,)?]),+ $(,)?) => {
         kinds!($ty, $($($variant),*),+);

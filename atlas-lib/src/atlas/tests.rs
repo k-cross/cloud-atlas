@@ -38,15 +38,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Exhaustiveness guards
-    //
-    // The fixture environment must exercise every projector path. If a new
-    // Node/Edge variant is added, `kind()`'s exhaustive match forces it into
-    // ALL_KINDS, and these tests then fail until the fixtures (and a
-    // projector) actually produce it.
-    // ------------------------------------------------------------------
-
     #[test]
     fn every_node_kind_appears_in_fixture_graph() {
         let builder = fixtures::build_graph();
@@ -82,10 +73,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Per-provider semantic projections
-    // ------------------------------------------------------------------
-
     #[test]
     fn amazon_projection() {
         let mut builder = GraphBuilder::new();
@@ -115,13 +102,9 @@ mod tests {
         let role = Node::AwsIamRole("arn:aws:iam::123:role/globex-lambda-role".into());
         let lambda = Node::AwsLambdaFunction("globex-events-handler".into());
 
-        // Core ENI pivot: Instance -> HasIp -> ENI -> AttachedTo -> Subnet
         assert_edge(&builder, &instance, &eni, &Edge::HasIp);
         assert_edge(&builder, &eni, &subnet, &Edge::AttachedTo);
 
-        // Multi-homing: the second interface is a node of its own, attached to
-        // a different subnet than the instance's primary one. Keying the ENI by
-        // its instance could represent neither.
         assert_edge(&builder, &instance, &second_eni, &Edge::HasIp);
         assert_edge(&builder, &second_eni, &private_subnet, &Edge::AttachedTo);
         assert_edge(&builder, &region, &vpc, &Edge::Contains);
@@ -130,15 +113,12 @@ mod tests {
         assert_edge(&builder, &instance, &tag, &Edge::DependsOn);
         assert_edge(&builder, &instance, &sg, &Edge::ConnectsTo);
 
-        // LB -> TG -> Instance
         assert_edge(&builder, &lb, &tg, &Edge::ConnectsTo);
         assert_edge(&builder, &tg, &instance, &Edge::ConnectsTo);
 
-        // Lambda -> IAM role and its security group
         assert_edge(&builder, &lambda, &role, &Edge::DependsOn);
         assert_edge(&builder, &lambda, &sg, &Edge::ConnectsTo);
 
-        // Security group cross-reference and egress -> generic IPs
         assert_edge(&builder, &sg_lb, &sg, &Edge::ConnectsTo);
         assert_edge(
             &builder,
@@ -153,7 +133,6 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        // Route53: A record -> generic IP, CNAME record -> generic hostname
         assert_edge(
             &builder,
             &Node::AwsRoute53RecordSet("origin.globex.io.".into()),
@@ -167,15 +146,12 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // Config resources: S3 is contained by the "global" region node
         let s3 = Node::AwsConfigResource {
             resource_type: "AWS::S3::Bucket".into(),
             id: "globex-assets".into(),
         };
         assert_edge(&builder, &global, &s3, &Edge::Contains);
 
-        // Routing / egress plane: public subnet -> route table -> IGW -> VPC,
-        // private subnet -> route table -> NAT -> EIP -> public IP.
         let public_rt = Node::AwsEc2RouteTable("rtb-public".into());
         let private_rt = Node::AwsEc2RouteTable("rtb-private".into());
         let igw = Node::AwsEc2InternetGateway("igw-globex".into());
@@ -197,7 +173,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // Remaining standalone services
         assert_has_node(&builder, &Node::AwsEksCluster("globex-k8s".into()));
         assert_has_node(&builder, &Node::AwsApiGatewayRestApi("api-globex".into()));
         assert_has_node(&builder, &Node::AwsRdsDbInstance("globex-orders-db".into()));
@@ -240,7 +215,6 @@ mod tests {
         assert_edge(&builder, &project, &instance, &Edge::DependsOn);
         assert_edge(&builder, &zone, &instance, &Edge::Contains);
 
-        // Firewall: contained by network, egress rule routes to generic IP
         let fw = Node::GcpComputeFirewall("fw-egress-globex".into());
         assert_edge(&builder, &network, &fw, &Edge::Contains);
         assert_edge(
@@ -250,7 +224,6 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        // SQL -> private IP (the Azure NSG seam target)
         assert_edge(
             &builder,
             &Node::GcpSqlInstance("globex-analytics-db".into()),
@@ -258,7 +231,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // Cloud Run reachable via its hostname pivot
         assert_edge(
             &builder,
             &Node::GenericHostname("run.globex.app".into()),
@@ -273,7 +245,6 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        // Network containment and forwarding rule IP
         assert_edge(
             &builder,
             &network,
@@ -287,7 +258,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // PubSub subscription -> topic
         assert_edge(
             &builder,
             &Node::GcpPubSubSubscription(
@@ -356,7 +326,6 @@ mod tests {
         assert_edge(&builder, &vnet, &subnet, &Edge::Contains);
         assert_edge(&builder, &subnet, &nsg, &Edge::ConnectsTo);
 
-        // NSG outbound rules: generic IP (the GCP SQL seam) + service tag
         assert_edge(
             &builder,
             &nsg,
@@ -370,7 +339,6 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        // Public IP -> generic IP (the Cloudflare A record seam)
         assert_edge(
             &builder,
             &Node::AzurePublicIpAddress(
@@ -382,7 +350,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // App Service reachable via its hostname pivot
         assert_edge(
             &builder,
             &Node::GenericHostname("app-globex.azurewebsites.net".into()),
@@ -390,7 +357,6 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        // Leaf resources
         for node in [
             Node::AzureStorageAccount(
                 azure_id("Microsoft.Storage/storageAccounts/globexstore")
@@ -447,7 +413,6 @@ mod tests {
         let zone = Node::CloudflareZone("zone-globex".into());
         let worker = Node::CloudflareWorker("edge-router".into());
 
-        // Zone contains records; records route to their hostnames
         assert_edge(
             &builder,
             &zone,
@@ -461,7 +426,6 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        // DNS resolution edges for all record types
         assert_edge(
             &builder,
             &Node::GenericHostname("app.globex.io".into()),
@@ -487,7 +451,6 @@ mod tests {
             &Edge::ResolvesTo,
         );
 
-        // Worker bindings: KV, R2, Durable Object, D1, and external service
         assert_edge(
             &builder,
             &worker,
@@ -520,23 +483,16 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Cross-cloud stitching
-    // ------------------------------------------------------------------
-
     #[test]
     fn multi_cloud_seams_merge() {
         let builder = fixtures::build_graph();
 
-        // Cloudflare CNAME chain resolves through to the Azure App Service:
-        // rec-app -> app.globex.io -> app-globex.azurewebsites.net -> AppService
         let cf_hostname = Node::GenericHostname("app.globex.io".into());
         let azure_hostname = Node::GenericHostname("app-globex.azurewebsites.net".into());
         let app = Node::AzureAppService(azure_id("Microsoft.Web/sites/app-globex").as_str().into());
         assert_edge(&builder, &cf_hostname, &azure_hostname, &Edge::ResolvesTo);
         assert_edge(&builder, &azure_hostname, &app, &Edge::RoutesTo);
 
-        // AWS Route53 CNAME lands on the SAME merged hostname node
         assert_edge(
             &builder,
             &Node::AwsRoute53RecordSet("app.globex.io.".into()),
@@ -544,7 +500,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // Azure NSG and GCP SQL meet at one merged IP node
         let shared_ip = Node::GenericIpAddress("10.20.0.5".into());
         assert_edge(
             &builder,
@@ -563,7 +518,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // Cloudflare A record and Azure public IP meet at one merged IP node
         let public_ip = Node::GenericIpAddress("198.51.100.10".into());
         assert_edge(
             &builder,
@@ -582,7 +536,6 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        // Cloudflare CNAME reaches the GCP Cloud Run hostname pivot
         assert_edge(
             &builder,
             &Node::GenericHostname("data.globex.io".into()),
@@ -590,10 +543,6 @@ mod tests {
             &Edge::ResolvesTo,
         );
     }
-
-    // ------------------------------------------------------------------
-    // Graph behavior
-    // ------------------------------------------------------------------
 
     #[test]
     fn identical_nodes_merge() {
@@ -613,7 +562,6 @@ mod tests {
         builder.add_edge(a, b, Edge::ResolvesTo);
         assert_eq!(builder.graph.edge_count(), 1);
 
-        // A different edge kind between the same nodes is NOT a duplicate
         builder.add_edge(a, b, Edge::RoutesTo);
         assert_eq!(builder.graph.edge_count(), 2);
     }
@@ -675,10 +623,6 @@ mod tests {
         );
     }
 
-    // ------------------------------------------------------------------
-    // Render snapshot export (contract with the atlas-render workspace)
-    // ------------------------------------------------------------------
-
     #[test]
     fn render_snapshot_covers_whole_fixture_graph() {
         let builder = fixtures::build_graph();
@@ -694,13 +638,10 @@ mod tests {
             assert!(ids.contains(&edge.source) && ids.contains(&edge.target));
         }
 
-        // Labels use Display and kinds use the enum variant name, so the
-        // rendering layer can style by resource type.
         let json = crate::atlas::export::snapshot_json(&builder.graph).unwrap();
         assert!(json.contains("\"kind\":\"AwsEc2Eni\""));
         assert!(json.contains("\"version\":3"));
 
-        // Every node carries a stable key (v2), unique across the graph.
         let keys: std::collections::HashSet<&str> =
             snapshot.nodes.iter().map(|n| n.key.as_str()).collect();
         assert_eq!(keys.len(), snapshot.nodes.len(), "node keys must be unique");
@@ -734,12 +675,8 @@ mod tests {
         use crate::atlas::definition::{Edge, Node};
         use crate::atlas::export::{edge_key, node_key};
 
-        // Start from the full fixture graph, then build a second graph that is
-        // the same minus one node (and its incident edges) plus one brand-new
-        // node + edge. The diff must name exactly those changes.
         let old = fixtures::build_graph();
 
-        // Pick a stable, always-present node to remove: the AWS ENI pivot.
         let removed = old
             .graph
             .node_weights()
@@ -748,8 +685,6 @@ mod tests {
             .clone();
         let removed_key = node_key(&removed);
 
-        // Reproject a fresh graph, dropping the chosen node, and splice in a new
-        // isolated node + edge that the original does not contain.
         let mut new = GraphBuilder::new();
         for node in old.graph.node_weights() {
             if node != &removed {
@@ -783,7 +718,7 @@ mod tests {
         );
         let new_edge_key = edge_key(&src_key, &dst_key, &Edge::ResolvesTo);
         assert!(patch.added_edges.iter().any(|e| e.key == new_edge_key));
-        // Removing the ENI must drop at least one incident edge.
+
         assert!(!patch.removed_edges.is_empty());
     }
 
@@ -879,17 +814,12 @@ mod tests {
         );
     }
 
-    /// The failure this guards: one unreadable source used to freeze removals
-    /// for the entire graph, so a collector that failed on every tick meant
-    /// deletions anywhere never converged.
     #[test]
     fn carry_forward_holds_only_the_unreadable_sources_territory() {
         use crate::atlas::patch::{carry_forward, diff};
 
         let live = fixtures::build_graph().graph;
 
-        // A scan where both AWS and Cloudflare came back empty, but only AWS
-        // reported a failure — Cloudflare really is gone.
         let mut trimmed = live.clone();
         trimmed.retain_nodes(|g, i| {
             !matches!(
@@ -965,11 +895,6 @@ mod tests {
             )));
     }
 
-    /// The flow overlay creates a pivot node per unrecognised remote address,
-    /// and those are bounded by the overlay's capacity rather than the graph's.
-    /// Carrying an edgeless one forward on every tick would let a single long
-    /// outage accumulate an unbounded orphan population in the live graph and
-    /// in every client's snapshot.
     #[test]
     fn carry_forward_drops_pivots_nothing_points_at_any_more() {
         use crate::atlas::patch::carry_forward;
@@ -979,14 +904,12 @@ mod tests {
         let traffic_only = Node::GenericIpAddress("203.0.113.8".into());
 
         let mut live = GraphBuilder::new();
-        // A pivot a projector produced, still held up by the edge that made it.
+
         let instance = live.get_or_add_node(Node::AwsEc2Instance("i-1".into()));
         live.link_to(instance, anchored.clone(), Edge::ConnectsTo);
-        // A pivot the overlay left behind when its flow lapsed.
+
         live.get_or_add_node(orphan.clone());
-        // And one whose only support is observed traffic, which carry-forward
-        // does not hold either — the overlay re-folds it on the same tick if it
-        // is still live.
+
         live.link_to(instance, traffic_only.clone(), Edge::TrafficFlow);
 
         let mut next = GraphBuilder::new();

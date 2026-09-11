@@ -4,8 +4,6 @@ use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::MicrosoftCollection;
 use rayon::prelude::*;
 
-/// Project resources that only contribute a standalone node keyed by one
-/// optional identifier field.
 macro_rules! project_leaf {
     ($builder:expr, $items:expr, $field:ident, $variant:path) => {
         for item in $items {
@@ -17,8 +15,6 @@ macro_rules! project_leaf {
 }
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
-    // Collections are independent, so project each into a thread-local
-    // sub-graph in parallel and merge serially in input order.
     let sub_graphs: Vec<GraphBuilder> = azure_data
         .par_iter()
         .map(|collection| {
@@ -198,6 +194,5 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
 }
 
 fn is_service_tag(tag: &str) -> bool {
-    // Service tags are typically alphabetic (e.g. "Internet", "AzureCloud.WestUS")
     !tag.contains('.') && !tag.contains(':') && tag != "*"
 }

@@ -42,8 +42,6 @@ mod tests {
     use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
 
-    // SQS uses the awsJson1.0 protocol (JSON, not the EC2 XML) — this proves the
-    // replay pattern works for JSON-protocol services too.
     #[tokio::test]
     async fn list_queues_maps_queue_urls() {
         let body = r#"{"QueueUrls":["https://sqs.us-east-1.amazonaws.com/111111111111/my-queue"]}"#;

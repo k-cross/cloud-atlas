@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Instance {
-    pub id: Option<String>, // the REST API returns ID as a string number e.g. "12345"
+    pub id: Option<String>,
     pub name: Option<String>,
     pub self_link: Option<String>,
     pub network_interfaces: Option<Vec<NetworkInterface>>,
@@ -42,7 +42,7 @@ pub struct FirewallListResponse {
 pub struct NetworkInterface {
     pub network: Option<String>,
     pub subnetwork: Option<String>,
-    pub network_i_p: Option<String>, // 'networkIP' in camelCase deserializes to network_i_p by default unless explicitly specified, let's use explicit
+    pub network_i_p: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,11 +100,6 @@ mod tests {
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // A trimmed but realistic GCP `compute.instances.aggregatedList` body. Note
-    // the id-as-string-number, the self_link the projector splits for
-    // project/zone, and a zone with no instances (a `warning` scope) — all
-    // shapes the collector must tolerate. Ideally captured from a real response
-    // and committed as a golden; inlined here to keep the example self-contained.
     const AGGREGATED_INSTANCES: &str = r#"{
       "kind": "compute#instanceAggregatedList",
       "items": {
@@ -126,10 +121,6 @@ mod tests {
       }
     }"#;
 
-    // Layer 1 — contract test: does the response shape still populate the exact
-    // fields the projector depends on? Everything is `Option`, so this asserts
-    // *values*, not merely that parsing didn't error (a mismatched struct would
-    // parse into all-`None` and silently pass a weaker check).
     #[test]
     fn aggregated_instances_populates_the_fields_the_projector_reads() {
         let resp: InstanceAggregatedListResponse =
@@ -151,7 +142,6 @@ mod tests {
             .expect("network present");
         assert!(network.ends_with("/networks/default"));
 
-        // The empty scope must not blow up: no instances there.
         assert!(
             items
                 .get("zones/us-central1-b")
@@ -161,9 +151,6 @@ mod tests {
         );
     }
 
-    // Layer 2 — HTTP replay: run the real collector path (URL building, auth,
-    // pagination loop, deserialization) against a mock server. Two pages prove
-    // the `nextPageToken` follow-through, and results are gathered across zones.
     #[tokio::test]
     async fn list_instances_follows_pagination_across_pages() {
         let server = MockServer::start().await;
@@ -203,7 +190,6 @@ mod tests {
         assert_eq!(ids, ["1", "2"], "both pages, across zones");
     }
 
-    // Error paths matter too: a non-2xx must surface as an error, not empty data.
     #[tokio::test]
     async fn list_instances_propagates_http_errors() {
         let server = MockServer::start().await;

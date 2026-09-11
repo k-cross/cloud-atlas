@@ -9,12 +9,6 @@ use crate::cloud::definition::{AmazonCollection, Provider};
 
 const SOURCE: CollectionSource = CollectionSource::Aws;
 
-/// One line per collector: the name failures are attributed under, the
-/// `AmazonCollection` variant its output belongs in, and the call that produces
-/// it. Applying the variant *here* rather than inside the collector is what
-/// makes the pairing type-checked — a collector whose return type does not fit
-/// the variant it is registered against fails to compile, so no collector can
-/// file its results under another one's name.
 macro_rules! collectors {
     ($($name:literal => $variant:path, $run:expr),+ $(,)?) => {
         vec![$(($name, Box::pin(async { $run.await.map($variant) }) as _)),+]
@@ -31,10 +25,6 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
         futures.push(async move {
             let config = super::load_config(r).await;
 
-            // Fail the region as a whole rather than sixteen times over: with
-            // no usable credentials every collector below would fail for the
-            // same reason, and boxed, so none of them could say it was a
-            // permissions problem.
             if let Err(e) = super::resolve_credentials(&config).await {
                 let mut report = CollectionReport::default();
                 report.record(

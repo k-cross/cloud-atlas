@@ -32,7 +32,7 @@ describe("nodeSize", () => {
 		expect(nodeSize(0)).toBe(2);
 		expect(nodeSize(1)).toBe(4);
 		expect(nodeSize(4)).toBe(6);
-		// Monotonic but sub-linear so hubs stand out without swamping the view.
+
 		expect(nodeSize(100)).toBeLessThan(nodeSize(0) + 100);
 		expect(nodeSize(9)).toBeGreaterThan(nodeSize(4));
 	});

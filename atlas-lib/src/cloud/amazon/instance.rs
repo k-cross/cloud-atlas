@@ -3,8 +3,6 @@ pub mod collector {
     use aws_sdk_ec2::{Client, Error};
 
     async fn match_instances(client: &Client) -> Result<Vec<Instance>, Error> {
-        // ["running", "pending", "shutting-down", "terminated", "stopped", "stopping"] are all the
-        // instance states, only grab active or soon to be active ones.
         let filter = Filter::builder()
             .set_name(Some("instance-state-name".to_owned()))
             .set_values(Some(vec!["running".to_owned(), "pending".to_owned()]))
@@ -34,11 +32,6 @@ mod tests {
     use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
     use aws_smithy_types::body::SdkBody;
 
-    // A minimal but well-formed EC2 DescribeInstances response (ec2Query
-    // protocol → XML). Because aws-sdk-ec2's own types aren't `serde`, the only
-    // way to test the response→struct mapping is through the real SDK — which
-    // `StaticReplayClient` lets us do offline. Fields chosen are exactly the
-    // ones the AWS projector reads.
     const DESCRIBE_INSTANCES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <DescribeInstancesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
   <requestId>req-1</requestId>
@@ -62,8 +55,6 @@ mod tests {
 
     #[tokio::test]
     async fn describe_instances_maps_the_fields_the_projector_reads() {
-        // Replay a canned response for any request the SDK makes (the request
-        // in the event is a placeholder; we don't assert on it).
         let http = StaticReplayClient::new(vec![ReplayEvent::new(
             http::Request::builder()
                 .uri("https://ec2.us-east-1.amazonaws.com/")

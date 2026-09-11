@@ -7,17 +7,11 @@ use serde::Deserialize;
 
 const SOURCE: CollectionSource = CollectionSource::Azure;
 
-/// Rows reported individually before the rest are summarised, so one broken
-/// resource type cannot flood the report (and `summary()`, which is logged
-/// every tick and served over `/collection.json`).
 const MAX_REPORTED_ROWS: usize = 5;
 
 pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
     let mut report = CollectionReport::default();
 
-    // Building the credential is kept separate from querying with it, so the
-    // two failures can be told apart: a missing `az login` will not resolve on
-    // a timer, while a refused ARG query might.
     let client = match AzureApiClient::new().await {
         Ok(client) => client,
         Err(e) => {
@@ -29,7 +23,6 @@ pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
         }
     };
 
-    // An empty subscription list makes ARG query the entire tenant.
     let subscriptions = opts.azure_subscriptions.as_deref().unwrap_or_default();
 
     let collections = match client.query_graph(&arg_query(), subscriptions).await {
@@ -50,11 +43,6 @@ pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
     }
 }
 
-/// Generates `AzureType` from one list of ARG type strings, in the spirit of
-/// `definition.rs`'s `kinds!`. That list is the only place a type is named: it
-/// produces both the `where type in~ (..)` filter and the value `map_resources`
-/// dispatches on, and since that dispatch is an exhaustive match, querying a
-/// type without mapping it is a compile error.
 macro_rules! azure_types {
     ($($variant:ident => $arg_type:literal),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,8 +59,6 @@ macro_rules! azure_types {
                 }
             }
 
-            /// ARG reports `type` in the casing the provider registered it
-            /// with, so rows are matched case-insensitively against the table.
             fn parse(raw: &str) -> Option<Self> {
                 Self::ALL
                     .iter()
@@ -114,15 +100,6 @@ fn arg_query() -> String {
     )
 }
 
-/// Map raw Azure Resource Graph rows into the typed collections the projector
-/// consumes. Split out from the fetch so it's testable with canned responses
-/// (no `az login`); see `tests/azure_collectors.rs`.
-///
-/// A row that will not deserialize is skipped and reported, never fatal. ARG
-/// returns the whole tenant in one response, so failing the batch on a single
-/// drifted row would throw away every other resource in it — an outage's worth
-/// of missing graph caused by one malformed record. The returned report is what
-/// keeps those skips from looking like deletions.
 pub fn map_resources(
     raw_resources: Vec<serde_json::Value>,
 ) -> (Vec<MicrosoftCollection>, CollectionReport) {
@@ -143,8 +120,6 @@ pub fn map_resources(
     let mut dns = Vec::new();
     let mut cdns = Vec::new();
 
-    /// The `{id, name, location}` mapping shared by every resource whose model
-    /// carries nothing else.
     macro_rules! leaf {
         ($list:ident, $ty:ident, $res:expr) => {{
             let res = $res;
@@ -159,7 +134,6 @@ pub fn map_resources(
     let mut unmapped: Vec<(String, String)> = Vec::new();
 
     for res_val in raw_resources {
-        // Deserialize by reference so the row survives for its id if it fails.
         let res: AzureResource = match AzureResource::deserialize(&res_val) {
             Ok(res) => res,
             Err(e) => {
@@ -172,8 +146,6 @@ pub fn map_resources(
             }
         };
 
-        // An unlisted type is a filter, not a failure: ARG may return kinds we
-        // deliberately do not model.
         let Some(azure_type) = AzureType::parse(res.r#type.as_deref().unwrap_or("")) else {
             continue;
         };
@@ -208,7 +180,6 @@ pub fn map_resources(
                             subnet_ids.push(sub_id.to_string());
                         }
 
-                        // Extract subnet object directly since ARG returns it inline in the VNet properties
                         let sub_nsg = sub
                             .get("properties")
                             .and_then(|p| p.get("networkSecurityGroup"))
@@ -304,10 +275,6 @@ pub fn map_resources(
         MicrosoftCollection::AzureCdnProfiles(cdns),
     ];
 
-    // `Malformed`, not a read failure: the query succeeded and every other row
-    // in it is authoritative. Reporting these as unreadable would suspend
-    // deletions across the entire tenant — ARG answers for all of Azure in one
-    // response — because one resource drifted from its model.
     let mut report = CollectionReport::default();
     let remaining = unmapped.len().saturating_sub(MAX_REPORTED_ROWS);
     for (id, error) in unmapped.into_iter().take(MAX_REPORTED_ROWS) {
@@ -330,8 +297,6 @@ pub fn map_resources(
     (collections, report)
 }
 
-/// Deserialize a typed `properties` block out of the raw ARG row, borrowing it
-/// rather than cloning the whole JSON subtree.
 fn properties_of<T: serde::de::DeserializeOwned>(props: &serde_json::Value) -> Option<T> {
     T::deserialize(props).ok()
 }
@@ -342,11 +307,6 @@ mod tests {
     use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector::azure::azure_projector;
 
-    /// The exhaustive match makes "queried but unmapped" a compile error; this
-    /// covers the rest of the trip — every queried type must reach the graph.
-    /// `summary()` is logged every tick and served over `/collection.json`, so
-    /// a resource type that drifted for the whole tenant must not turn the
-    /// report into thousands of lines.
     #[test]
     fn a_flood_of_bad_rows_is_capped_in_the_report() {
         let malformed: Vec<serde_json::Value> = (0..MAX_REPORTED_ROWS + 2)

@@ -1,7 +1,3 @@
-// Styling is keyed off the snapshot `kind` strings — the Rust enum variant
-// names from atlas-lib's `definition.rs` (`AwsEc2Instance`, `GcpGkeCluster`,
-// `Edge::RoutesTo`, ...). The prefix identifies the provider.
-
 export type Provider = "AWS" | "GCP" | "Azure" | "Cloudflare" | "External" | "Generic";
 
 export function providerOf(kind: string): Provider {
@@ -24,8 +20,6 @@ export const PROVIDER_COLORS: Record<Provider, string> = {
 
 export const DEFAULT_EDGE_COLOR = "#333b47";
 
-// Muted so structure reads at a glance without shouting over the nodes;
-// traffic/DNS edges (the cross-cloud seams) get the most saturation.
 export const EDGE_COLORS: Record<string, string> = {
 	Contains: "#333b47",
 	AttachedTo: "#333b47",
@@ -34,8 +28,7 @@ export const EDGE_COLORS: Record<string, string> = {
 	HasIp: "#38585e",
 	RoutesTo: "#2f6285",
 	ResolvesTo: "#6c4a78",
-	// Observed traffic, not inferred reachability — the brightest edge in the
-	// palette, because it is the only one that says something is happening now.
+
 	TrafficFlow: "#3f8f6f",
 };
 
@@ -65,8 +58,6 @@ export function flowSize(packets: number | undefined): number {
 	return 1 + Math.log10((packets ?? 0) + 1);
 }
 
-// Degree-scaled size: hubs (VPCs, subnets, zones) stand out, leaves stay
-// small enough that ten-thousand-node graphs don't turn into a solid disc.
 export function nodeSize(degree: number): number {
 	return 2 + 2 * Math.sqrt(degree);
 }

@@ -1,13 +1,3 @@
-//! Credential-free end-to-end check of the layout pipeline.
-//!
-//! Feed it any render snapshot; produce one without cloud credentials via
-//! the main workspace's demo (`cargo run --example demo` writes
-//! `multi_cloud_demo.json` from the Globex fixtures):
-//!
-//! ```sh
-//! cargo run --example layout_demo -- ../multi_cloud_demo.json
-//! ```
-
 use atlas_layout::{ForceAtlas2, LayoutGraph, LayoutSettings};
 use std::time::Instant;
 

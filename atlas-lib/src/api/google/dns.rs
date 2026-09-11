@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct ManagedZone {
     pub name: Option<String>,
     pub dns_name: Option<String>,
-    pub id: Option<String>, // Note: ID in DNS API is a string holding a uint64
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

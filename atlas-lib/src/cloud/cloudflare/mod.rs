@@ -10,10 +10,6 @@ pub mod zone;
 use serde::Deserialize;
 use std::future::Future;
 
-/// Hard bound on any pagination loop here. An endpoint that ignores the page
-/// parameter and keeps serving full pages would otherwise spin forever and hang
-/// the scan tick; hitting this is reported as a failure rather than quietly
-/// truncating the collection.
 const MAX_PAGES: u32 = 1_000;
 
 #[derive(Deserialize)]
@@ -24,14 +20,6 @@ struct ApiResponse<T> {
     result_info: Option<serde_json::Value>,
 }
 
-/// Walk a page-numbered `cloudflare`-crate list endpoint to exhaustion.
-///
-/// Termination is driven by the response's own `result_info`, not by "this page
-/// came back short". A short page is not proof of the end — Cloudflare may
-/// clamp `per_page` below what we asked for — and ending there silently
-/// truncates the collection, which the differ then reads as a mass deletion.
-/// The short-page rule survives only as the fallback for endpoints that report
-/// no `result_info` at all.
 pub async fn paginate<T, Fut>(
     per_page: u32,
     fetch: impl Fn(u32) -> Fut,
@@ -62,8 +50,6 @@ where
     }
 }
 
-/// Whether a page after `page` is expected, preferring what the API reports
-/// about the totals over the shape of the page we just received.
 fn more_pages(
     result_info: Option<&serde_json::Value>,
     page: u32,
@@ -85,9 +71,6 @@ fn more_pages(
     !short_page
 }
 
-/// Client for the raw Cloudflare REST endpoints not covered by the `cloudflare`
-/// crate. Holds an overridable `base_url` seam so collector tests can point
-/// every request at a mock server (see `worker.rs` tests).
 #[derive(Clone)]
 pub struct CloudflareApiClient {
     client: reqwest::Client,
@@ -104,8 +87,6 @@ impl CloudflareApiClient {
         }
     }
 
-    /// Dependency-injection constructor: pins requests to `base_url` (e.g. a
-    /// mock server). Used by the collector tests.
     pub fn with_base_url(token: String, base_url: String) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -114,7 +95,6 @@ impl CloudflareApiClient {
         }
     }
 
-    /// `path` starts with `/` (e.g. `/client/v4/accounts/{id}/workers/scripts`).
     fn url(&self, path: &str) -> String {
         let base = self
             .base_url
@@ -123,8 +103,6 @@ impl CloudflareApiClient {
         format!("{base}{path}")
     }
 
-    /// GET a raw endpoint and unwrap the standard `{ success, result }`
-    /// envelope.
     pub async fn get<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -133,8 +111,6 @@ impl CloudflareApiClient {
         Ok(self.get_paged(path, context).await?.0)
     }
 
-    /// `get`, keeping the `result_info` block alongside the payload — the
-    /// cursor-paginated endpoints need it to find their next page.
     pub async fn get_paged<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,

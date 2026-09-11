@@ -1,17 +1,8 @@
-//! Consolidated AWS collector coverage. Each test replays canned responses (in
-//! request order) through the *real* SDK via `replay_config`, then runs the
-//! collector and asserts the fields the projector reads. AWS types aren't
-//! `serde`, so this replay path is the only way to test their deserialization.
-//! The heavily-commented reference examples live in `instance.rs` /
-//! `security_group.rs` / `sqs.rs`.
-
 use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, TableName};
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
 
-/// Build an `SdkConfig` whose HTTP layer replays `(content_type, body)` pairs in
-/// order — one per request the collector makes.
 async fn replay_config(responses: &[(&'static str, &'static str)]) -> aws_config::SdkConfig {
     let events = responses
         .iter()
@@ -42,8 +33,6 @@ const JSON: &str = "application/json";
 const JSON10: &str = "application/x-amz-json-1.0";
 const JSON11: &str = "application/x-amz-json-1.1";
 
-// ---- JSON-protocol services -------------------------------------------------
-
 #[tokio::test]
 async fn lambda_functions() {
     let body = r#"{"Functions":[{"FunctionName":"fn1","FunctionArn":"arn:aws:lambda:us-east-1:111:function:fn1","Runtime":"python3.12"}]}"#;
@@ -54,7 +43,6 @@ async fn lambda_functions() {
 
 #[tokio::test]
 async fn eks_clusters() {
-    // list_clusters, then describe_cluster per name.
     let list = r#"{"clusters":["c1"]}"#;
     let describe = r#"{"cluster":{"name":"c1","arn":"arn:aws:eks:us-east-1:111:cluster/c1","status":"ACTIVE"}}"#;
     let cfg = replay_config(&[(JSON, list), (JSON, describe)]).await;
@@ -103,8 +91,6 @@ async fn eventbridge_buses() {
     assert_eq!(buses[0].name(), Some("default"));
 }
 
-// ---- XML-protocol services --------------------------------------------------
-
 #[tokio::test]
 async fn sns_topics() {
     let body = r#"<ListTopicsResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">
@@ -148,8 +134,6 @@ async fn rds_db_instances() {
 
 #[tokio::test]
 async fn cloudfront_distributions() {
-    // Empty list keeps the (many-required-fields) DistributionSummary out of the
-    // fixture; still exercises the payload deserialization + loop termination.
     let body = r#"<DistributionList xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
   <Marker></Marker>
   <MaxItems>100</MaxItems>
@@ -164,7 +148,6 @@ async fn cloudfront_distributions() {
 
 #[tokio::test]
 async fn route53_zones_and_records() {
-    // list_hosted_zones, then list_resource_record_sets per zone.
     let zones = r#"<ListHostedZonesResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
   <HostedZones>
     <HostedZone><Id>/hostedzone/Z123</Id><Name>example.com.</Name><CallerReference>ref</CallerReference></HostedZone>
@@ -195,7 +178,6 @@ async fn route53_zones_and_records() {
 
 #[tokio::test]
 async fn ec2_networking_plane() {
-    // Four EC2 calls in order: route tables, IGWs, NAT GWs, addresses.
     let route_tables = r#"<DescribeRouteTablesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
   <routeTableSet><item><routeTableId>rtb-1</routeTableId><vpcId>vpc-aaa</vpcId><routeSet/><associationSet/></item></routeTableSet>
 </DescribeRouteTablesResponse>"#;
@@ -223,8 +205,6 @@ async fn ec2_networking_plane() {
 
 #[tokio::test]
 async fn elbv2_load_balancers_and_target_groups() {
-    // describe_load_balancers, describe_listeners (per LB), describe_target_groups,
-    // describe_target_health (per TG).
     let lbs = r#"<DescribeLoadBalancersResponse xmlns="http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/">
   <DescribeLoadBalancersResult><LoadBalancers><member>
     <LoadBalancerArn>arn:aws:elasticloadbalancing:us-east-1:111:loadbalancer/app/my-lb/abc</LoadBalancerArn>

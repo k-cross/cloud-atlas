@@ -17,7 +17,7 @@ pub struct VirtualMachine {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
-    pub network_interfaces: Vec<String>, // IDs of associated NICs
+    pub network_interfaces: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -26,7 +26,7 @@ pub struct VirtualNetwork {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
-    pub subnets: Vec<String>, // IDs of subnets
+    pub subnets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

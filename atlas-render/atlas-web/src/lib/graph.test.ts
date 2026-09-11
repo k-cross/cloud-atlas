@@ -27,8 +27,6 @@ function edge(sourceKey: string, targetKey: string, kind: string): SnapshotEdge 
 	};
 }
 
-// A node observation, which is the shape most of these tests use: freshness
-// and verdict, no volume.
 function observation(key: string, lastSeen: number, status = "accepted"): SnapshotObservation {
 	return { key, last_seen: lastSeen, status };
 }
@@ -130,7 +128,7 @@ describe("applyPatch", () => {
 		);
 		applyPatch(graph, patch({ removed_nodes: ["a"] }));
 		expect(graph.hasNode("a")).toBe(false);
-		expect(graph.size).toBe(0); // incident edge went with it
+		expect(graph.size).toBe(0);
 		expect(graph.getNodeAttribute("hub", "size")).toBe(nodeSize(0));
 	});
 
@@ -141,7 +139,7 @@ describe("applyPatch", () => {
 			added_edges: [edge("a", "b", "Contains")],
 		});
 		applyPatch(graph, p);
-		applyPatch(graph, p); // replay must not throw or duplicate
+		applyPatch(graph, p);
 		expect(graph.order).toBe(2);
 		expect(graph.size).toBe(1);
 	});
@@ -153,8 +151,6 @@ describe("applyPatch", () => {
 	});
 
 	test("seeds new nodes at the current centroid, not the origin", () => {
-		// Warm-start relies on newcomers spawning inside the existing cloud so the
-		// layout grows them out locally instead of flinging them from (0,0).
 		const graph = buildGraph(
 			snapshot({ nodes: [node("a", "AwsEc2Vpc"), node("b", "AwsEc2Subnet")] }),
 		);
@@ -165,7 +161,7 @@ describe("applyPatch", () => {
 
 		applyPatch(graph, patch({ added_nodes: [node("c", "AwsEc2Subnet")] }));
 
-		expect(graph.getNodeAttribute("c", "x")).toBeCloseTo(150); // centroid of a,b
+		expect(graph.getNodeAttribute("c", "x")).toBeCloseTo(150);
 		expect(graph.getNodeAttribute("c", "y")).toBeCloseTo(50);
 	});
 });
@@ -200,8 +196,6 @@ describe("snapshotFromGraph", () => {
 	});
 });
 
-// The Tier-2 overlay: liveness keyed by the same stable node/edge keys, riding
-// its own list because freshness changes far more often than topology does.
 describe("observations", () => {
 	test("attach liveness to the node they name", () => {
 		const graph = buildGraph(
@@ -226,8 +220,6 @@ describe("observations", () => {
 		expect(graph.getEdgeAttribute(flow.key, "flowStatus")).toBe("mixed");
 	});
 
-	// The feed can observe a resource before any scan has found it. Inventing a
-	// node for one is the server's decision, not ours.
 	test("naming nothing in the graph is ignored, not an error", () => {
 		const graph = buildGraph(
 			snapshot({
@@ -250,8 +242,6 @@ describe("observations", () => {
 		expect(graph.getNodeAttribute("ip-a", "lastSeen")).toBe(2);
 	});
 
-	// Without this a client keeps the last freshness it heard forever, and a
-	// resource that has gone silent stays lit.
 	test("an expired key stops reporting as live", () => {
 		const graph = buildGraph(
 			snapshot({
@@ -264,15 +254,12 @@ describe("observations", () => {
 		expect(graph.hasNode("ip-a")).toBe(true);
 	});
 
-	// A server that predates the overlay sends neither list.
 	test("a patch with no liveness applies cleanly", () => {
 		const graph = buildGraph(snapshot({ nodes: [node("ip-a", "GenericIpAddress")] }));
 		applyPatch(graph, patch({ added_nodes: [node("ip-b", "GenericIpAddress")] }));
 		expect(graph.order).toBe(2);
 	});
 
-	// A rejected flow and an accepted one are the same `TrafficFlow` edge and
-	// mean opposite things, so the verdict has to outrank the kind's color.
 	test("a flow edge takes its verdict's color and a volume-scaled width", () => {
 		const flow = edge("ip-a", "ip-b", "TrafficFlow");
 		const graph = buildGraph(
@@ -300,8 +287,6 @@ describe("observations", () => {
 		expect(graph.getEdgeAttribute(flow.key, "size")).toBe(1);
 	});
 
-	// Volume belongs to the flow, because one record names several nodes and
-	// stamping its counters on each would report the same traffic repeatedly.
 	test("volume rides on flow edges, not on nodes", () => {
 		const flow = edge("ip-a", "ip-b", "TrafficFlow");
 		const graph = buildGraph(

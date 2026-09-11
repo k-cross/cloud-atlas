@@ -1,13 +1,3 @@
-//! `cargo xtask dev` — bring up the whole stack in order:
-//! wasm engine fresh → (demo snapshot) → atlas-server → readiness → frontend,
-//! then supervise both processes with prefixed output until one exits or the
-//! user hits Ctrl-C.
-//!
-//! Signals: the children are spawned into our process group, so a terminal
-//! Ctrl-C delivers SIGINT to all of them directly — no handler needed. The
-//! supervisor's job is the other direction: when one process dies on its own,
-//! take the rest down instead of leaving a half-running stack.
-
 use crate::tasks::{ensure_demo_snapshot, ensure_wasm, repo_root, run, strip_inherited_cargo_env};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -27,10 +17,6 @@ pub struct DevOpts {
     pub skip_wasm: bool,
 }
 
-/// How long to wait for the server's first snapshot. Real-mode startup blocks
-/// on a full provider collection, which can take minutes on a large estate;
-/// demo mode is instant. Server output streams the whole time, so the wait is
-/// never silent.
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn dev(mut opts: DevOpts) -> Result<(), String> {
@@ -43,9 +29,6 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
         ensure_demo_snapshot()?;
     }
 
-    // Build first so the long compile isn't hidden inside the spawn, then run
-    // the binary directly — killing a `cargo run` wrapper orphans the real
-    // server process.
     run(&root, "cargo", &["build", "-p", "atlas-server"])?;
     let server_bin = target_dir(&root).join("debug/atlas-server");
 
@@ -83,8 +66,6 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
         "server",
     )?;
 
-    // Gate the frontend on the server actually serving a snapshot, killing the
-    // server if it dies (or times out) during the wait.
     if let Err(e) = wait_ready(&mut server, opts.port) {
         let _ = server.kill();
         let _ = server.wait();
@@ -118,15 +99,12 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
     supervise(vec![("server", server), ("web", web)])
 }
 
-/// `target/` honoring CARGO_TARGET_DIR overrides.
 fn target_dir(root: &std::path::Path) -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"))
 }
 
-/// Spawn with stdout/stderr piped through threads that tag every line, so the
-/// interleaved logs of both processes stay attributable.
 fn spawn_prefixed(cmd: &mut Command, prefix: &'static str) -> Result<Child, String> {
     let mut child = strip_inherited_cargo_env(cmd)
         .stdout(Stdio::piped())
@@ -147,8 +125,6 @@ fn forward(pipe: Option<impl Read + Send + 'static>, prefix: &'static str) {
     });
 }
 
-/// Poll `GET /snapshot.json` until it returns 200, the server exits, or the
-/// timeout lapses.
 fn wait_ready(server: &mut Child, port: u16) -> Result<(), String> {
     let started = Instant::now();
     println!("waiting for atlas-server on :{port} …");
@@ -172,8 +148,6 @@ fn wait_ready(server: &mut Child, port: u16) -> Result<(), String> {
     }
 }
 
-/// Minimal HTTP/1.1 status probe over a raw TcpStream — not worth an HTTP
-/// client dependency for one status line.
 fn http_ok(port: u16, path: &str) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
@@ -191,9 +165,6 @@ fn http_ok(port: u16, path: &str) -> bool {
     }
 }
 
-/// Run until any child exits, then take the rest down and propagate the exit
-/// status. Ctrl-C isn't handled here — SIGINT reaches every child via the
-/// shared process group, and this loop then observes them exiting.
 fn supervise(mut children: Vec<(&'static str, Child)>) -> Result<(), String> {
     let (name, status) = 'outer: loop {
         for (name, child) in &mut children {

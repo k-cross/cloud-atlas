@@ -2,11 +2,6 @@ use cloudflare::endpoints::r2::r2::{Bucket, ListBucketsResult};
 
 const R2_BUCKETS_PER_PAGE: u32 = 100;
 
-/// The `cloudflare` crate's `ListBuckets` endpoint exposes no pagination
-/// inputs at all, so this goes through the raw REST seam instead: R2 pages by
-/// opaque cursor, and the next one arrives in `result_info.cursor`. An account
-/// with more buckets than one page used to return only the first page as `Ok`,
-/// which the differ reads as the rest having been deleted.
 pub async fn get_r2_buckets(
     client: &super::CloudflareApiClient,
     account_id: &str,

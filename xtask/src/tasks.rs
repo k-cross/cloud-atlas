@@ -1,16 +1,8 @@
-//! One-shot tasks and the shared command-running plumbing.
-//!
-//! Everything here shells out to the commands a developer would type by hand
-//! (`cargo test`, `bun test`, `bun run wasm`, …) — xtask orchestrates, it never
-//! reimplements.
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-/// Repo root, derived from this crate's location (`<root>/xtask`), so xtask
-/// works no matter which directory `cargo xtask` is invoked from.
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -39,7 +31,6 @@ pub fn strip_inherited_cargo_env(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Run `program args…` in `dir`, streaming output, failing loudly on non-zero.
 pub fn run(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
     println!("\n▶ {} {} (in {})", program, args.join(" "), dir.display());
     let status = strip_inherited_cargo_env(Command::new(program).args(args).current_dir(dir))
@@ -83,7 +74,6 @@ fn render_dir() -> PathBuf {
     repo_root().join("atlas-render")
 }
 
-/// Newest mtime of any file under `path` (recursively), or None if empty/absent.
 fn newest_mtime(path: &Path) -> Option<SystemTime> {
     if path.is_file() {
         return path.metadata().and_then(|m| m.modified()).ok();
@@ -97,10 +87,6 @@ fn newest_mtime(path: &Path) -> Option<SystemTime> {
     newest
 }
 
-/// Rebuild the wasm layout engine (`pkg/`) when its Rust sources are newer than
-/// the built artifact — the guard against the stale-wasm class of bug where a
-/// `SNAPSHOT_VERSION` bump in atlas-layout silently isn't reflected in the
-/// engine the browser loads.
 pub fn ensure_wasm(force: bool) -> Result<(), String> {
     let root = repo_root();
     let artifact = web_dir().join("static/pkg/atlas_layout_wasm_bg.wasm");
@@ -129,7 +115,6 @@ pub fn ensure_wasm(force: bool) -> Result<(), String> {
     }
 }
 
-/// Generate the credential-free Globex demo snapshot if it's missing.
 pub fn ensure_demo_snapshot() -> Result<(), String> {
     let root = repo_root();
     if root.join("multi_cloud_demo.json").exists() {
@@ -151,19 +136,15 @@ pub fn demo_snapshot() -> Result<(), String> {
     )
 }
 
-/// Every test suite, in dependency order, fail-fast. All credential-free.
 pub fn test(e2e: bool) -> Result<(), String> {
     let root = repo_root();
     cargo_test(&root, &["--workspace"])?;
     cargo_test(&render_dir(), &[])?;
-    // Biome (format + lint) for JS/TS/JSON/CSS, svelte-check for types/.svelte,
-    // then the frontend unit tests (pure graph/style logic).
+
     run(&web_dir(), "bun", &["run", "lint"])?;
     run(&web_dir(), "bun", &["run", "check"])?;
     run(&web_dir(), "bun", &["run", "test:unit"])?;
     if e2e {
-        // Playwright drives the real wasm + demo snapshot; make sure both exist
-        // and are fresh before spending browser time.
         ensure_wasm(false)?;
         ensure_demo_snapshot()?;
         run(&web_dir(), "bun", &["run", "test:e2e"])?;

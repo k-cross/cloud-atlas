@@ -4,8 +4,6 @@ use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::GoogleCollection;
 use rayon::prelude::*;
 
-/// Project resources that only contribute a standalone node keyed by one
-/// optional identifier field.
 macro_rules! project_leaf {
     ($builder:expr, $items:expr, $field:ident, $variant:path) => {
         for item in $items {
@@ -17,8 +15,6 @@ macro_rules! project_leaf {
 }
 
 pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[(String, GoogleCollection)]) {
-    // Collections are independent, so project each into a thread-local
-    // sub-graph in parallel and merge serially in input order.
     let sub_graphs: Vec<GraphBuilder> = gcp_data
         .par_iter()
         .map(|(project, collection)| {
@@ -39,8 +35,6 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
     match x {
         GoogleCollection::GoogleInstances(instances) => {
             for inst in instances {
-                // The zone is only ever available inside the self_link, e.g.
-                // https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance
                 let mut zone_idx = None;
                 if let Some(self_link) = &inst.self_link
                     && let Some(zone) = self_link

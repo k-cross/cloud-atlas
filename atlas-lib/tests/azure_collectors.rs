@@ -1,14 +1,7 @@
-//! Coverage for the Azure Resource Graph → typed-model mapping. Unlike the
-//! other clouds, Azure returns untyped rows and the provider builds each model
-//! by navigating `properties` by hand — so the contract worth testing is that
-//! navigation, exercised here with canned ARG rows via the pure `map_resources`
-//! (no `az login`). `api/azure/client.rs` covers the fetch/pagination side.
-
 use atlas_lib::cloud::azure::provider::map_resources;
 use atlas_lib::cloud::definition::MicrosoftCollection;
 use serde_json::{Value, json};
 
-/// Pull the `Vec` out of the one collection variant, panicking otherwise.
 macro_rules! variant {
     ($cols:expr, $v:ident) => {
         $cols
@@ -31,10 +24,6 @@ fn map(rows: Vec<Value>) -> Vec<MicrosoftCollection> {
     collections
 }
 
-/// ARG returns the whole tenant in one response, so a single drifted row must
-/// not take the batch down with it: that would empty the Azure half of the
-/// graph over one bad record. The skip is reported instead, which keeps the
-/// differ from reading it as a deletion.
 #[test]
 fn a_malformed_row_is_skipped_without_discarding_the_batch() {
     let good = |id: &str, name: &str| {
@@ -45,7 +34,7 @@ fn a_malformed_row_is_skipped_without_discarding_the_batch() {
             "location": "eastus"
         })
     };
-    // `name` must be a string; an integer fails AzureResource deserialization.
+
     let malformed = json!({
         "id": "/subscriptions/s/.../storageAccounts/broken",
         "name": 12345,
@@ -81,8 +70,6 @@ fn a_malformed_row_is_skipped_without_discarding_the_batch() {
     );
 }
 
-/// A type we do not model is a deliberate filter, not a failure -- reporting it
-/// would hold Azure's whole estate every single tick.
 #[test]
 fn an_unmodelled_resource_type_is_filtered_without_being_reported() {
     let (_cols, report) = map_resources(vec![json!({
@@ -97,7 +84,6 @@ fn an_unmodelled_resource_type_is_filtered_without_being_reported() {
 
 #[test]
 fn vm_extracts_nic_ids_from_network_profile() {
-    // Mixed-case `type` proves the provider's case-folding match.
     let cols = map(vec![json!({
         "id": "/subscriptions/s/.../virtualMachines/vm1",
         "name": "vm1",
@@ -136,7 +122,6 @@ fn vnet_extracts_inline_subnets_with_nsg() {
         vec!["/subscriptions/s/.../subnets/sn1".to_string()]
     );
 
-    // Subnets are hoisted out of the VNet properties into their own collection.
     let subnets = variant!(cols, AzureSubnets);
     assert_eq!(subnets[0].name.as_deref(), Some("sn1"));
     assert_eq!(

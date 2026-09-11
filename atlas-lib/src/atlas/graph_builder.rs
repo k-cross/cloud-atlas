@@ -23,21 +23,14 @@ impl GraphBuilder {
         }
     }
 
-    /// Whether this node is already in the graph, without inserting it.
     pub fn contains(&self, node: &Node) -> bool {
         self.node_map.contains_key(node)
     }
 
-    /// Where a node lives, if it is here. The index is only valid until the
-    /// next [`remove_node`](Self::remove_node).
     pub fn index_of(&self, node: &Node) -> Option<NodeIndex> {
         self.node_map.get(node).copied()
     }
 
-    /// Whether this exact edge already connects these two nodes. The
-    /// by-value counterpart of the dedup check inside
-    /// [`add_edge`](Self::add_edge), for callers holding `Node`s rather than
-    /// indices.
     pub fn has_edge(&self, source: &Node, target: &Node, edge: &Edge) -> bool {
         match (self.node_map.get(source), self.node_map.get(target)) {
             (Some(&a), Some(&b)) => self
@@ -58,9 +51,6 @@ impl GraphBuilder {
         }
     }
 
-    /// [`get_or_add_node`](Self::get_or_add_node) for a node you only have by
-    /// reference: it clones only when the node is genuinely new. This is the
-    /// shape `merge` folds with, where most nodes are already present.
     pub fn get_or_add_ref(&mut self, node: &Node) -> NodeIndex {
         match self.node_map.get(node) {
             Some(&idx) => idx,
@@ -68,8 +58,6 @@ impl GraphBuilder {
         }
     }
 
-    /// Add an edge unless an identical one already connects the two nodes,
-    /// keeping the exported .dot output free of duplicates.
     pub fn add_edge(&mut self, a: NodeIndex, b: NodeIndex, edge: Edge) {
         let exists = self
             .graph
@@ -80,19 +68,9 @@ impl GraphBuilder {
         }
     }
 
-    /// Take a node out of the graph, along with every edge touching it, and
-    /// report exactly what went — the caller needs that to describe the change
-    /// downstream, and re-deriving it after the fact is impossible.
-    ///
-    /// This is the only correct way to remove a node here: petgraph's
-    /// `remove_node` swap-removes, so the node that was last takes the removed
-    /// index and every other index above it stays put. Left alone, `node_map`
-    /// would then point that moved node at a stale index — the reason removal
-    /// belongs on the builder rather than at each call site.
     pub fn remove_node(&mut self, node: &Node) -> Option<Removal> {
         let idx = self.index_of(node)?;
 
-        // Self-loops would otherwise be collected twice, once per direction.
         let edges: Vec<(Node, Node, Edge)> = self
             .graph
             .edges_directed(idx, Direction::Outgoing)
@@ -111,14 +89,10 @@ impl GraphBuilder {
             .collect();
 
         let last = NodeIndex::new(self.graph.node_count() - 1);
-        // Drop the mapping only once the graph has actually let go, so a stale
-        // index — the very bug this method exists to prevent — cannot leave a
-        // node present in the graph but unreachable by identity, where the next
-        // `get_or_add_node` would silently duplicate it.
+
         let removed = self.graph.remove_node(idx)?;
         self.node_map.remove(node);
         if last != idx {
-            // The node that was at `last` now lives at `idx`.
             self.node_map.insert(self.graph[idx].clone(), idx);
         }
 
@@ -154,36 +128,20 @@ impl GraphBuilder {
         source
     }
 
-    /// Fold another graph's nodes and edges into this one, translating
-    /// endpoints by node identity so cross-graph dedup is preserved. This is
-    /// how sub-graphs produced in parallel are stitched back together, and how
-    /// `patch::carry_forward` folds the live graph into an incomplete scan;
-    /// merging in a fixed input order keeps the result deterministic.
     pub fn merge(&mut self, other: &Graph<Node, Edge>) {
         self.merge_where(other, |_| true);
     }
 
-    /// `merge`, restricted to the nodes `keep` accepts.
     pub fn merge_where(&mut self, other: &Graph<Node, Edge>, keep: impl Fn(&Node) -> bool) {
         self.merge_selected(other, keep, |_| true);
     }
 
-    /// `merge_where` with a say over edges too. An edge crosses over only when
-    /// `keep_edge` accepts it, at least one endpoint was kept on purpose, *and*
-    /// both endpoints are present here — a rejected node is never resurrected
-    /// as the endpoint of an edge, and no edge is left dangling.
-    ///
-    /// The edge predicate exists for the parts of the graph that are not
-    /// derived from a provider scan at all (`Edge::TrafficFlow`), and which a
-    /// scan-retention policy therefore has no business holding on to.
     pub fn merge_selected(
         &mut self,
         other: &Graph<Node, Edge>,
         keep: impl Fn(&Node) -> bool,
         keep_edge: impl Fn(&Edge) -> bool,
     ) {
-        // Carry over every node first — this covers standalone nodes that never
-        // appear as an edge endpoint.
         for node in other.node_weights() {
             if keep(node) {
                 self.get_or_add_ref(node);
@@ -208,9 +166,6 @@ impl GraphBuilder {
     }
 }
 
-/// What a [`GraphBuilder::remove_node`] took out: the node itself plus every
-/// edge that died with it, by value, so the caller can name them after the
-/// graph no longer holds them.
 pub struct Removal {
     pub node: Node,
     pub edges: Vec<(Node, Node, Edge)>,
@@ -243,9 +198,6 @@ mod tests {
         assert!(!builder.contains(&Node::AwsEc2Subnet("subnet-1".into())));
     }
 
-    /// petgraph swap-removes, so the last node lands on the removed index. If
-    /// the map is not repaired, the moved node's edges get attached to whatever
-    /// now occupies its old index.
     #[test]
     fn removal_repairs_the_index_of_the_node_that_moved() {
         let mut builder = GraphBuilder::new();

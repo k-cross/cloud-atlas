@@ -1,14 +1,3 @@
-//! Coverage for every Cloudflare collector, replayed against a `wiremock`
-//! server so each runs its real path + envelope unwrap without credentials.
-//! Two client seams are in play: the raw-REST collectors (d1, durable_objects,
-//! and r2 — whose crate endpoint offers no pagination inputs) use
-//! `CloudflareApiClient::with_base_url`, while the `cloudflare`-crate
-//! collectors (zone, dns, kv) use `Environment::Custom`. The crate's result
-//! structs are strict (mostly non-`Option`), so a drifted response body fails
-//! to deserialize rather than silently yielding empties -- assertions still
-//! pin the specific fields `provider.rs` and the projector read.
-//! `worker.rs` holds `get_workers` and `get_worker_bindings`.
-
 use atlas_lib::cloud::cloudflare::CloudflareApiClient;
 use atlas_lib::cloud::cloudflare::d1::get_d1_databases;
 use atlas_lib::cloud::cloudflare::dns::get_dns_records;
@@ -193,15 +182,10 @@ async fn zones_follows_pagination_past_the_first_page() {
     assert_eq!(zones[50].id, "zone-50");
 }
 
-// The failure this guards: terminating on "the page came back short" ends
-// collection early whenever the API serves fewer records than we asked for,
-// and the differ reads the missing tail as deletions. `result_info` is the
-// authority on whether more pages exist.
 #[tokio::test]
 async fn zones_do_not_stop_early_when_the_api_clamps_per_page() {
     let server = MockServer::start().await;
 
-    // Asked for 50, served 20 -- but there are two pages.
     let clamped: Vec<Value> = (0..20)
         .map(|i| zone_json(&format!("zone-{i}"), &format!("z{i}.globex.com"), "acct-1"))
         .collect();
@@ -326,8 +310,6 @@ async fn kv_namespaces() {
     assert_eq!(namespaces[1].supports_url_encoding, None);
 }
 
-// R2 goes through the raw seam, not the crate: `ListBuckets` has no pagination
-// inputs, and R2 pages by cursor rather than page number.
 #[tokio::test]
 async fn r2_buckets() {
     let (_s, c) = serve(

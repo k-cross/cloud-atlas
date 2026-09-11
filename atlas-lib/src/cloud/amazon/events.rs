@@ -1,40 +1,3 @@
-//! AWS Tier-1 ingestion: EventBridge → normalized [`ChangeEvent`].
-//!
-//! This is the first real event feed (Phase 3 of
-//! `docs/change_monitoring_design.md`). EventBridge is the single delivery
-//! path; three different producers put events on it, and this module reads all
-//! three because they trade completeness against latency in opposite
-//! directions:
-//!
-//! - **AWS Config configuration items** (`Config Configuration Item Change
-//!   Notification`) — the richest. Each item carries the resource's type, id,
-//!   region, its relationships to other resources and a snapshot of its
-//!   configuration, so a create can be projected with its VPC/subnet/security
-//!   groups attached rather than as a bare floating node. Costs money and lags
-//!   by a minute or two.
-//! - **EC2 instance state-change notifications** — free, on by default, and
-//!   near-instant, but carries an instance id and a state and nothing else.
-//! - **CloudTrail management events** (`AWS API Call via CloudTrail`) — the
-//!   broadest coverage and the messiest shape: every mutating API call, with
-//!   the resource id buried somewhere different in `requestParameters` or
-//!   `responseElements` for each one. Handled for a curated set of calls.
-//!
-//! **Transport.** The consumer is [`stream::EventQueue`], an SQS queue that an
-//! EventBridge rule targets. SQS rather than a direct push endpoint because the
-//! server is a long-running process that may be restarted or briefly
-//! unreachable: a queue buffers across that, and its at-least-once redelivery
-//! is exactly what [`EventApplier`](crate::atlas::event::EventApplier) is built
-//! to tolerate.
-//!
-//! **The rule that shapes everything here:** an adapter may only produce nodes
-//! and edges the full-scan projector would also produce. Tier 3 diffs the whole
-//! graph and is authoritative, so an edge invented here that no projector emits
-//! gets deleted at the next reconciliation and re-added by the next event,
-//! flapping forever. That is why EC2 instances are projected through the
-//! projector's own [`project_instance`], and why several resource types are
-//! deliberately *not* mapped below even though the events exist — see
-//! [`typed_node`].
-
 use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::event::{ChangeEvent, ChangeOp};
@@ -50,13 +13,6 @@ use std::fmt;
 
 const SOURCE: CollectionSource = CollectionSource::Aws;
 
-/// A message that could not be understood as an EventBridge event at all.
-///
-/// This is [`FailureKind::Malformed`] territory, not a read failure: we
-/// received the message, so the feed is working and nothing should be held.
-/// What we lost is one event, and losing it silently is the thing that must not
-/// happen — a dropped delete leaves a resource in the graph until the next
-/// reconciliation quietly cleans it up, with no record of why.
 #[derive(Debug)]
 pub struct MalformedEvent {
     pub reason: String,
@@ -76,9 +32,6 @@ fn malformed(reason: impl Into<String>) -> MalformedEvent {
     }
 }
 
-/// The EventBridge envelope every event shares. Only the fields that survive
-/// normalization are named; `detail` stays a `Value` because its shape is
-/// decided by `detail-type`.
 #[derive(Deserialize)]
 struct Envelope {
     id: Option<String>,
@@ -89,10 +42,6 @@ struct Envelope {
     detail: Option<Value>,
 }
 
-/// An SNS envelope wrapping an EventBridge event. A rule may target SNS with
-/// SQS subscribed behind it (the fan-out shape, and how AWS Config's own
-/// delivery channel is usually wired), in which case the event we want is a
-/// JSON string inside `Message`.
 #[derive(Deserialize)]
 struct SnsEnvelope {
     #[serde(rename = "Type")]
@@ -101,15 +50,6 @@ struct SnsEnvelope {
     message: Option<String>,
 }
 
-/// Translate one queue message into the changes it describes.
-///
-/// One message can be several changes: a `RunInstances` call launches a batch,
-/// and a Config item yields both the typed node and the Config catch-all node
-/// that the full scan also produces for it.
-///
-/// An empty `Ok` is the ordinary outcome for an event we understand but do not
-/// model — an unmapped resource type, a non-mutating API call. Only a body we
-/// cannot read as an event at all is an error.
 pub fn parse(body: &str, exclude_by_default: bool) -> Result<Vec<ChangeEvent>, MalformedEvent> {
     let body = unwrap_sns(body);
     let envelope: Envelope = serde_json::from_str(&body)
@@ -132,15 +72,10 @@ pub fn parse(body: &str, exclude_by_default: bool) -> Result<Vec<ChangeEvent>, M
         }
         "EC2 Instance State-change Notification" => from_instance_state(detail, region, id, time),
         "AWS API Call via CloudTrail" => from_cloud_trail(detail, region, id, time),
-        // A rule matched something broader than we model. Not a failure: the
-        // operator is free to point a coarse rule at the queue, and the events
-        // we do not understand simply wait for Tier 3.
         _ => Ok(Vec::new()),
     }
 }
 
-/// Peel an SNS notification, if that is what this is. A raw EventBridge event
-/// has no `Type`/`Message` pair, so this is a no-op for the direct path.
 fn unwrap_sns(body: &str) -> std::borrow::Cow<'_, str> {
     match serde_json::from_str::<SnsEnvelope>(body) {
         Ok(SnsEnvelope {
@@ -151,18 +86,12 @@ fn unwrap_sns(body: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Cloud-recorded time in epoch milliseconds. The ordering key for the whole
-/// tier, so a timestamp we cannot parse is better dropped than guessed —
-/// substituting arrival time would silently assert that delivery order is
-/// change order, which is the one thing this feed does not promise.
 fn epoch_millis(timestamp: &str) -> Option<i64> {
     DateTime::from_str(timestamp, Format::DateTime)
         .ok()?
         .to_millis()
         .ok()
 }
-
-// ---- AWS Config configuration items -----------------------------------------
 
 #[derive(Deserialize)]
 struct ConfigDetail {
@@ -201,9 +130,6 @@ struct Relationship {
 }
 
 impl ConfigurationItem {
-    /// The id of the first related resource of a given type. Config lists a
-    /// resource's relationships explicitly, which is what lets a create event
-    /// arrive already attached to its VPC instead of floating.
     fn related(&self, resource_type: &str) -> Option<&str> {
         self.relationships
             .as_deref()?
@@ -222,8 +148,6 @@ impl ConfigurationItem {
             .collect()
     }
 
-    /// Config delivers `configuration` as an object over EventBridge and as an
-    /// embedded JSON string over some other paths; accept both.
     fn configuration<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
         match self.configuration.as_ref()? {
             Value::String(raw) => serde_json::from_str(raw).ok(),
@@ -232,9 +156,6 @@ impl ConfigurationItem {
     }
 }
 
-/// The EC2 instance fields Config puts in `configuration`, in the camelCase the
-/// EC2 API uses on the wire (the SDK's `Instance` is the same data under
-/// different casing).
 #[derive(Deserialize, Default)]
 struct InstanceConfiguration {
     #[serde(rename = "vpcId")]
@@ -251,8 +172,6 @@ struct InstanceConfiguration {
     tags: Option<Vec<TagPair>>,
 }
 
-/// One interface as EC2 reports it on the wire, in the shape Config's
-/// `networkInterfaces` and CloudTrail's `networkInterfaceSet` share.
 #[derive(Deserialize)]
 struct NetworkInterfaceRef {
     #[serde(rename = "networkInterfaceId")]
@@ -279,9 +198,6 @@ struct TagPair {
     value: Option<String>,
 }
 
-/// The `publicIp` an Elastic IP configuration carries, so the EIP arrives
-/// stitched to the generic IP space the way the networking projector stitches
-/// it.
 #[derive(Deserialize, Default)]
 struct EipConfiguration {
     #[serde(rename = "publicIp")]
@@ -305,8 +221,6 @@ fn from_config_item(
         return Err(malformed("configuration item has no resourceType"));
     };
     let Some(op) = config_op(item.status.as_deref()) else {
-        // `ResourceNotRecorded` and friends: Config is telling us it is *not*
-        // tracking this resource. That says nothing about whether it exists.
         return Ok(Vec::new());
     };
 
@@ -325,7 +239,6 @@ fn from_config_item(
 
     let mut events = Vec::new();
 
-    // The typed node, when this is a resource type the graph models directly.
     if let Some(node) = typed_node(&item, resource_type) {
         let context = typed_context(&item, region, resource_type, &node);
         events.push(
@@ -333,10 +246,6 @@ fn from_config_item(
         );
     }
 
-    // The AWS Config catch-all node, which the full scan's `config` collector
-    // also produces for this resource type. Emitting both keeps a deletion
-    // complete: dropping only the typed node would leave the catch-all behind
-    // until the next reconciliation swept it.
     if use_aws_resource(resource_type, exclude_by_default)
         && let Some(resource_id) = item.resource_id.as_deref()
     {
@@ -367,29 +276,6 @@ fn config_op(status: Option<&str>) -> Option<ChangeOp> {
     }
 }
 
-/// The typed `Node` for a Config resource type, keyed **exactly** the way the
-/// full-scan projector keys it.
-///
-/// The omissions matter as much as the entries, because a mis-keyed node is
-/// worse than no node: it never matches what the scan produces, so it is
-/// deleted at every reconciliation and recreated by every event.
-///
-/// - `AWS::EC2::NetworkInterface` — the node is keyed by `eni-` id and would
-///   match, but the full scan only learns about interfaces through the
-///   `networkInterfaces` list on a described *instance*. Config also reports
-///   the ENIs of NAT gateways, load balancers, RDS and in-VPC Lambda, and a
-///   node for one of those is a node no scan produces — deleted at every
-///   reconciliation, recreated by every event. This arm opens up as soon as a
-///   `DescribeNetworkInterfaces` collector makes the scan authoritative for all
-///   of them.
-/// - `AWS::Route53::HostedZone` — the Route 53 API returns ids as
-///   `/hostedzone/Z123` and the projector stores them that way; Config reports
-///   the bare id.
-/// - `AWS::SQS::Queue` — the projector keys queues by URL, which Config does
-///   not report as the resource id.
-///
-/// All three still reach the graph through the Config catch-all node, which is
-/// keyed on the Config id by construction and so cannot drift.
 fn typed_node(item: &ConfigurationItem, resource_type: &str) -> Option<Node> {
     let id = item.resource_id.as_deref();
     let name = item.resource_name.as_deref().or(id);
@@ -418,9 +304,6 @@ fn typed_node(item: &ConfigurationItem, resource_type: &str) -> Option<Node> {
     Some(node)
 }
 
-/// The neighbourhood to create the typed node in, matching the containment the
-/// full-scan projector gives that resource type — region for most things, the
-/// VPC where the projector prefers it, and the ENI pivot for instances.
 fn typed_context(
     item: &ConfigurationItem,
     region: &str,
@@ -436,7 +319,6 @@ fn typed_context(
     match resource_type {
         "AWS::EC2::Instance" => instance_context(item, region),
 
-        // Region-contained, exactly as their collectors project them.
         "AWS::EC2::VPC"
         | "AWS::EC2::SecurityGroup"
         | "AWS::Lambda::Function"
@@ -451,9 +333,6 @@ fn typed_context(
             Edge::Contains,
         ),
 
-        // Inside their VPC where one is known, region otherwise — the same
-        // `match vpc_id { Some => vpc, None => region }` the ELB/EKS/RDS arms
-        // of the projector use.
         "AWS::EKS::Cluster"
         | "AWS::RDS::DBInstance"
         | "AWS::ElasticLoadBalancingV2::LoadBalancer" => linked(
@@ -462,19 +341,11 @@ fn typed_context(
             Edge::Contains,
         ),
 
-        // Inside their VPC or nowhere. These two look like the arms above and
-        // are not: the projector reaches a subnet through
-        // `link_to(vpc_idx, ..)` and a route table through
-        // `link_from(rt_idx, ..)`, and both emit *no* edge when the VPC is
-        // unknown. Falling back to the region here would invent
-        // `Region -Contains-> Subnet`, which every reconciliation deletes and
-        // every event re-adds.
         "AWS::EC2::Subnet" | "AWS::EC2::RouteTable" => match vpc() {
             Some(vpc) => linked(vpc, node.clone(), Edge::Contains),
             None => solo(node.clone()),
         },
 
-        // The egress plane attaches rather than contains.
         "AWS::EC2::InternetGateway" => match vpc() {
             Some(vpc) => linked(node.clone(), vpc, Edge::AttachedTo),
             None => solo(node.clone()),
@@ -503,16 +374,9 @@ fn typed_context(
     }
 }
 
-/// An instance's neighbourhood, built by the *projector's* own
-/// [`project_instance`] so the ENI pivot and every other edge is identical to
-/// what a full scan of the same instance produces.
 fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge> {
     let config: InstanceConfiguration = item.configuration().unwrap_or_default();
 
-    // Config states the same facts twice — in `configuration` and, for the
-    // relational ones, in `relationships`. Prefer the configuration and fall
-    // back, so an item delivered without a configuration snapshot still lands
-    // attached.
     let vpc_id = config
         .vpc_id
         .as_deref()
@@ -532,10 +396,6 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
         security_group_ids = item.related_all("AWS::EC2::SecurityGroup");
     }
 
-    // Same two-sources-for-one-fact shape as the fields above. The
-    // relationships list gives ids *without* subnets, so these ENIs land as
-    // nodes on the instance with no `AttachedTo` edge — the full scan reads
-    // each interface's own subnet, and guessing here would contradict it.
     let mut network_interfaces: Vec<EniFacts<'_>> = config
         .network_interfaces
         .as_deref()
@@ -588,8 +448,6 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
     builder.graph
 }
 
-// ---- EC2 instance state-change notifications --------------------------------
-
 #[derive(Deserialize)]
 struct InstanceStateDetail {
     #[serde(rename = "instance-id")]
@@ -597,9 +455,6 @@ struct InstanceStateDetail {
     state: Option<String>,
 }
 
-/// The cheapest AWS change feed there is: on by default, no Config, seconds of
-/// latency. It carries an id and a lifecycle state and nothing else, so the
-/// node arrives bare and Tier 3 (or a Config item) attaches it.
 fn from_instance_state(
     detail: &Value,
     region: &str,
@@ -615,9 +470,6 @@ fn from_instance_state(
         return Err(malformed("state change has no usable timestamp"));
     };
 
-    // `stopped` is not `terminated`: a stopped instance still exists, still has
-    // its ENI and its subnet, and deleting it here would make the graph
-    // disagree with the next scan.
     let op = match detail.state.as_deref() {
         Some("terminated" | "shutting-down") => ChangeOp::Deleted,
         Some(_) => ChangeOp::Created,
@@ -634,8 +486,6 @@ fn from_instance_state(
         ChangeEvent::new(SOURCE, region, id, observed_at, op, node).with_context(context),
     ])
 }
-
-// ---- CloudTrail management events -------------------------------------------
 
 #[derive(Deserialize)]
 struct CloudTrailDetail {
@@ -675,10 +525,6 @@ struct TrailInstance {
     network_interface_set: Option<ItemSet<NetworkInterfaceRef>>,
 }
 
-/// CloudTrail is the broadest feed and the least uniform one: the id of the
-/// thing that changed lives somewhere different for every API call, so coverage
-/// is a curated list rather than a general rule. The calls handled here are the
-/// ones that change *topology*; everything else waits for Config or Tier 3.
 fn from_cloud_trail(
     detail: &Value,
     envelope_region: &str,
@@ -688,9 +534,6 @@ fn from_cloud_trail(
     let detail: CloudTrailDetail = serde_json::from_value(detail.clone())
         .map_err(|e| malformed(format!("unreadable CloudTrail detail: {e}")))?;
 
-    // A call that failed changed nothing. CloudTrail records the attempt either
-    // way, so without this a rejected `TerminateInstances` would delete a
-    // running instance from the graph.
     if detail.error_code.is_some() {
         return Ok(Vec::new());
     }
@@ -721,8 +564,6 @@ fn from_cloud_trail(
     };
 
     let events = match event_name {
-        // A launch reports each instance with its placement, so these arrive
-        // fully attached — the one CloudTrail call that is as rich as Config.
         "RunInstances" => launched_instances(&response, region, id, observed_at),
 
         "TerminateInstances" => instance_ids(&request)
@@ -755,8 +596,7 @@ fn from_cloud_trail(
         "CreateSubnet" => string_at(&response, &["subnet", "subnetId"])
             .map(|subnet_id| {
                 let node = Node::AwsEc2Subnet(subnet_id.as_str().into());
-                // No region fallback: the projector gives an unparented subnet
-                // no edge at all, and inventing one here would flap.
+
                 let context = match string_at(&response, &["subnet", "vpcId"]) {
                     Some(vpc_id) => linked(
                         Node::AwsEc2Vpc(vpc_id.as_str().into()),
@@ -794,7 +634,6 @@ fn from_cloud_trail(
             })
             .unwrap_or_default(),
 
-        // Lambda's API version is part of the CloudTrail event name.
         "CreateFunction20150331" => string_at(&response, &["functionName"])
             .map(|name| {
                 vec![region_child(
@@ -910,8 +749,6 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
     cursor.as_str().map(str::to_owned)
 }
 
-// ---- context helpers --------------------------------------------------------
-
 fn solo(node: Node) -> Graph<Node, Edge> {
     let mut builder = GraphBuilder::new();
     builder.get_or_add_node(node);
@@ -925,7 +762,6 @@ fn linked(source: Node, target: Node, edge: Edge) -> Graph<Node, Edge> {
     builder.graph
 }
 
-/// The SQS consumer that carries these events off EventBridge.
 pub mod stream {
     use super::{MalformedEvent, SOURCE, parse};
     use crate::atlas::collection::{CollectionReport, FailureKind};
@@ -933,26 +769,11 @@ pub mod stream {
     use aws_sdk_sqs::Client;
     use aws_sdk_sqs::types::DeleteMessageBatchRequestEntry;
 
-    /// One drain of the queue: what it told us, and what went wrong while
-    /// finding out.
-    ///
-    /// Infallible by construction, like every `build_*` in `cloud/` — a stream
-    /// that cannot be read still returns a batch, with the empty event list
-    /// explained by a non-empty report, so no caller can mistake a broken feed
-    /// for a quiet one.
     pub struct EventBatch {
         pub events: Vec<ChangeEvent>,
         pub report: CollectionReport,
     }
 
-    /// An SQS queue fed by an EventBridge rule.
-    ///
-    /// Long-polls, translates every message it can, and deletes what it
-    /// processed. Messages are deleted *after* translation but before the graph
-    /// applies them: if the process dies in between, SQS redelivers, and
-    /// [`EventApplier`](crate::atlas::event::EventApplier) is idempotent — the
-    /// cheap failure. Holding messages until the graph confirmed them would
-    /// instead stall the queue behind one slow apply.
     pub struct EventQueue {
         client: Client,
         queue_url: String,
@@ -962,13 +783,8 @@ pub mod stream {
     }
 
     impl EventQueue {
-        /// Seconds to hold a receive open waiting for events. Long-polling
-        /// keeps latency at "as soon as the event lands" without spinning, and
-        /// bounds how long a shutdown or a reconciliation tick waits on us.
         pub const WAIT_SECONDS: i32 = 20;
 
-        /// Messages per receive. SQS's maximum; a burst simply takes several
-        /// round trips.
         const BATCH: i32 = 10;
 
         pub fn new(
@@ -986,8 +802,6 @@ pub mod stream {
             }
         }
 
-        /// Shorten the long-poll. For tests, which must not block for twenty
-        /// seconds on an empty replay queue.
         pub fn with_wait_seconds(mut self, seconds: i32) -> Self {
             self.wait_time_seconds = seconds;
             self
@@ -1012,9 +826,6 @@ pub mod stream {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    // Classified here, where the error is still typed. A 403 on
-                    // the queue is a policy problem no amount of polling fixes;
-                    // anything else may be a blip worth waiting out.
                     let kind = match error.raw_response().map(|r| r.status().as_u16()) {
                         Some(401 | 403) => FailureKind::Unauthorized,
                         _ => FailureKind::Unavailable,
@@ -1035,12 +846,6 @@ pub mod stream {
                 match parse(body, self.exclude_by_default) {
                     Ok(mut parsed) => events.append(&mut parsed),
                     Err(MalformedEvent { reason }) => {
-                        // Not an unreadable source: we read the queue fine, and
-                        // every other message on it is good. Reported, then
-                        // deleted with the rest — a message we can never parse
-                        // would otherwise come back on every poll forever.
-                        // Attach a redrive policy to the queue if the raw
-                        // bodies are worth keeping.
                         report.note(
                             SOURCE,
                             FailureKind::Malformed,
@@ -1084,10 +889,6 @@ pub mod stream {
                 .send()
                 .await;
 
-            // A failed delete costs a redelivery, not an event. Worth
-            // reporting — a queue that never drains is a real problem — but it
-            // must not be an unreadable source, or a permissions gap on
-            // DeleteMessage would suspend removals across all of AWS.
             match result {
                 Ok(response) => {
                     let failed = response.failed();

@@ -3,9 +3,6 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 
-// Counts come from the same fixture global-setup serves at /snapshot.json, so
-// assertions track the fixture instead of hard-coding numbers. Read lazily:
-// the fixture is written by global-setup, which runs after test discovery.
 function fixture(): {
 	nodes: unknown[];
 	edges: unknown[];
@@ -24,8 +21,6 @@ function fixtureCounts(): { nodes: number; edges: number } {
 	return { nodes: snap.nodes.length, edges: snap.edges.length };
 }
 
-// Volume rides on flow edges only, so an observation carrying packets is a
-// flow and one without is a node that was merely heard from.
 function fixtureFlows(): number {
 	return (fixture().observations ?? []).filter((o) => o.packets !== undefined).length;
 }
@@ -33,8 +28,7 @@ function fixtureFlows(): number {
 const STATUS = ".status";
 const ERROR = ".error-overlay";
 const CANVAS = ".graph-container canvas";
-// `?static` loads the fixture over one fetch (no server), so render assertions
-// are deterministic and independent of the churning demo server.
+
 const STATIC = "/?static=1";
 
 async function nodeCount(page: Page): Promise<number> {
@@ -103,8 +97,6 @@ test.describe("render pipeline (static)", () => {
 	});
 
 	test("shows the observed-traffic panel with the fixture's flows", async ({ page }) => {
-		// Tier 2 reaches the client as its own `observations` list; this is the
-		// only assertion that it survives the whole pipeline into the UI.
 		await page.goto(STATIC);
 		await expect(page.locator(".traffic")).toBeVisible({ timeout: 15_000 });
 		await expect(page.locator(".traffic")).toContainText(`${fixtureFlows()} flows`);
@@ -146,8 +138,6 @@ test.describe("render pipeline (static)", () => {
 	});
 
 	test("shows the error overlay on a snapshot version mismatch", async ({ page }) => {
-		// Guards the SNAPSHOT_VERSION check — the contract that catches an
-		// atlas-lib export drift the frontend can't read.
 		await page.route("**/snapshot.json", (route) =>
 			route.fulfill({
 				contentType: "application/json",
@@ -160,10 +150,6 @@ test.describe("render pipeline (static)", () => {
 	});
 
 	test("survives a zero-width container, then renders once laid out", async ({ page }) => {
-		// Regression: Sigma throws "Container has no width" if built into a
-		// 0-sized element (a background tab). The app must not crash — it builds
-		// tolerantly (allowInvalidContainer) and renders once the container gains
-		// size (Sigma's own resize refresh), with no error overlay.
 		const errors: string[] = [];
 		page.on("pageerror", (e) => errors.push(e.message));
 
@@ -187,11 +173,10 @@ test.describe("render pipeline (static)", () => {
 
 		await page.goto(STATIC);
 		await page.waitForTimeout(1000);
-		// No "Container has no width" crash while collapsed.
+
 		await expect(page.locator(ERROR)).toHaveCount(0);
 		expect(errors).toEqual([]);
 
-		// Laying the container out (tab shown) renders and settles cleanly.
 		await page.evaluate(() => document.getElementById("force-zero")?.remove());
 		await expect(page.locator(CANVAS).first()).toBeVisible({ timeout: 15_000 });
 		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
@@ -199,9 +184,6 @@ test.describe("render pipeline (static)", () => {
 	});
 
 	test("settled graph is rock-still — no per-frame render churn", async ({ page }) => {
-		// The core "shaking" regression. Once settled, with a static camera, the
-		// rendered image must not change frame-to-frame. The traffic overlay is
-		// excluded: its motion is the point, and it is a separate canvas.
 		await page.goto(STATIC);
 		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
 		await page.waitForTimeout(300);
@@ -265,16 +247,13 @@ test.describe("live backend (WebSocket)", () => {
 	});
 
 	test("patches pin existing nodes — the cloud does not move", async ({ page }) => {
-		// Regression for the "cycling iterations" shake: a live patch pins every
-		// pre-existing node and lays out only newcomers, so persistent nodes must
-		// not move (beyond f32 round-tripping noise).
 		await page.goto("/");
 		await page.waitForFunction(
 			() => ((globalThis as AtlasHandle).atlas?.graph?.order ?? 0) > 0,
 			undefined,
 			{ timeout: 15_000 },
 		);
-		await page.waitForTimeout(3500); // let the initial layout settle
+		await page.waitForTimeout(3500);
 
 		const maxMove: number = await page.evaluate(
 			() =>

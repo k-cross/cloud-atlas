@@ -1,12 +1,3 @@
-//! The shared fan-out for providers that read many independent APIs per scope
-//! (an AWS region, a GCP project).
-//!
-//! Every collector travels with its own name, so a failure can be attributed to
-//! the exact API that failed instead of sinking the whole provider. Running
-//! them through here is what keeps [`crate::atlas::collection`]'s contract
-//! honest: the only way to consume a collector's `Result` is to hand it to
-//! `run_all`, which records the error rather than dropping it.
-
 use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
 use std::future::Future;
 use std::pin::Pin;
@@ -16,9 +7,6 @@ pub type NamedCollector<'a, T> = (
     Pin<Box<dyn Future<Output = Result<T, Box<dyn std::error::Error>>> + 'a>>,
 );
 
-/// Run every collector concurrently and split the outcomes: what was read goes
-/// into the returned collections, what failed is recorded against
-/// `{scope}/{name}` in the returned report.
 pub async fn run_all<T>(
     collectors: Vec<NamedCollector<'_, T>>,
     source: CollectionSource,
@@ -36,11 +24,7 @@ pub async fn run_all<T>(
     for (name, result) in results {
         match result {
             Ok(collection) => collected.push(collection),
-            // A collector's error arrives boxed, so its kind is no longer
-            // recoverable here; `Unavailable` is the conservative reading —
-            // hold the resources and wait. A provider that can diagnose a
-            // permissions failure does so *before* fanning out, where the
-            // error is still typed (see each `build_*`).
+
             Err(e) => report.record(
                 source,
                 FailureKind::Unavailable,

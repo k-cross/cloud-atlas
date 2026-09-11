@@ -14,7 +14,6 @@ pub mod collector {
         hosted_zones.extend(hz_resp.hosted_zones);
 
         for zone in &hosted_zones {
-            // Route53 zone IDs come with a /hostedzone/ prefix which we can just pass along
             let id = zone.id();
             let mut is_truncated = true;
             let mut next_record_name: Option<String> = None;

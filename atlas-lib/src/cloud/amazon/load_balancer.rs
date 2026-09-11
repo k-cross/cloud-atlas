@@ -8,11 +8,9 @@ pub mod collector {
     ) -> Result<AWSLoadBalancing, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
-        // Fetch Load Balancers
         let lbs_resp = client.describe_load_balancers().send().await?;
         let load_balancers = lbs_resp.load_balancers.unwrap_or_default();
 
-        // Fetch Listeners for each Load Balancer
         let mut listeners = Vec::new();
         for lb in &load_balancers {
             if let Some(arn) = lb.load_balancer_arn() {
@@ -25,11 +23,9 @@ pub mod collector {
             }
         }
 
-        // Fetch Target Groups
         let tg_resp = client.describe_target_groups().send().await?;
         let target_groups = tg_resp.target_groups.unwrap_or_default();
 
-        // Fetch Target Health for each Target Group
         let mut target_health = HashMap::new();
         for tg in &target_groups {
             if let Some(arn) = tg.target_group_arn() {

@@ -1,12 +1,3 @@
-//! Tier-1 ingestion coverage: canned EventBridge bodies in, normalized
-//! `ChangeEvent`s out, and — for the transport — a replayed SQS conversation.
-//! No credentials, no network.
-//!
-//! The load-bearing assertion is not "did it parse". It is that what the event
-//! path produces is a *subgraph of what the full scan produces* for the same
-//! resource: an edge Tier 1 invents that Tier 3 does not know about is deleted
-//! at every reconciliation and re-added by every event.
-
 use super::stream::EventQueue;
 use super::*;
 use crate::Settings;
@@ -23,9 +14,6 @@ use std::collections::HashSet;
 
 const INCLUDE_UNKNOWN: bool = false;
 
-/// A Config configuration item for a running instance, with the shape Config
-/// actually delivers: a configuration snapshot *and* a relationships list that
-/// restates part of it.
 fn instance_config_item(status: &str) -> String {
     format!(
         r#"{{
@@ -74,8 +62,6 @@ fn parse_ok(body: &str) -> Vec<ChangeEvent> {
     parse(body, INCLUDE_UNKNOWN).expect("body is a readable event")
 }
 
-/// The same instance, as the full-scan collector would hand it to the
-/// projector.
 fn scanned_instance_graph() -> Graph<Node, Edge> {
     use aws_sdk_ec2::types::{GroupIdentifier, Instance, InstanceNetworkInterface, Placement, Tag};
 
@@ -124,11 +110,6 @@ fn edge_keys(graph: &Graph<Node, Edge>) -> HashSet<String> {
         .collect()
 }
 
-// ---- AWS Config -------------------------------------------------------------
-
-/// The contract between the tiers. Anything Tier 1 asserts about an instance
-/// must be something the full scan also asserts, or the two tiers spend forever
-/// undoing each other.
 #[test]
 fn an_instance_event_produces_only_what_a_full_scan_would() {
     let events = parse_ok(&instance_config_item("OK"));
@@ -158,9 +139,6 @@ fn an_instance_event_produces_only_what_a_full_scan_would() {
     );
 }
 
-/// And the other direction: the event has to be *worth* something. A create
-/// that lands as a bare node with no VPC, subnet or ENI is not what Config
-/// paid for.
 #[test]
 fn an_instance_event_carries_the_eni_pivot() {
     let events = parse_ok(&instance_config_item("ResourceDiscovered"));
@@ -196,9 +174,6 @@ fn an_instance_event_carries_the_eni_pivot() {
     );
 }
 
-/// Config restates a resource's relations in two places and only sometimes
-/// includes the configuration snapshot. Falling back to `relationships` is what
-/// keeps a create attached rather than floating.
 #[test]
 fn relationships_stand_in_for_a_missing_configuration_snapshot() {
     let body = instance_config_item("OK");
@@ -223,10 +198,6 @@ fn relationships_stand_in_for_a_missing_configuration_snapshot() {
     assert!(keys.contains(&node_key(&Node::AwsEc2SecurityGroup("sg-globex".into()))));
 }
 
-/// The fallback knows interface *ids* and nothing else, so the ENI it adds must
-/// stay unattached. Guessing the instance's own subnet is wrong for every
-/// multi-homed instance, and rule 1 makes a wrong edge worse than a missing
-/// one: reconciliation deletes it and the next event puts it back, forever.
 #[test]
 fn an_eni_from_relationships_alone_attaches_to_no_subnet() {
     let body = instance_config_item("OK");
@@ -258,9 +229,6 @@ fn an_eni_from_relationships_alone_attaches_to_no_subnet() {
     );
 }
 
-/// The full scan produces both a typed node and an AWS Config catch-all node
-/// for an instance. A delete that only took the typed one would leave the
-/// catch-all standing until reconciliation swept it.
 #[test]
 fn a_config_item_yields_both_the_typed_and_the_catch_all_node() {
     let events = parse_ok(&instance_config_item("ResourceDeleted"));
@@ -274,8 +242,6 @@ fn a_config_item_yields_both_the_typed_and_the_catch_all_node() {
     )));
 }
 
-/// A type the full scan deliberately skips must not arrive by event only to be
-/// deleted at the next reconciliation — the filter has to be the same one.
 #[test]
 fn a_resource_type_the_scan_skips_produces_no_catch_all_node() {
     let body = instance_config_item("OK").replace(
@@ -291,8 +257,6 @@ fn a_resource_type_the_scan_skips_produces_no_catch_all_node() {
     );
 }
 
-/// An ENI is keyed by its instance in the graph, not by its `eni-` id, so a
-/// Config ENI item has no typed node it could produce without inventing one.
 #[test]
 fn an_eni_item_produces_no_typed_node() {
     let body = instance_config_item("OK")
@@ -335,8 +299,6 @@ fn a_vpc_item_lands_inside_its_region() {
     }));
 }
 
-/// Config saying "I am not recording this" is not a statement about whether the
-/// resource exists, and must not be read as one.
 #[test]
 fn an_unrecorded_status_changes_nothing() {
     let events = parse_ok(&instance_config_item("ResourceNotRecorded"));
@@ -346,11 +308,9 @@ fn an_unrecorded_status_changes_nothing() {
 #[test]
 fn the_capture_time_orders_the_event_not_our_clock() {
     let events = parse_ok(&instance_config_item("OK"));
-    // 2026-09-03T12:00:00Z
+
     assert_eq!(events[0].observed_at, 1_788_436_800_000);
 }
-
-// ---- EC2 instance state changes ---------------------------------------------
 
 fn state_change(state: &str) -> String {
     format!(
@@ -374,8 +334,6 @@ fn a_termination_deletes_the_instance() {
     assert_eq!(events[0].node, Node::AwsEc2Instance("i-0abc123".into()));
 }
 
-/// A stopped instance still exists, still holds its ENI and its subnet.
-/// Deleting it here would put the graph at odds with the very next scan.
 #[test]
 fn a_stopped_instance_is_not_a_deleted_instance() {
     for state in ["stopped", "stopping", "running", "pending"] {
@@ -387,8 +345,6 @@ fn a_stopped_instance_is_not_a_deleted_instance() {
         );
     }
 }
-
-// ---- CloudTrail -------------------------------------------------------------
 
 fn cloud_trail(detail: &str) -> String {
     format!(
@@ -456,9 +412,6 @@ fn terminate_instances_deletes_from_the_request() {
     assert_eq!(events[0].node, Node::AwsEc2Instance("i-aaa".into()));
 }
 
-/// CloudTrail records attempts, not just successes. A rejected terminate that
-/// deleted the instance from the graph would be a live twin lying about a
-/// running machine.
 #[test]
 fn a_rejected_api_call_changes_nothing() {
     let body = cloud_trail(
@@ -507,10 +460,6 @@ fn an_unmodelled_api_call_is_ignored_not_failed() {
     assert!(parse_ok(&body).is_empty());
 }
 
-// ---- envelope handling ------------------------------------------------------
-
-/// A rule may target SNS with SQS behind it, in which case the event arrives
-/// as a string inside a notification envelope.
 #[test]
 fn an_sns_wrapped_event_is_unwrapped() {
     let inner = state_change("terminated");
@@ -539,8 +488,6 @@ fn a_body_that_is_not_an_event_is_an_error() {
     assert!(parse("not json at all", INCLUDE_UNKNOWN).is_err());
     assert!(parse(r#"{"hello":"world"}"#, INCLUDE_UNKNOWN).is_err());
 }
-
-// ---- transport --------------------------------------------------------------
 
 fn replay(responses: &[(&'static str, String)]) -> StaticReplayClient {
     let events = responses
@@ -598,9 +545,6 @@ fn received(bodies: &[String]) -> String {
     serde_json::json!({ "Messages": messages }).to_string()
 }
 
-/// The whole Tier-1 path with nothing stubbed but the wire: a queue message
-/// becomes a normalized event, the event becomes a graph mutation, and the
-/// mutation becomes a patch a client could apply.
 #[tokio::test]
 async fn a_queued_event_reaches_the_graph_as_a_patch() {
     let http = replay(&[
@@ -637,13 +581,8 @@ async fn a_queued_event_reaches_the_graph_as_a_patch() {
     assert!(live.contains(&Node::AwsEc2Eni("eni-0abc123a".into())));
 }
 
-/// One poison message must not take the batch down with it, and must not go
-/// unrecorded either — a silently dropped delete leaves a resource in the graph
-/// with nothing to say why.
 #[test]
 fn an_unreadable_message_is_reported_as_malformed_not_unreadable() {
-    // Exercised through the report the queue builds, without the SQS round
-    // trip: what matters is the classification.
     let mut report = CollectionReport::default();
     report.note(
         SOURCE,
@@ -681,8 +620,6 @@ async fn a_bad_message_does_not_stop_the_good_ones() {
     assert!(batch.report.unreadable_sources().is_empty());
 }
 
-/// A queue we cannot read is a real read failure — the one case here that
-/// should hold AWS's resources rather than let them be deleted.
 #[tokio::test]
 async fn a_refused_queue_is_reported_unauthorized() {
     let http = StaticReplayClient::new(vec![ReplayEvent::new(
@@ -711,11 +648,6 @@ async fn a_refused_queue_is_reported_unauthorized() {
     );
 }
 
-/// A subnet or route table whose VPC the event did not name gets *no* edge.
-/// These two look like the ELB/EKS/RDS arms and are not: the projector reaches
-/// a subnet through `link_to(vpc_idx, ..)`, which emits nothing when the VPC is
-/// unknown, so a region fallback here would invent an edge every
-/// reconciliation deletes and every event re-adds.
 #[test]
 fn an_unparented_subnet_gets_no_region_edge() {
     for (resource_type, resource_id) in [
@@ -731,7 +663,6 @@ fn an_unparented_subnet_gets_no_region_edge() {
                 r#""resourceId": "i-0abc123""#,
                 &format!(r#""resourceId": "{resource_id}""#),
             )
-            // Drop the VPC relationship, leaving the resource unparented.
             .replace(
                 r#"{ "resourceType": "AWS::EC2::VPC", "resourceId": "vpc-globex" },"#,
                 "",
@@ -752,8 +683,6 @@ fn an_unparented_subnet_gets_no_region_edge() {
     }
 }
 
-/// The same resource types *do* attach when the VPC is known — the fallback is
-/// narrow, not a blanket refusal to build edges.
 #[test]
 fn a_subnet_still_lands_inside_the_vpc_its_event_named() {
     let body = instance_config_item("ResourceDiscovered")

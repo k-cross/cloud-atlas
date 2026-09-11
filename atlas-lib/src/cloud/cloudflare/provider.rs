@@ -14,8 +14,6 @@ pub async fn build_cloudflare(verbose: bool, _settings: &Settings) -> ProviderSc
 
     match clients() {
         Ok((client, cf)) => collect(&client, &cf, verbose, &mut data, &mut report).await,
-        // No token, or a token the client refuses to build with: the
-        // whole provider is unreadable for a reason polling cannot fix.
         Err(e) => report.record(SOURCE, FailureKind::Unauthorized, "credentials", e),
     }
 
@@ -25,8 +23,6 @@ pub async fn build_cloudflare(verbose: bool, _settings: &Settings) -> ProviderSc
     }
 }
 
-/// The `cloudflare` crate's client, plus ours for the raw REST endpoints the
-/// crate does not cover. Both need the same token, so they are built together.
 fn clients() -> Result<(Client, super::CloudflareApiClient), Box<dyn std::error::Error>> {
     let token = env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default();
     if token.is_empty() {
@@ -87,7 +83,6 @@ async fn collect(
     let mut accounts_seen = std::collections::HashSet::new();
 
     for zone in &data.zones {
-        // Fetch account-level resources only once per account
         let account_id = &zone.account.id;
         if !accounts_seen.insert(account_id.as_str()) {
             continue;

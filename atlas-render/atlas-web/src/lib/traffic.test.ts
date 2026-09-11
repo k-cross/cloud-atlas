@@ -121,8 +121,6 @@ describe("packet animation", () => {
 		expect(packetCount(10_000_000_000)).toBe(MAX_PACKETS_PER_EDGE);
 	});
 
-	// Log-scaled on purpose: real flow volumes span orders of magnitude, and a
-	// linear mapping either saturates at the cap or leaves everything at one dot.
 	test("a hundredfold more traffic is a few more packets, not a hundred", () => {
 		expect(packetCount(100_000) - packetCount(1_000)).toBeLessThan(4);
 	});

@@ -3,7 +3,6 @@ pub mod collector {
     use aws_sdk_config::{Client, Error};
     use std::collections::HashMap;
 
-    // Lists resources
     async fn scan_resources(
         client: &Client,
     ) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Error> {

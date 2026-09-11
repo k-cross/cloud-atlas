@@ -2,10 +2,6 @@ pub mod collector {
     use crate::cloud::definition::AWSNetworking;
     use aws_sdk_ec2::Client;
 
-    /// Collects the VPC routing/egress plane: route tables (with their routes
-    /// and subnet associations), internet gateways, NAT gateways, and Elastic
-    /// IPs. Together these let the projector answer "can this subnet actually
-    /// reach the internet, and how".
     pub async fn runner(
         config: &aws_config::SdkConfig,
     ) -> Result<AWSNetworking, Box<dyn std::error::Error>> {
@@ -56,7 +52,6 @@ pub mod collector {
             }
         }
 
-        // DescribeAddresses is not paginated.
         let resp = client.describe_addresses().send().await?;
         let addresses = resp.addresses.unwrap_or_default();
 

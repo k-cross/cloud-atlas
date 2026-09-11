@@ -1,43 +1,3 @@
-//! Observed traffic — Tier 2 of `docs/change_monitoring_design.md`.
-//!
-//! Tier 1 and Tier 3 both read a cloud's *control plane*: what exists and how
-//! it is configured. Neither can say whether any of it is doing anything. Flow
-//! logs are the data plane, and they answer exactly one question the control
-//! plane cannot — "is this thing alive, and who is it talking to" — while being
-//! useless for the questions the control plane answers well. They are sampled,
-//! aggregated, and minutes late; a provisioned-but-silent resource never
-//! appears in them at all, and absence is indistinguishable from idle. So this
-//! tier is strictly an *overlay*: it decorates the graph the other two tiers
-//! build, and it is never the reason a typed resource node exists or stops
-//! existing.
-//!
-//! Three rules keep the overlay from fighting the tiers underneath it:
-//!
-//! 1. **Metrics live beside the graph, not inside it.** `Node` and `Edge` are
-//!    the graph's identity types — `Hash + Eq`, deduplicated on insert, diffed
-//!    by value. A packet counter inside [`Edge::TrafficFlow`] would make every
-//!    metric update a *different* edge: duplicates past `add_edge`'s dedup, and
-//!    a remove-then-add of the same `edge_key` in every reconciliation patch.
-//!    So [`FlowIndex`] holds the numbers, keyed by the same stable
-//!    `node_key`/`edge_key` the wire uses, and the graph holds only the
-//!    payload-free fact that traffic was seen.
-//! 2. **An observation may create only the nodes no provider owns.** A flow
-//!    record carries an IP and an interface id, not a resource's type, tags,
-//!    subnet or security groups — reconstructing a typed node from that would
-//!    be building topology out of shadows, and the next full scan would
-//!    disagree. The one exception is [`Node::GenericIpAddress`] and its
-//!    siblings ([`Node::owner`] returns `None` for them): they are the
-//!    cross-cloud pivots the projectors already emit, so a flow to an
-//!    unrecognised address becomes a generic endpoint and nothing more. That is
-//!    also what makes a flow between two clouds land as a real edge between
-//!    their estates.
-//! 3. **Expiry is what deletes, and Tier 3 is what applies it.** Each
-//!    reconciliation folds the *current* overlay into the freshly scanned graph
-//!    before diffing ([`FlowIndex::overlay`]), so a flow that has gone quiet
-//!    simply stops being folded in and the ordinary differ removes its edge.
-//!    Tier 2 never removes anything itself, exactly as Tier 1 never
-//!    garbage-collects.
-
 use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{RenderObservation, edge_key, node_key};
@@ -46,62 +6,30 @@ use petgraph::graph::Graph;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-/// Whether the observed traffic got through. A security group rule says traffic
-/// *could* flow; this is the only thing in the graph that says whether it did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowAction {
     Accepted,
     Rejected,
 }
 
-/// One normalized flow record, whatever cloud produced it — Tier 2's
-/// counterpart to [`ChangeEvent`](crate::atlas::event::ChangeEvent).
-///
-/// `src`/`dst` are the graph nodes the traffic ran between, chosen by the
-/// adapter under rule 2 above: in practice a pair of [`Node::GenericIpAddress`]
-/// values, which is what lets an AWS instance's flow to an Azure public IP
-/// stitch the two estates together through the pivot node they already share.
 #[derive(Debug, Clone)]
 pub struct FlowObservation {
     pub source: CollectionSource,
-    /// Region/project the records were read from, for reporting — the same
-    /// granularity a collection failure is attributed at.
     pub scope: String,
     pub src: Node,
     pub dst: Node,
-    /// Typed resources the record named outright (an instance id in the record,
-    /// not an IP we guessed from). These get freshness and nothing else — never
-    /// a node, since the record does not carry enough to build one.
     pub resources: Vec<Node>,
     pub packets: u64,
     pub bytes: u64,
-    /// `None` when the record could not say. Flow-log formats are chosen field
-    /// by field, and one that omits the verdict still proves the traffic
-    /// happened — which is the liveness signal. Recording it as accepted would
-    /// be claiming something the record did not say.
     pub action: Option<FlowAction>,
-    /// Epoch milliseconds at the *end* of the record's aggregation window —
-    /// the latest moment this traffic is known to have been happening.
     pub observed_at: i64,
 }
 
-/// What the overlay knows about one observed *flow*. Volume is recorded here
-/// and nowhere else, because a flow is the only thing it is well defined for:
-/// one record describes traffic between one pair of endpoints, in one
-/// direction.
-///
-/// Counters accumulate for as long as the entry stays alive and reset when it
-/// lapses, so they read as "traffic during this run of activity" rather than
-/// "since the process started".
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlowStats {
     pub last_seen: i64,
     pub packets: u64,
     pub bytes: u64,
-    /// Records seen, by verdict — not packets. A single rejected probe against
-    /// a busy accepted conversation should register as `mixed`, not vanish
-    /// into the packet totals. A record that carried no verdict counts towards
-    /// neither.
     pub accepted: u64,
     pub rejected: u64,
 }
@@ -129,21 +57,6 @@ impl FlowStats {
     }
 }
 
-/// What the overlay knows about one *node*: that it was heard from, and whether
-/// what it carried got through.
-///
-/// Deliberately no volume. One record names up to four nodes — both endpoints,
-/// and the instance and interface it came from — so stamping its packet count
-/// on each would record the same traffic four times, and summing `packets`
-/// across a snapshot would report several times the real figure. Worse, the
-/// number would not mean anything even alone: a node's "packets" is a sum over
-/// every flow that touched it, inbound and outbound together. A node's
-/// throughput is derived from its incident [`Edge::TrafficFlow`] edges, which
-/// are the things that know a direction.
-///
-/// `last_seen` survives the same treatment because it composes as a *maximum*
-/// rather than a sum: recording it against every node a record names is
-/// idempotent, and it is the signal the health overlay actually wants.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Liveness {
     pub last_seen: i64,
@@ -180,8 +93,6 @@ fn verdict(accepted: &mut u64, rejected: &mut u64, observation: &FlowObservation
     }
 }
 
-/// `accepted`, `rejected`, `mixed`, or `observed` when every record that
-/// contributed declined to say.
 fn status_of(accepted: u64, rejected: u64) -> &'static str {
     match (accepted > 0, rejected > 0) {
         (true, true) => "mixed",
@@ -191,26 +102,13 @@ fn status_of(accepted: u64, rejected: u64) -> &'static str {
     }
 }
 
-/// The live overlay: which pairs of endpoints have been seen talking, and how
-/// recently each node was heard from.
-///
-/// Bounded and expiring, because this is a daemon and flow logs are the highest
-/// -volume feed of the three. A busy VPC talks to a practically unlimited
-/// number of external addresses, so an unbounded index would grow for the
-/// lifetime of the process and drag a `GenericIpAddress` node into the graph
-/// for every one of them.
 pub struct FlowIndex {
     ttl_ms: i64,
     capacity: usize,
     flows: HashMap<(Node, Node), FlowStats>,
     resources: HashMap<Node, Liveness>,
-    /// Entries touched since the last drain, so a patch carries the freshness
-    /// that actually changed instead of re-sending the whole overlay every
-    /// tick.
     dirty_flows: HashSet<(Node, Node)>,
     dirty_resources: HashSet<Node>,
-    /// Keys that have lapsed (expired or been evicted) and are owed to clients,
-    /// which would otherwise keep showing a resource as live forever.
     lapsed: Vec<String>,
 }
 
@@ -221,16 +119,8 @@ impl Default for FlowIndex {
 }
 
 impl FlowIndex {
-    /// How long an observation counts as current. Generous relative to the
-    /// feed's own latency on purpose: AWS aggregates flows over one- to
-    /// ten-minute windows and then takes minutes more to deliver them, so a
-    /// shorter window would mark healthy resources dark purely because of
-    /// pipeline lag.
     pub const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
 
-    /// Flows and resources tracked before the oldest are dropped. Each tracked
-    /// flow can pull a `GenericIpAddress` node into the graph, so this is also
-    /// the ceiling on how far the overlay can inflate the twin.
     pub const DEFAULT_CAPACITY: usize = 10_000;
 
     pub fn new(ttl: Duration, capacity: usize) -> Self {
@@ -253,10 +143,6 @@ impl FlowIndex {
         self.resources.len()
     }
 
-    /// Fold one record in. Both endpoints get freshness as well as the flow
-    /// itself: "this address was talking" is the liveness signal, and the
-    /// resource holding that address is one `ConnectsTo` edge away in the graph
-    /// the projectors already built.
     pub fn observe(&mut self, observation: &FlowObservation) {
         let pair = (observation.src.clone(), observation.dst.clone());
         self.flows
@@ -279,10 +165,6 @@ impl FlowIndex {
         self.evict();
     }
 
-    /// Drop everything not heard from within the TTL, so the next
-    /// reconciliation stops folding those flows in and the differ removes their
-    /// edges. `now_ms` is passed rather than read from the clock so the policy
-    /// is testable and so a caller can drive it from one consistent instant.
     pub fn expire(&mut self, now_ms: i64) {
         let horizon = now_ms.saturating_sub(self.ttl_ms);
         let mut lapsed = Vec::new();
@@ -311,27 +193,19 @@ impl FlowIndex {
         self.lapsed.extend(lapsed);
     }
 
-    /// Fold the whole overlay into a graph. Called on the scan graph before it
-    /// is diffed, which is what makes the overlay survive a full rebuild and,
-    /// on expiry, disappear through the ordinary differ instead of a special
-    /// removal path.
     pub fn overlay(&self, builder: &mut GraphBuilder) {
         let mut pairs: Vec<&(Node, Node)> = self.flows.keys().collect();
-        // Merge order decides node indices, and the snapshot is compared
-        // byte-for-byte by the frontend's tests; keep it deterministic.
+
         pairs.sort_by_cached_key(|pair| flow_key(pair));
         let context = subgraph(builder, pairs.into_iter().map(|(a, b)| (a, b)));
         builder.merge(&context);
     }
 
-    /// The flow edges from `observations` that `live` can accept *and* this
-    /// index still holds, as a subgraph ready to be merged. This is the
-    /// between-scans path: a batch arrives, its edges go straight into the live
-    /// graph, and clients see the traffic without waiting for the next
-    /// reconciliation. Filtering by what survived [`Self::observe`] is what
-    /// keeps `capacity` a real ceiling on how far the overlay can inflate the
-    /// twin, since one object can carry many times the budget.
-    pub fn context(&self, live: &GraphBuilder, observations: &[FlowObservation]) -> Graph<Node, Edge> {
+    pub fn context(
+        &self,
+        live: &GraphBuilder,
+        observations: &[FlowObservation],
+    ) -> Graph<Node, Edge> {
         let retained: HashSet<(&Node, &Node)> = self.flows.keys().map(|(a, b)| (a, b)).collect();
         subgraph(
             live,
@@ -342,7 +216,6 @@ impl FlowIndex {
         )
     }
 
-    /// Everything currently observed, for a full snapshot.
     pub fn observations(&self) -> Vec<RenderObservation> {
         let mut all: Vec<RenderObservation> = self
             .flows
@@ -358,7 +231,6 @@ impl FlowIndex {
         all
     }
 
-    /// Only what changed since the last drain — what a patch should carry.
     pub fn drain_observations(&mut self) -> Vec<RenderObservation> {
         let mut changed: Vec<RenderObservation> = self
             .dirty_flows
@@ -378,25 +250,10 @@ impl FlowIndex {
         changed
     }
 
-    /// Keys whose observation has lapsed and which clients should stop
-    /// treating as live.
     pub fn drain_lapsed(&mut self) -> Vec<String> {
         std::mem::take(&mut self.lapsed)
     }
 
-    /// Hold the index to its budget by dropping the least recently observed.
-    /// Age alone cannot do it: a scan of a /16 can add tens of thousands of
-    /// endpoints inside one TTL window, and the point of the budget is that the
-    /// overlay's contribution to the graph has a ceiling regardless.
-    ///
-    /// Trimming to a *low-water mark* rather than to the budget is what keeps
-    /// this off the hot path. Cutting back to exactly `capacity` leaves the
-    /// index one observation below the threshold, so it crosses again almost
-    /// immediately and every subsequent record pays for a full sort and a full
-    /// `retain` — twice over, once per map — while `ingest_flows` holds both
-    /// the graph and the index write locks. Dropping a quarter at a time makes
-    /// that cost amortized instead of per-record. Same reasoning, same shape,
-    /// as `EventApplier::prune`.
     fn evict(&mut self) {
         let low_water = self.capacity - self.capacity / 4;
         if self.flows.len() > self.capacity {
@@ -430,13 +287,6 @@ impl FlowIndex {
     }
 }
 
-/// The `last_seen` below which entries are dropped to bring a map back to
-/// `keep` entries. Ties are dropped together, so this can undershoot the
-/// target — which is the safe direction, and keeps eviction from re-firing on
-/// the very next observation.
-///
-/// A budget of zero keeps nothing, which is how an operator turns the overlay
-/// off outright.
 fn eviction_cut(last_seen: impl Iterator<Item = i64> + Clone, keep: usize) -> (i64, usize) {
     let cutoff = nth_oldest(last_seen.clone(), keep);
     let newer = last_seen.filter(|seen| *seen > cutoff).count();
@@ -463,14 +313,6 @@ fn nth_oldest(last_seen: impl Iterator<Item = i64>, keep: usize) -> i64 {
     times[times.len() - keep]
 }
 
-/// Build the [`Edge::TrafficFlow`] edges for `pairs` as a standalone graph,
-/// admitting only endpoints `target` may legitimately gain.
-///
-/// This is rule 2 in code. An endpoint already in the graph is decorated; an
-/// endpoint no provider owns (the `GenericIpAddress`/`GenericHostname`/
-/// `ExternalService` pivots) is created, because that is the shape a projector
-/// would give an address it did not recognise either. A *typed* resource the
-/// scan has not found is skipped outright rather than invented from an IP.
 fn subgraph<'a>(
     target: &GraphBuilder,
     pairs: impl Iterator<Item = (&'a Node, &'a Node)>,
@@ -520,7 +362,6 @@ mod tests {
         }
     }
 
-    /// A graph shaped like the projector's: an instance holding a private IP.
     fn estate() -> GraphBuilder {
         let mut builder = GraphBuilder::new();
         let instance = builder.get_or_add_node(Node::AwsEc2Instance("i-1".into()));
@@ -539,9 +380,6 @@ mod tests {
         assert!(graph.has_edge(&ip("10.0.0.1"), &ip("198.51.100.10"), &Edge::TrafficFlow));
     }
 
-    /// The cross-cloud payoff: the remote end of a flow is a pivot node any
-    /// other provider may also reference, so an unrecognised address is worth
-    /// creating even though no scan reported it.
     #[test]
     fn an_unknown_remote_address_becomes_a_generic_pivot_node() {
         let mut index = FlowIndex::default();
@@ -553,10 +391,6 @@ mod tests {
         assert!(graph.contains(&ip("203.0.113.7")));
     }
 
-    /// Rule 2. A flow record carries an IP and an interface id — not a type,
-    /// tags, subnet or security groups — so a typed node built from one would
-    /// be topology reconstructed from shadows, and the next full scan would
-    /// disagree with it.
     #[test]
     fn a_typed_resource_the_scan_never_found_is_not_invented() {
         let unknown = Node::AwsEc2Eni("i-nowhere".into());
@@ -580,8 +414,6 @@ mod tests {
         );
     }
 
-    /// A typed resource the scan *did* find is decorated, not skipped — that is
-    /// the difference between inventing topology and annotating it.
     #[test]
     fn a_typed_resource_the_scan_found_can_carry_a_flow() {
         let known = Node::AwsEc2Instance("i-1".into());
@@ -596,9 +428,6 @@ mod tests {
         assert!(graph.has_edge(&ip("203.0.113.7"), &known, &Edge::TrafficFlow));
     }
 
-    /// Rule 3: expiry deletes through the ordinary differ. A quiet flow simply
-    /// stops being folded into the scan graph, and reconciliation removes it —
-    /// Tier 2 never removes anything itself.
     #[test]
     fn a_flow_that_goes_quiet_is_removed_by_the_next_reconciliation() {
         let mut index = FlowIndex::new(Duration::from_secs(600), 100);
@@ -621,8 +450,6 @@ mod tests {
         );
     }
 
-    /// Freshness inside the window is not a graph change: re-observing must
-    /// leave the topology alone, or every flow record would churn the layout.
     #[test]
     fn refreshing_a_live_flow_changes_no_topology() {
         let mut index = FlowIndex::default();
@@ -655,8 +482,6 @@ mod tests {
         assert_eq!(observed.status, "accepted");
     }
 
-    /// A rejected probe against an otherwise healthy conversation must stay
-    /// visible; it is the more interesting half of the pair.
     #[test]
     fn a_rejected_record_alongside_an_accepted_one_reads_as_mixed() {
         let mut index = FlowIndex::default();
@@ -675,9 +500,6 @@ mod tests {
         assert_eq!(observed.status, "mixed");
     }
 
-    /// A format that leaves the verdict out still proves the traffic happened,
-    /// and that is the whole liveness signal. Filing it as accepted would claim
-    /// something the record never said.
     #[test]
     fn a_record_with_no_verdict_is_observed_not_accepted() {
         let mut index = FlowIndex::default();
@@ -696,10 +518,6 @@ mod tests {
         assert_eq!(observed.last_seen, T0, "liveness is still recorded");
     }
 
-    /// One record names up to four keys — both endpoints plus the instance and
-    /// interface it came from — so recording its volume against each would
-    /// report the same traffic four times over. Volume belongs to the flow; the
-    /// nodes carry only what composes idempotently.
     #[test]
     fn volume_is_counted_once_across_the_whole_overlay() {
         let mut index = FlowIndex::default();
@@ -717,8 +535,6 @@ mod tests {
         assert_eq!(total, 10, "the record's packets, counted exactly once");
     }
 
-    /// And a node reports no volume at all rather than a misleading one: on a
-    /// node it would be an undirected sum over every flow that touched it.
     #[test]
     fn a_node_carries_freshness_without_volume() {
         let mut index = FlowIndex::default();
@@ -736,8 +552,6 @@ mod tests {
         assert_eq!(observed.status, "accepted");
     }
 
-    /// The record names an instance outright, so its freshness is a fact rather
-    /// than an inference — but it still buys no node.
     #[test]
     fn a_named_resource_gets_freshness_without_a_node() {
         let instance = Node::AwsEc2Instance("i-1".into());
@@ -758,9 +572,6 @@ mod tests {
         assert!(!graph.contains(&instance), "freshness is not existence");
     }
 
-    /// A patch should carry the freshness that changed, not the whole overlay:
-    /// on a busy estate the overlay is far larger than the delta, and it
-    /// changes on every single tick.
     #[test]
     fn a_drain_reports_only_what_changed_since_the_last_one() {
         let mut index = FlowIndex::default();
@@ -777,8 +588,6 @@ mod tests {
         );
     }
 
-    /// A client that never hears otherwise keeps showing a lapsed resource as
-    /// live, so expiry has to be announced as well as applied.
     #[test]
     fn expiry_is_reported_to_clients() {
         let mut index = FlowIndex::new(Duration::from_secs(600), 100);
@@ -793,9 +602,6 @@ mod tests {
         assert!(index.drain_lapsed().is_empty(), "owed only once");
     }
 
-    /// This is a daemon and flow logs are the highest-volume feed: a busy VPC
-    /// talks to an unbounded number of external addresses, and every tracked
-    /// flow can drag a node into the graph.
     #[test]
     fn the_index_stays_within_its_budget() {
         let capacity = 50;
@@ -809,8 +615,6 @@ mod tests {
         assert!(index.resource_count() <= capacity);
     }
 
-    /// A zero budget turns the overlay off rather than panicking on the first
-    /// record — the shape `--retain-scans 0` already has elsewhere.
     #[test]
     fn a_zero_budget_keeps_nothing() {
         let mut index = FlowIndex::new(Duration::from_secs(600), 0);
@@ -821,10 +625,6 @@ mod tests {
         assert_eq!(index.resource_count(), 0);
     }
 
-    /// Trimming back to exactly the budget would leave the index one
-    /// observation below the threshold, so it would cross again on the very
-    /// next record and every record after that would pay for a full sort and a
-    /// full retain — on the ingest hot path, holding two write locks.
     #[test]
     fn eviction_leaves_headroom_rather_than_refiring_per_record() {
         let capacity = 100;
@@ -842,8 +642,6 @@ mod tests {
         );
     }
 
-    /// Eviction drops the *oldest*, so the traffic still happening survives a
-    /// flood of one-off destinations.
     #[test]
     fn eviction_keeps_the_most_recently_seen() {
         let capacity = 10;
@@ -893,8 +691,6 @@ mod tests {
         assert!(flow_edges <= capacity);
     }
 
-    /// The overlay is folded into a graph the frontend compares byte-for-byte;
-    /// HashMap iteration order must not leak into it.
     #[test]
     fn the_overlay_is_deterministic() {
         let mut index = FlowIndex::default();
@@ -912,8 +708,6 @@ mod tests {
         assert_eq!(keys(&first), keys(&second));
     }
 
-    /// The between-scans path: a batch that arrives mid-interval must be
-    /// applicable to the live graph directly, under the same admission rule.
     #[test]
     fn a_batch_context_admits_the_same_endpoints_the_overlay_does() {
         let live = estate();

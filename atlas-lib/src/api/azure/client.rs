@@ -6,9 +6,6 @@ use serde_json::Value;
 pub struct AzureApiClient {
     client: reqwest::Client,
     token: String,
-    /// Overrides the ARG host when set — the seam that lets tests point the
-    /// client at a mock server (see the tests below). `None` uses the real
-    /// `management.azure.com`.
     base_url: Option<String>,
 }
 
@@ -28,8 +25,6 @@ impl AzureApiClient {
         })
     }
 
-    /// Dependency-injection constructor: skips credential acquisition (so tests
-    /// need no `az login`) and pins requests to `base_url` (e.g. a mock server).
     pub fn with_base_url(token: String, base_url: String) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -38,7 +33,6 @@ impl AzureApiClient {
         }
     }
 
-    /// Run an Azure Resource Graph (ARG) query
     pub async fn query_graph(
         &self,
         query: &str,
@@ -60,7 +54,6 @@ impl AzureApiClient {
             }
         });
 
-        // Loop for pagination if needed
         let mut all_results = Vec::new();
         let mut expected_total: Option<u64> = None;
 
@@ -82,12 +75,6 @@ impl AzureApiClient {
 
             let mut parsed: Value = serde_json::from_str(&text)?;
 
-            // A response without a `data` array is a failure, never an empty
-            // tenant. Skipping it quietly -- which is what an `if let` here
-            // used to do -- reports success with zero resources, and the differ
-            // deletes every Azure node in the graph. Table-format results, a
-            // missing or null `data`, and an error body delivered with a 2xx
-            // all land here.
             let Some(data) = parsed.get_mut("data").and_then(|d| d.as_array_mut()) else {
                 return Err(format!(
                     "Azure Resource Graph returned no `data` array -- the response shape changed, \
@@ -102,7 +89,6 @@ impl AzureApiClient {
                 expected_total = Some(total);
             }
 
-            // Pagination handling for ARG
             if let Some(skip_token) = parsed.get_mut("$skipToken")
                 && !skip_token.is_null()
             {
@@ -120,10 +106,6 @@ impl AzureApiClient {
             break;
         }
 
-        // Only a shortfall matters. If `totalRecords` ever meant something
-        // other than "records matching this query", erring on more-than-claimed
-        // is harmless, while fewer-than-claimed is the silent partial read this
-        // whole guard exists to catch.
         if let Some(total) = expected_total
             && (all_results.len() as u64) < total
         {
@@ -139,8 +121,6 @@ impl AzureApiClient {
     }
 }
 
-/// A bounded slice of a response body, for error messages — an ARG payload can
-/// be megabytes and the point is only to show what shape came back.
 fn preview(body: &str) -> String {
     const MAX_CHARS: usize = 200;
     match body.char_indices().nth(MAX_CHARS) {
@@ -169,8 +149,6 @@ mod tests {
         })
     }
 
-    // Layer 1 — contract: an ARG row deserializes into the typed resource the
-    // projector switches on (`type`) and reads (`name`/`location`/`properties`).
     #[test]
     fn arg_row_deserializes_into_azure_resource() {
         let res: AzureResource = serde_json::from_value(vm_resource("vm1")).expect("deserializes");
@@ -186,8 +164,6 @@ mod tests {
         );
     }
 
-    // Layer 2 — HTTP replay: query_graph POSTs to ARG and returns the `data`
-    // rows. No `az login`, no network.
     #[tokio::test]
     async fn query_graph_returns_the_data_rows() {
         let server = MockServer::start().await;
@@ -224,9 +200,6 @@ mod tests {
             .map_err(|e| e.to_string())
     }
 
-    // The failure this guards: every one of these used to return `Ok` with zero
-    // rows, which reports a complete scan of an empty tenant -- and the differ
-    // deletes every Azure resource in the graph.
     #[tokio::test]
     async fn a_response_without_a_data_array_is_an_error_not_an_empty_tenant() {
         let shapes = [
@@ -251,7 +224,6 @@ mod tests {
         }
     }
 
-    // A tenant really can hold nothing, and that must stay a successful scan.
     #[tokio::test]
     async fn a_genuinely_empty_result_still_succeeds() {
         let rows = replay(json!({ "data": [], "totalRecords": 0, "$skipToken": null }))
@@ -271,9 +243,6 @@ mod tests {
         assert!(err.contains("4210"), "got: {err}");
     }
 
-    // ARG paginates via `$skipToken`; the loop must fetch page 2 and concatenate.
-    // `up_to_n_times(1)` makes the first mock answer once, then the fallback
-    // serves the final page.
     #[tokio::test]
     async fn query_graph_follows_skiptoken_pagination() {
         let server = MockServer::start().await;

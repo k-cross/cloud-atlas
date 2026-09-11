@@ -4,11 +4,9 @@ use crate::cloud::definition::{CloudflareCollection, ZoneId};
 use cloudflare::endpoints::dns::dns::DnsContent;
 
 pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollection) {
-    // Project Cloudflare Zones
     for zone in &data.zones {
         let zone_node = builder.get_or_add_node(Node::CloudflareZone(zone.id.as_str().into()));
 
-        // Find DNS records for this zone
         if let Some(records) = data.dns_records.get(&ZoneId(zone.id.clone())) {
             for record in records {
                 let record_node = builder.link_to(
@@ -17,7 +15,6 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                     Edge::Contains,
                 );
 
-                // Maps to the generic hostname
                 let hostname_node = builder.link_to(
                     record_node,
                     Node::GenericHostname(record.name.as_str().into()),
@@ -43,32 +40,26 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
         }
     }
 
-    // Project KV Namespaces
     for kv in &data.kv_namespaces {
         builder.get_or_add_node(Node::CloudflareKvNamespace(kv.id.as_str().into()));
     }
 
-    // Project R2 Buckets
     for r2 in &data.r2_buckets {
         builder.get_or_add_node(Node::CloudflareR2Bucket(r2.name.as_str().into()));
     }
 
-    // Project Durable Object Namespaces
     for dos in &data.durable_objects {
         builder.get_or_add_node(Node::CloudflareDurableObject(dos.id.as_str().into()));
     }
 
-    // Project D1 Databases
     for d1 in &data.d1_databases {
         builder.get_or_add_node(Node::CloudflareD1Database(d1.uuid.as_str().into()));
     }
 
-    // Project Workers and their Bindings
     for worker in &data.workers {
         let worker_node =
             builder.get_or_add_node(Node::CloudflareWorker(worker.script.as_str().into()));
 
-        // Find bindings for this worker
         if let Some(bindings) = data.worker_bindings.get(worker) {
             for binding in bindings {
                 match binding.binding_type.as_str() {
@@ -109,14 +100,12 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                         }
                     }
                     "secret_text" | "plain_text" => {
-                        // Attempt to extract external service connections (e.g. Postgres URIs)
                         if let Some(text) = binding.extra.get("text").and_then(|t| t.as_str())
                             && (text.starts_with("postgres://")
                                 || text.starts_with("postgresql://")
                                 || text.starts_with("mongodb://")
                                 || text.starts_with("mysql://"))
                         {
-                            // Extract the host/service part or just use the scheme + host
                             if let Ok(url) = url::Url::parse(text)
                                 && let Some(host) = url.host_str()
                             {

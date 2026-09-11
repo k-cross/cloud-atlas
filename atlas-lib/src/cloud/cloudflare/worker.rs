@@ -24,12 +24,8 @@ pub struct WorkerBinding {
     pub name: String,
     #[serde(rename = "type")]
     pub binding_type: String,
-
-    // KV Namespace
     pub namespace_id: Option<String>,
-    // R2 Bucket
     pub bucket_name: Option<String>,
-    // D1
     pub id: Option<String>,
 
     #[serde(flatten)]
@@ -59,7 +55,6 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // Layer 1 — contract: the `result` array items map to the id we key on.
     #[test]
     fn worker_script_deserializes_result_items() {
         let body = r#"[{"id":"my-worker","created_on":"2020-01-01T00:00:00Z","modified_on":null}]"#;
@@ -71,8 +66,6 @@ mod tests {
         );
     }
 
-    // Layer 2 — HTTP replay: the collector builds the right account-scoped path,
-    // sends the bearer token, and unwraps the `{ success, result }` envelope.
     #[tokio::test]
     async fn get_workers_unwraps_the_success_envelope() {
         let server = MockServer::start().await;
@@ -96,7 +89,6 @@ mod tests {
         assert_eq!(ids, ["w1", "w2"]);
     }
 
-    // The envelope's own failure flag must become an error even on HTTP 200.
     #[tokio::test]
     async fn get_workers_errors_when_envelope_reports_failure() {
         let server = MockServer::start().await;

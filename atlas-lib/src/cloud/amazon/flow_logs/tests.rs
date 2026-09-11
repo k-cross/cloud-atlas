@@ -1,12 +1,3 @@
-//! Tier-2 ingestion coverage: canned VPC Flow Log objects in, normalized
-//! `FlowObservation`s out, and — for the transport — a replayed SQS + S3
-//! conversation. No credentials, no network.
-//!
-//! The load-bearing assertions are the two the record format makes easy to get
-//! wrong: that a *custom* field order is read from the object's own header
-//! rather than assumed, and that the identities the adapter attributes are the
-//! ones the projector keys the graph by.
-
 use super::stream::{FlowLogQueue, decompress, objects};
 use super::*;
 use crate::Settings;
@@ -22,16 +13,12 @@ use std::io::Write;
 
 const SCOPE: &str = "us-east-1";
 
-/// Parse with no record cap — every test here feeds a handful of lines, and
-/// the cap has its own test.
 fn parsed(text: &str) -> Parsed {
     parse(text, SCOPE, usize::MAX)
 }
 const BUCKET: &str = "globex-flow-logs";
 const KEY: &str = "AWSLogs/111111111111/vpcflowlogs/us-east-1/2026/09/04/flows.log.gz";
 
-/// The version-2 default: no header, and the field order AWS uses when nobody
-/// chose one.
 fn default_record(src: &str, dst: &str, action: &str) -> String {
     format!(
         "2 111111111111 eni-0abc {src} {dst} 51234 443 6 24 4800 1788436740 1788436800 {action} OK"
@@ -68,10 +55,6 @@ fn a_rejected_record_keeps_its_verdict() {
     assert_eq!(observations[0].action, Some(FlowAction::Rejected));
 }
 
-/// The whole reason the header is read rather than assumed. This layout puts
-/// `bytes` where the default order puts `srcport`; parsing it against the
-/// default would silently file a port number as a byte count and an address as
-/// a protocol.
 #[test]
 fn a_custom_field_order_is_read_from_the_objects_own_header() {
     let object = "\
@@ -104,9 +87,6 @@ version srcaddr dstaddr end
     assert_eq!(observations.len(), 1, "the header line is not a flow");
 }
 
-/// A format chosen to minimise log volume may leave the verdict out. The
-/// traffic still happened — that is the liveness signal — and calling it
-/// accepted would claim something the record never said.
 #[test]
 fn a_format_without_a_verdict_still_yields_liveness() {
     let object = "\
@@ -119,9 +99,6 @@ version srcaddr dstaddr packets bytes end
     assert_eq!(observations[0].observed_at, 1_788_436_800_000);
 }
 
-/// `NODATA` means the interface had no traffic in the window and `SKIPDATA`
-/// means AWS dropped records. Neither is evidence of a flow, and neither is a
-/// parse problem — counting them either way would be wrong.
 #[test]
 fn records_with_no_data_are_neither_traffic_nor_failures() {
     let object = format!(
@@ -141,9 +118,6 @@ fn records_with_no_data_are_neither_traffic_nor_failures() {
     assert_eq!(unusable, 0, "an empty window is not a failure");
 }
 
-/// Both identities come straight off the record, and both have to be keyed the
-/// way the projector keys them — freshness filed under a key no node carries is
-/// freshness nobody can see.
 #[test]
 fn a_record_attributes_both_identities_the_way_the_projector_keys_them() {
     let object = "\
@@ -173,10 +147,6 @@ version srcaddr dstaddr end instance-id interface-id
     );
 }
 
-/// `interface-id` is the only identity in the *version-2 default* field set, so
-/// it is the one every flow log carries without the operator opting into
-/// anything. It is also the only one present for an interface that belongs to a
-/// NAT gateway or a load balancer rather than an instance.
 #[test]
 fn the_default_field_set_still_attributes_through_the_interface_alone() {
     let Parsed { observations, .. } =
@@ -189,9 +159,6 @@ fn the_default_field_set_still_attributes_through_the_interface_alone() {
     );
 }
 
-/// Attribution is not creation: the overlay admits a typed resource only when a
-/// scan already found it, so an interface the graph has never heard of buys
-/// freshness on nothing rather than a node built from an id.
 #[test]
 fn an_unknown_interface_earns_no_node() {
     let Parsed { observations, .. } =
@@ -206,9 +173,6 @@ fn an_unknown_interface_earns_no_node() {
     assert!(!graph.contains(&Node::AwsEc2Eni("eni-0abc".into())));
 }
 
-/// Without addresses there are no endpoints and without an end time there is no
-/// freshness, so such an object yields nothing — and must say so rather than
-/// looking like a quiet network.
 #[test]
 fn a_layout_that_cannot_place_a_flow_loses_the_whole_object_and_says_so() {
     let object = "\
@@ -225,9 +189,6 @@ version srcport dstport protocol
     assert_eq!(parsed.unusable, 0, "no individual record was at fault");
 }
 
-/// A busy VPC writes millions of records per window. The cap has to stop the
-/// parser *allocating* them, not trim a list that has already been built — and
-/// it still has to say how much went unread.
 #[test]
 fn records_past_the_cap_are_counted_but_never_materialized() {
     let object: String = (0..10)
@@ -242,10 +203,6 @@ fn records_past_the_cap_are_counted_but_never_materialized() {
     assert_eq!(parsed.unusable, 0);
 }
 
-/// The discriminator has to survive a header-less object whose first field is
-/// not `version`. A twelve-digit account id is not a `u32`, so testing only
-/// that would read the first record as a header, match no fields, and discard
-/// the entire object as one unreadable line.
 #[test]
 fn a_headerless_record_starting_with_an_account_id_is_not_read_as_a_header() {
     let object = "111111111111 eni-0abc 10.10.1.10 198.51.100.10 1788436800";
@@ -277,8 +234,6 @@ fn a_truncated_line_is_dropped_and_counted() {
     assert_eq!(unusable, 1);
 }
 
-/// End to end at the record level: the parsed flows become the `TrafficFlow`
-/// edges a client renders, over the topology a full scan produced.
 #[test]
 fn parsed_flows_become_traffic_edges_over_the_scanned_topology() {
     let Parsed { observations, .. } =
@@ -299,8 +254,6 @@ fn parsed_flows_become_traffic_edges_over_the_scanned_topology() {
         &Edge::TrafficFlow
     ));
 }
-
-// ---- transport --------------------------------------------------------------
 
 fn notification(bucket: &str, key: &str) -> String {
     serde_json::json!({
@@ -326,9 +279,6 @@ fn a_notification_names_the_object_it_points_at() {
     assert!(report.is_complete());
 }
 
-/// S3 form-encodes keys in its notifications. Fetching the raw key would 404 on
-/// every object whose prefix contains an encoded character — and flow-log keys
-/// are built from account, region and timestamp, so it happens routinely.
 #[test]
 fn an_encoded_object_key_is_decoded_before_it_is_fetched() {
     let mut report = CollectionReport::default();
@@ -357,8 +307,6 @@ fn an_sns_wrapped_notification_is_unwrapped() {
     assert!(report.is_complete());
 }
 
-/// S3 posts this the moment a notification is configured. Reporting it would
-/// put a permanent, meaningless failure in the feed's health.
 #[test]
 fn the_buckets_configuration_test_message_is_not_a_failure() {
     let body = r#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"globex-flow-logs"}"#;
@@ -370,8 +318,6 @@ fn the_buckets_configuration_test_message_is_not_a_failure() {
     assert!(report.is_complete(), "{}", report.summary());
 }
 
-/// A message that is not an S3 notification at all is a lost object, and losing
-/// it silently is the thing that must not happen.
 #[test]
 fn an_unreadable_message_is_reported_as_malformed() {
     let mut report = CollectionReport::default();
@@ -385,7 +331,6 @@ fn an_unreadable_message_is_reported_as_malformed() {
     );
 }
 
-/// No limit worth hitting — the cap has its own test.
 const ROOMY: u64 = 1 << 20;
 
 #[test]
@@ -403,7 +348,8 @@ fn a_cut_that_lands_inside_a_character_still_yields_the_part_before_it() {
     let text = "é".repeat(100);
     let limit = 51;
 
-    let out = decompress(&gzip(&text), limit).expect("a mid-character cut must not lose the object");
+    let out =
+        decompress(&gzip(&text), limit).expect("a mid-character cut must not lose the object");
 
     assert!(out.truncated);
     assert_eq!(out.text, "é".repeat(25));
@@ -420,11 +366,6 @@ fn a_plain_text_object_is_read_as_is() {
     );
 }
 
-/// The compressed size bounds nothing: how far a member expands is decided by
-/// whoever wrote it, so a modest object can still ask for gigabytes of `String`.
-/// The cap has to sit on the output, and a cut has to be reported — a partial
-/// read that passed for a small object would silently lose every record after
-/// the cut.
 #[test]
 fn decompression_stops_at_the_limit_and_reports_the_cut() {
     let text = "x".repeat(4096);
@@ -435,8 +376,6 @@ fn decompression_stops_at_the_limit_and_reports_the_cut() {
     assert!(out.truncated);
 }
 
-/// Naming the third delivery format beats the "invalid utf-8" a raw decode
-/// would produce, since the fix is a configuration change.
 #[test]
 fn a_parquet_object_says_what_is_wrong_with_it() {
     let error = decompress(b"PAR1\x00\x00", ROOMY).expect_err("not supported");
@@ -444,9 +383,6 @@ fn a_parquet_object_says_what_is_wrong_with_it() {
     assert!(error.contains("Parquet"), "{error}");
 }
 
-/// The whole Tier-2 path with nothing stubbed but the wire: a queue message
-/// names an object, the object's records become observations, and the
-/// observations become the traffic edges a client renders.
 #[tokio::test]
 async fn a_queued_object_reaches_the_graph_as_traffic_edges() {
     let object = format!(
@@ -535,9 +471,6 @@ async fn an_object_that_was_read_but_makes_no_sense_is_deleted_anyway() {
     );
 }
 
-/// A queue we cannot read makes liveness stale, which is a real problem worth
-/// reporting — but it is never a reason to stop trusting the *scan* about what
-/// exists, so the caller keeps this report apart from the scan's.
 #[tokio::test]
 async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
     let http = replay(vec![(403, br#"{"__type":"AccessDenied"}"#.to_vec())]);
@@ -554,8 +487,6 @@ async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
     );
 }
 
-// ---- harness ----------------------------------------------------------------
-
 const OK: u16 = 200;
 
 fn fixture_settings() -> Settings {
@@ -568,8 +499,6 @@ fn gzip(text: &str) -> Vec<u8> {
     encoder.finish().expect("gzip")
 }
 
-/// Canned responses handed back in order — one per request the SDK makes, which
-/// here is receive-message, get-object, delete-message-batch.
 fn replay(responses: Vec<(u16, Vec<u8>)>) -> StaticReplayClient {
     let events = responses
         .into_iter()
