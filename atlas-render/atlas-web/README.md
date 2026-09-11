@@ -6,8 +6,9 @@ The web frontend for Cloud Atlas. This is a SvelteKit Single Page Application (S
 
 - **SvelteKit**: Manages the application structure, routing, and sleek UI overlay. (Server-Side Rendering is intentionally disabled since the core visualization requires browser-native WebGL contexts).
 - **Sigma.js**: Renders the large-scale property graph dynamically using WebGL.
-- **atlas-layout-wasm**: A WebAssembly port of the backend's ForceAtlas2 physics layout engine. Computes complex node forces directly in the browser for high performance.
-- **WebSocket**: Connects to `atlas-server` to ingest continuous live snapshots and incremental graph patches from the cloud environment.
+- **atlas-layout-wasm**: A WebAssembly port of the backend's ForceAtlas2 physics layout engine. Computes complex node forces directly in the browser for high performance. `bun run wasm` builds it into `static/pkg/`, which is what `GraphController.ts` imports.
+- **WebSocket**: Connects to `atlas-server` to ingest continuous live snapshots and incremental graph patches from the cloud environment. With no server (or `?static` in the URL) it falls back to a one-shot `GET /snapshot.json`, served out of `static/`.
+- **Traffic overlay**: The snapshot's `observations` list (the Tier-2 liveness overlay) is drawn on top of the topology — flow edges colored by verdict and log-scaled by packet count, a pulsing freshness halo on every node heard from, and packets animating as beads along each flow edge on a separate `canvas.traffic-layer` above Sigma's own (`lib/traffic.ts`, `lib/TrafficLayer.ts`).
 
 ## Development
 
@@ -39,8 +40,10 @@ bun run dev
 
 Two layers:
 
-- **Unit** (`bun run test:unit`) — pure logic in `src/lib/*.test.ts` (Bun test runner, no DOM): snapshot→graphology translation, incremental `applyPatch`, `snapshotFromGraph` round-trip, provider bucketing, degree sizing.
-- **End-to-end** (`bun run test:e2e`) — Playwright/Chromium against the real pipeline (SvelteKit + wasm layout + Sigma/WebGL), both data paths: `?static` (a fixture `global-setup` writes) and live over WebSocket against `atlas-server --demo`. Covers node/edge counts, the WebGL canvas, the legend, layout settling, reheat, the snapshot-version-mismatch overlay, the zero-width-container guard, the **settled-graph pixel-stability** (shake) regression, live patch application, and **warm-start node pinning**.
+- **Unit** (`bun run test:unit`, 38 tests) — pure logic in `src/lib/*.test.ts` (Bun test runner, no DOM): snapshot→graphology translation, incremental `applyPatch`, `snapshotFromGraph` round-trip, observation/expiry application (`graph.test.ts`); provider bucketing, edge-kind colors, degree sizing (`style.test.ts`); flow extraction, traffic summaries, freshness decay, and the log-scaled bead counts/transit times of the packet animation (`traffic.test.ts`).
+- **End-to-end** (`bun run test:e2e`, 14 tests) — Playwright/Chromium against the real pipeline (SvelteKit + wasm layout + Sigma/WebGL), both data paths: `?static` (a fixture `global-setup` writes into `static/snapshot.json`) and live over WebSocket against `atlas-server --demo`. Covers node/edge counts, the WebGL canvas, the legend, layout settling, reheat, the observed-traffic panel, the snapshot-version-mismatch overlay, the zero-width-container guard, the **settled-graph pixel-stability** (shake) regression, live patch application, and **warm-start node pinning**.
+
+  The traffic canvas is deliberately excluded from the shake regression — its motion *is* the feature — and a separate test asserts that it does change frame to frame while the layout underneath stays still.
 
 ```sh
 bun run test:unit   # fast, no build

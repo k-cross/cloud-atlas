@@ -1,9 +1,10 @@
 # atlas-render
 
-Interactive rendering stack for cloud-atlas (Phases 1–2 of
+Interactive rendering stack for cloud-atlas (Phases 1–3 of
 `docs/graph_rendering_design.md`): a force-directed layout engine that
 compiles to WebAssembly, plus a Sigma.js (WebGL) web frontend that renders
-it live in the browser.
+it live in the browser — topology from the graph, and the Tier-2 liveness
+overlay drawn on top of it as animated traffic.
 
 This is a **separate cargo workspace** on purpose. It never depends on
 `atlas-lib` — the cloud SDK dependency tree does not build for
@@ -77,18 +78,28 @@ root — see the root [`README.md`](../README.md) and `CLAUDE.md`.
   `LayoutEngine` to JavaScript. Positions cross the boundary as a
   `Float32Array` (zero-copy `positionsView()` or detached
   `positionsCopy()`), consumed by `atlas-web`.
-- **`atlas-web/`** — Sigma.js (WebGL) frontend, a bun app rather than a
-  cargo crate. Each animation frame it steps the wasm engine, copies the
-  position buffer into graphology node attributes, and lets Sigma redraw.
-  Nodes are colored by provider (derived from the snapshot `kind` prefix)
-  and sized by degree; a panel shows live layout status, per-provider
-  counts, and a reheat button.
+- **`atlas-web/`** — SvelteKit + Sigma.js (WebGL) frontend, a bun app
+  rather than a cargo crate. Each animation frame it steps the wasm engine,
+  copies the position buffer into graphology node attributes, and lets Sigma
+  redraw. Nodes are colored by provider (derived from the snapshot `kind`
+  prefix) and sized by degree; panels show live layout status, per-provider
+  counts, observed traffic, and a reheat button.
+
+  The `observations` overlay is *rendered*, not merely carried: a flow edge
+  takes its verdict's color and a log-scaled width from its packet count,
+  every node heard from gets a pulsing freshness halo, and packets animate
+  along each flow edge as bright beads on a separate `canvas.traffic-layer`
+  above Sigma's own (a bead in the edge's own hue disappears into a wide
+  edge). Bead count and transit time are both log-scaled off `packets` —
+  real volumes span orders of magnitude, so a linear mapping either
+  saturates at the cap or leaves every flow at one bead.
 
 ## Build & test
 
 ```sh
-# Rust unit tests (atlas-layout, atlas-layout-wasm)
-cargo test
+# Rust unit tests (atlas-layout, atlas-layout-wasm) — run from THIS workspace;
+# the root `cargo nextest run` does not reach it
+cargo nextest run --all-targets
 
 # Check wasm compilation without the JS glue
 cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown --release
@@ -100,15 +111,15 @@ dependency — no separate global install needed):
 ```sh
 cd atlas-web
 bun install
-bun run wasm       # wasm-pack build → atlas-web/pkg/ (JS glue + .wasm)
+bun run wasm       # wasm-pack build → atlas-web/static/pkg/ (JS glue + .wasm)
 bun dev            # http://localhost:4680
 ```
 
 By default `bun dev` (i.e. `atlas-web`) connects live to `atlas-server` over
 WebSocket (`ws://<host>:4681/ws`) — start that first, or use `?static` to fall
-back to a one-shot fetch of `atlas.json` from the repo root (or
-`multi_cloud_demo.json` if that's absent; pass an explicit path with
-`bun serve.ts path/to.json`).
+back to a one-shot `GET /snapshot.json`, which SvelteKit serves from
+`atlas-web/static/snapshot.json`. Put a snapshot there to use that path (the
+e2e `global-setup` copies `multi_cloud_demo.json` into it).
 
 Easiest end-to-end path, live and credential-free, from the repo root:
 
@@ -129,10 +140,11 @@ Or manually, static (no server):
 
 ```sh
 # 1. Generate the demo snapshot (repo root)
-cargo run --example demo
+cargo run -p atlas-lib --example demo        # or: cargo xtask demo
 # 2. Verify layout engine natively
 cargo run --example layout_demo -- ../multi_cloud_demo.json   # inside atlas-render/
-# 3. View in browser with the static fallback
+# 3. Serve it as the static fallback
+cp ../multi_cloud_demo.json atlas-web/static/snapshot.json
 cd atlas-web && bun dev
 # then open http://localhost:4680/?static
 ```
@@ -154,13 +166,14 @@ shape already fits it.
 
 ## Driving it from JS
 
-`atlas-web/src/main.ts` is the real integration; the shape of the loop:
+`atlas-web/src/lib/GraphController.ts` is the real integration; the shape of
+the loop:
 
 ```js
-import init, { LayoutEngine } from "./pkg/atlas_layout_wasm.js";
+import init, { LayoutEngine } from "../../static/pkg/atlas_layout_wasm.js";
 
 await init();
-const engine = new LayoutEngine(await (await fetch("atlas.json")).text());
+const engine = new LayoutEngine(await (await fetch("/snapshot.json")).text());
 function frame() {
   engine.step(5);                              // physics budget per frame
   draw(engine.positionsView());                // zero-copy Float32Array

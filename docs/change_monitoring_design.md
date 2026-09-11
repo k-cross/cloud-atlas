@@ -2,6 +2,12 @@
 
 **How Cloud Atlas detects change in each cloud, and how it becomes a push-based live backend.**
 
+> **Reading note.** §§1–8 are the original evaluation, written when Cloud Atlas
+> was a batch tool, and are kept in their original tense as the *rationale* for
+> the design. For what is actually built, read §9 (the phase table and the two
+> "as built" notes under it) and §10 (what is still open). Phases 1–4 are Done;
+> Phase 5 — Tiers 1 and 2 for GCP, Azure and Cloudflare — is not.
+
 ## 1. Executive Summary
 
 Cloud Atlas today is a batch tool. `AtlasEngine::run_daemon` polls on a fixed
@@ -67,7 +73,11 @@ backstop, not the primary live feed.
   graph plus a **differ** that compares the freshly projected graph against the
   live one and produces a change set (see §7 change model). This is a prerequisite
   for *every* other tier — even event streams need a reconciliation pass to
-  correct drift.
+  correct drift. *(Built — `atlas::patch::diff`. The daemon and the server both
+  install scans through it; neither wipes. What the doc did not anticipate is
+  that the differ also needs to be told when a scan is **incomplete**, or a
+  failed read is indistinguishable from a deletion — hence `CollectionReport`,
+  `carry_forward` and `Retention`.)*
 
 ## 4. Mechanism B — Network Flow Records (the user's hypothesis)
 
@@ -227,7 +237,10 @@ pushes deltas. This is the server the user asked about.
   explicit id→index index that survives property updates.
 - **Liveness as node/edge properties**, updated by Tier 2 without touching
   topology — matches the `TrafficFlow` edge and health-overlay direction already
-  in the rendering and inference docs.
+  in the rendering and inference docs. *(Built, but **not** as properties on the
+  node or edge — see the Tier-2 note under §9. `Node`/`Edge` are the graph's
+  identity types, so liveness lives beside the graph in `FlowIndex`, keyed by the
+  same stable wire key.)*
 
 ## 8. Evaluation Matrix
 

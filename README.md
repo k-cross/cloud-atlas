@@ -12,7 +12,8 @@ Cloud Atlas builds a **Strongly Typed Semantic Graph**:
 - **Edges**: Relationships go beyond simple containment, leveraging strict semantic edges like `AttachedTo`, `HasIp`, and `RoutesTo` to deeply mimic network topology. 
 - **Graph Storage**: The graph is stored entirely in memory using `petgraph`, enabling extremely fast deduplication and continuous traversal.
 - **Core Orchestration**: Driven by the `AtlasEngine`, which handles concurrent fetching, graceful error handling, and long-living graph state management for continuous daemon loops.
-- **Live Backend** (`atlas-server/`): a long-running server that owns a persistent copy of the graph, reconciles it against the providers on an interval, diffs each scan by a stable per-resource key, and pushes the resulting add/remove patches to connected frontends over WebSocket. See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
+- **Live Backend** (`atlas-server/`): a long-running server that owns a persistent copy of the graph, reconciles it against the providers on an interval, diffs each scan by a stable per-resource key, and pushes the resulting add/remove patches to connected frontends over WebSocket. Change detection is a three-tier hybrid — cloud event streams (Tier 1) for near-real-time topology, flow logs (Tier 2) for a liveness overlay, and full-scan polling (Tier 3) as the reconciliation backstop. See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
+- **Liveness Overlay**: observed traffic lives *beside* the graph in a bounded, expiring `FlowIndex`, never inside `Node`/`Edge` (both are identity types). `Edge::TrafficFlow` says only "traffic was seen here"; the packet/byte counters and freshness timestamps travel on the snapshot's `observations` list, keyed by the same stable resource key.
 - **Interactive Rendering** (`atlas-render/`): a separate cargo + bun workspace — a WebAssembly force-directed layout engine feeding a Sigma.js WebGL frontend, fed live by `atlas-server`. See [`docs/graph_rendering_design.md`](docs/graph_rendering_design.md) and [`atlas-render/README.md`](atlas-render/README.md).
 
 ## Goals
@@ -30,14 +31,19 @@ Cloud Atlas builds a **Strongly Typed Semantic Graph**:
 - [ ] Push incremental updates instead of full-graph rescans
     - [x] Persistent graph + differ (`atlas_lib::atlas::patch::diff`)
     - [x] Live server pushing patches to the frontend over WebSocket
-    - [ ] Cloud-native event/audit streams as the primary change feed (today it's diffed full-scan polling)
+    - [ ] Cloud-native event/audit streams as the primary change feed
+        - [x] AWS — EventBridge/Config/CloudTrail over SQS (`--aws-event-queue`)
+        - [ ] GCP asset feeds, Azure Event Grid; Cloudflare stays on fast poll
+- [ ] Data-plane liveness overlay
+    - [x] AWS VPC Flow Logs → S3 → SQS (`--aws-flow-log-queue`), rendered as animated traffic
+    - [ ] GCP Log Router → Pub/Sub, Azure VNet flow logs
 - [ ] Extendable for on-prem use-cases
 
 ### Status
 
 The best tool I know of for exploring the dot file so far has been [gephi](https://gephi.org/); the interactive renderer in `atlas-render/` is now the faster path for live exploration, especially when backed by `atlas-server`.
 The graph can now fetch resources concurrently across multiple AWS regions, GCP projects, and Azure subscriptions, merging them into a single comprehensive in-memory model. Thanks to shared pivot nodes (`GenericHostname` and `GenericIpAddress`), Cloud Atlas natively visualizes cross-cloud connectivity (e.g. AWS Route53 routing directly to Azure App Services or GCP Cloud Run).
-Change detection is currently diffed full-scan polling; cloud-native event streams (EventBridge, Cloud Asset Inventory, Event Grid) are the next step toward sub-minute latency — see the phased plan in `docs/change_monitoring_design.md`.
+Change detection is a three-tier hybrid: an AWS control-plane event feed (EventBridge/Config/CloudTrail off an SQS queue) drives topology in near-real-time, VPC Flow Logs decorate it with observed traffic and node freshness, and full-scan polling reconciles drift on an interval. The remaining clouds (GCP Cloud Asset Inventory, Azure Event Grid) still rely on polling alone — see the phased plan in `docs/change_monitoring_design.md`.
 
 ## AWS Notes
 
@@ -94,9 +100,14 @@ cargo run -- --regions us-east-1 --azure-subscriptions my-subscription-1 my-subs
 # Run as a continuously updating daemon (polls every 60s)
 cargo run -- --daemon
 
-# Include all default mappings and enable verbose output
-cargo run -- --all --verbose
+# Enable verbose output
+cargo run -- --verbose
 ```
+
+The daemon never wipes its graph: each tick diffs the fresh scan against the
+live one, and a provider that could not be read has its resources carried
+forward rather than deleted, so a transient outage never looks like a mass
+deletion.
 
 ## Running the Live Stack (server + renderer)
 
@@ -116,7 +127,16 @@ cargo xtask test [--e2e]  # every test suite across the whole repo, in order
 
 `atlas-server` is the same provider collection as the CLI, but long-running: it
 never wipes its graph, diffs each reconciliation scan, and pushes incremental
-patches to the frontend over WebSocket instead of writing a static file. See
+patches to the frontend over WebSocket instead of writing a static file. It also
+consumes the two live AWS feeds when you point it at them:
+
+```bash
+cargo run -p atlas-server -- --regions us-east-1 \
+  --aws-event-queue    https://sqs.us-east-1.amazonaws.com/111/atlas-events \
+  --aws-flow-log-queue https://sqs.us-east-1.amazonaws.com/111/atlas-flows
+```
+
+See
 [`atlas-server/README.md`](atlas-server/README.md) for the standalone server and
 [`atlas-render/README.md`](atlas-render/README.md) for the rendering stack;
 `CLAUDE.md`'s "Dev Orchestration" section has the full `cargo xtask` reference.

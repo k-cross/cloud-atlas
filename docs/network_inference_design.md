@@ -14,9 +14,11 @@ We use the property graph model to organically merge disparate cloud environment
 
 ## 2. Inferring External Services
 For services without direct API integration, we infer their presence using security boundaries and DNS.
-- **Security Boundaries**: We parse outbound rules in AWS Security Groups, GCP Firewalls, and Azure Network Security Groups, mapping explicit CIDRs to `GenericIpAddress` nodes via `Edge::RoutesTo`.
+- **Security Boundaries**: We parse outbound rules in AWS Security Groups, GCP Firewalls, and Azure Network Security Groups, mapping explicit CIDRs to `GenericIpAddress` nodes via `Edge::RoutesTo`. Ranges wide enough to say nothing (`0.0.0.0/0` and friends) are dropped by `atlas::util::is_large_cidr` rather than pulling a meaningless pivot into the graph.
 - **Cloud-Specific Abstractions**: Mappings that don't resolve to raw IPs (like Azure Service Tags) are given dedicated types (e.g. `Node::AzureServiceTag`) to prevent generic node pollution.
-- **Graph path**: `AwsEc2SecurityGroup -> RoutesTo -> GenericIpAddress -> ResolvesTo -> ExternalService`.
+- **Graph paths, as built**: `AwsEc2SecurityGroup -> RoutesTo -> GenericIpAddress` for egress rules, and `CloudflareWorker -> ConnectsTo -> ExternalService` where a worker's secret/plain-text binding contains a URL. The originally sketched
+  `SecurityGroup -> RoutesTo -> GenericIpAddress -> ResolvesTo -> ExternalService`
+  chain is **not** built: nothing today resolves a raw CIDR to a named third-party service, so `Node::ExternalService` is only ever produced where a configuration literally names one.
 
 ## 3. Lightweight Network Telemetry
 **Built** — `atlas-lib/src/atlas/flow.rs`, Tier 2 of `change_monitoring_design.md`.
@@ -44,3 +46,16 @@ For services without direct API integration, we infer their presence using secur
   twin. An observation that lapses stops being folded into the scan graph, and
   the ordinary Tier-3 differ removes its edge — this tier never deletes anything
   itself.
+
+### Known gap: observed traffic does not yet confirm §2's inferred reachability
+
+A security-group rule projects `GenericIpAddress("198.51.100.0/24")`; a flow
+record projects `GenericIpAddress("198.51.100.10")`. Generic-node identity is a
+byte-exact `HashMap<Node, NodeIndex>` lookup, so the two never meet and "a flow
+log proves the rule is actually used" does not work today. Closing it needs CIDR
+*containment* — a prefix trie over the CIDR-shaped generic nodes, rebuilt per
+scan — plus a decision on what edge kind owns the resulting link and which tier
+is allowed to expire it. Tracked as an open question in
+`docs/change_monitoring_design.md` §10, alongside the related problem that
+generic-node values are never canonicalised (`2001:db8::1` and
+`2001:0db8:0000:…` are two different pivots).
