@@ -533,8 +533,9 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
     }
 
     // Same two-sources-for-one-fact shape as the fields above. The
-    // relationships list gives ids without subnets, which is enough: the ENI
-    // then attaches to the instance's own subnet.
+    // relationships list gives ids *without* subnets, so these ENIs land as
+    // nodes on the instance with no `AttachedTo` edge — the full scan reads
+    // each interface's own subnet, and guessing here would contradict it.
     let mut network_interfaces: Vec<EniFacts<'_>> = config
         .network_interfaces
         .as_deref()

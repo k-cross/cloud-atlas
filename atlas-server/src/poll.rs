@@ -361,7 +361,7 @@ async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
         for observation in &batch.observations {
             flows.observe(observation);
         }
-        let context = FlowIndex::context(&live, &batch.observations);
+        let context = flows.context(&live, &batch.observations);
         let mut patch = merge_additions(&mut live, &context);
         patch.observations = flows.drain_observations();
         // Drained together with the observations, never left for the next

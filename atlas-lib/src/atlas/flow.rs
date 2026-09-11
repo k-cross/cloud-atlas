@@ -324,12 +324,22 @@ impl FlowIndex {
         builder.merge(&context);
     }
 
-    /// The flow edges from `observations` that `live` can accept, as a subgraph
-    /// ready to be merged. This is the between-scans path: a batch arrives, its
-    /// edges go straight into the live graph, and clients see the traffic
-    /// without waiting for the next reconciliation.
-    pub fn context(live: &GraphBuilder, observations: &[FlowObservation]) -> Graph<Node, Edge> {
-        subgraph(live, observations.iter().map(|o| (&o.src, &o.dst)))
+    /// The flow edges from `observations` that `live` can accept *and* this
+    /// index still holds, as a subgraph ready to be merged. This is the
+    /// between-scans path: a batch arrives, its edges go straight into the live
+    /// graph, and clients see the traffic without waiting for the next
+    /// reconciliation. Filtering by what survived [`Self::observe`] is what
+    /// keeps `capacity` a real ceiling on how far the overlay can inflate the
+    /// twin, since one object can carry many times the budget.
+    pub fn context(&self, live: &GraphBuilder, observations: &[FlowObservation]) -> Graph<Node, Edge> {
+        let retained: HashSet<(&Node, &Node)> = self.flows.keys().map(|(a, b)| (a, b)).collect();
+        subgraph(
+            live,
+            observations
+                .iter()
+                .map(|o| (&o.src, &o.dst))
+                .filter(|pair| retained.contains(pair)),
+        )
     }
 
     /// Everything currently observed, for a full snapshot.
@@ -390,11 +400,12 @@ impl FlowIndex {
     fn evict(&mut self) {
         let low_water = self.capacity - self.capacity / 4;
         if self.flows.len() > self.capacity {
-            let cutoff = nth_oldest(self.flows.values().map(|s| s.last_seen), low_water);
+            let (cutoff, mut ties) =
+                eviction_cut(self.flows.values().map(|s| s.last_seen), low_water);
             let lapsed = &mut self.lapsed;
             let dirty = &mut self.dirty_flows;
             self.flows.retain(|pair, stats| {
-                let keep = stats.last_seen > cutoff;
+                let keep = survives(stats.last_seen, cutoff, &mut ties);
                 if !keep {
                     lapsed.push(flow_key(pair));
                     dirty.remove(pair);
@@ -403,11 +414,12 @@ impl FlowIndex {
             });
         }
         if self.resources.len() > self.capacity {
-            let cutoff = nth_oldest(self.resources.values().map(|s| s.last_seen), low_water);
+            let (cutoff, mut ties) =
+                eviction_cut(self.resources.values().map(|s| s.last_seen), low_water);
             let lapsed = &mut self.lapsed;
             let dirty = &mut self.dirty_resources;
             self.resources.retain(|node, stats| {
-                let keep = stats.last_seen > cutoff;
+                let keep = survives(stats.last_seen, cutoff, &mut ties);
                 if !keep {
                     lapsed.push(node_key(node));
                     dirty.remove(node);
@@ -425,6 +437,23 @@ impl FlowIndex {
 ///
 /// A budget of zero keeps nothing, which is how an operator turns the overlay
 /// off outright.
+fn eviction_cut(last_seen: impl Iterator<Item = i64> + Clone, keep: usize) -> (i64, usize) {
+    let cutoff = nth_oldest(last_seen.clone(), keep);
+    let newer = last_seen.filter(|seen| *seen > cutoff).count();
+    (cutoff, keep.saturating_sub(newer))
+}
+
+fn survives(last_seen: i64, cutoff: i64, ties: &mut usize) -> bool {
+    if last_seen > cutoff {
+        return true;
+    }
+    if last_seen == cutoff && *ties > 0 {
+        *ties -= 1;
+        return true;
+    }
+    false
+}
+
 fn nth_oldest(last_seen: impl Iterator<Item = i64>, keep: usize) -> i64 {
     if keep == 0 {
         return i64::MAX;
@@ -827,6 +856,43 @@ mod tests {
         assert!(index.observations().iter().any(|o| o.key == newest));
     }
 
+    #[test]
+    fn eviction_survives_a_batch_that_shares_one_timestamp() {
+        let capacity = 100;
+        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
+
+        for i in 0..=capacity as i64 {
+            index.observe(&flow("10.0.0.1", &format!("203.0.113.{i}"), T0));
+        }
+
+        let low_water = capacity - capacity / 4;
+        assert_eq!(
+            index.flow_count(),
+            low_water,
+            "an all-ties batch should trim to the low-water mark, not empty the index"
+        );
+    }
+
+    #[test]
+    fn the_merge_context_never_exceeds_what_the_index_kept() {
+        let capacity = 20;
+        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
+        let observations: Vec<FlowObservation> = (0..capacity as i64 * 5)
+            .map(|i| flow("10.0.0.1", &format!("203.0.113.{i}"), T0 + i))
+            .collect();
+        for observation in &observations {
+            index.observe(observation);
+        }
+
+        let context = index.context(&estate(), &observations);
+        let flow_edges = context
+            .edge_weights()
+            .filter(|e| **e == Edge::TrafficFlow)
+            .count();
+        assert_eq!(flow_edges, index.flow_count());
+        assert!(flow_edges <= capacity);
+    }
+
     /// The overlay is folded into a graph the frontend compares byte-for-byte;
     /// HashMap iteration order must not leak into it.
     #[test]
@@ -854,7 +920,12 @@ mod tests {
         let mut typed = flow("10.0.0.1", "203.0.113.7", T0);
         typed.dst = Node::AwsEc2Eni("i-nowhere".into());
 
-        let context = FlowIndex::context(&live, &[flow("10.0.0.1", "198.51.100.10", T0), typed]);
+        let mut index = FlowIndex::default();
+        let observations = [flow("10.0.0.1", "198.51.100.10", T0), typed];
+        for observation in &observations {
+            index.observe(observation);
+        }
+        let context = index.context(&live, &observations);
 
         assert_eq!(context.edge_count(), 1, "only the admissible flow crosses");
     }

@@ -564,14 +564,18 @@ pub(crate) fn project_instance(
             // Instance -> HasIp -> ENI -> AttachedTo -> Subnet
             let eni_idx = builder.link_to(idx, Node::AwsEc2Eni(eni.id.into()), Edge::HasIp);
             // The interface's own subnet wins over the instance's primary one,
-            // and lands under the same VPC either way.
+            // and lands under the same VPC either way. An interface that did
+            // not report one attaches to nothing: a second ENI is usually in a
+            // *different* subnet, so substituting the instance's would
+            // contradict the scan and flap.
             let attached = match eni.subnet_id {
                 Some(subnet_id) if Some(subnet_id) != facts.subnet_id => Some(builder.link_to(
                     vpc_idx,
                     Node::AwsEc2Subnet(subnet_id.into()),
                     Edge::Contains,
                 )),
-                _ => subnet_idx,
+                Some(_) => subnet_idx,
+                None => None,
             };
             if let Some(subnet_idx) = attached {
                 builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);

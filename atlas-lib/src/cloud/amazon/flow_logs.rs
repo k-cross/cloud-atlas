@@ -376,10 +376,16 @@ pub mod stream {
 
     /// An SQS queue subscribed to a flow-log bucket's event notifications.
     ///
-    /// Objects are fetched and parsed, then the message is deleted — same
-    /// discipline as the Tier-1 queue: a crash between the two costs a
-    /// redelivery, and re-observing a flow is idempotent by construction, since
-    /// the overlay is keyed by endpoint pair.
+    /// Objects are fetched and parsed, then the message is deleted — but only
+    /// when every object it named was actually *read*. Tier 1 can delete
+    /// unconditionally because the only step between receiving and deleting is
+    /// a local parse, which cannot fail transiently; Tier 2 puts a fetch from
+    /// S3 in that gap, so deleting regardless would turn one 503 into an object
+    /// lost for good. A `Malformed` outcome still deletes: the object was read,
+    /// and redelivering it will not make it parse. A crash between the two
+    /// costs a redelivery, and re-observing a flow is near enough idempotent —
+    /// the overlay is keyed by endpoint pair, so only the volume counters
+    /// double-count, and they reset when the entry lapses.
     pub struct FlowLogQueue {
         sqs: SqsClient,
         s3: S3Client,
@@ -474,11 +480,16 @@ pub mod stream {
 
             for message in response.messages.unwrap_or_default() {
                 let body = message.body.as_deref().unwrap_or_default();
+                let mut readable = true;
                 for (bucket, key) in objects(body, &mut report, &self.scope()) {
-                    let mut fetched = self.read_object(&bucket, &key, &mut report).await;
-                    observations.append(&mut fetched);
+                    match self.read_object(&bucket, &key, &mut report).await {
+                        Some(mut fetched) => observations.append(&mut fetched),
+                        None => readable = false,
+                    }
                 }
-                if let Some(handle) = message.receipt_handle {
+                if readable
+                    && let Some(handle) = message.receipt_handle
+                {
                     processed.push(handle);
                 }
             }
@@ -496,7 +507,7 @@ pub mod stream {
             bucket: &str,
             key: &str,
             report: &mut CollectionReport,
-        ) -> Vec<FlowObservation> {
+        ) -> Option<Vec<FlowObservation>> {
             let scope = self.scope();
             let object = self
                 .s3
@@ -529,7 +540,7 @@ pub mod stream {
                         scope,
                         format!("s3://{bucket}/{key}: {error:?}"),
                     );
-                    return Vec::new();
+                    return None;
                 }
             };
 
@@ -542,7 +553,7 @@ pub mod stream {
                         scope,
                         format!("s3://{bucket}/{key}: {error:?}"),
                     );
-                    return Vec::new();
+                    return None;
                 }
             };
 
@@ -560,7 +571,7 @@ pub mod stream {
                         Self::MAX_OBJECT_BYTES
                     ),
                 );
-                return Vec::new();
+                return Some(Vec::new());
             }
 
             let text = match decompress(&body, Self::MAX_TEXT_BYTES) {
@@ -586,7 +597,7 @@ pub mod stream {
                         scope,
                         format!("s3://{bucket}/{key}: {reason}"),
                     );
-                    return Vec::new();
+                    return Some(Vec::new());
                 }
             };
 
@@ -625,7 +636,7 @@ pub mod stream {
                     ),
                 );
             }
-            parsed.observations
+            Some(parsed.observations)
         }
 
         async fn delete(&self, handles: Vec<String>, report: &mut CollectionReport) {
@@ -760,16 +771,17 @@ pub mod stream {
         }
 
         if body.starts_with(&[0x1f, 0x8b]) {
-            let mut text = String::new();
+            let mut bytes = Vec::new();
             // One byte past the cap, so filling it is proof there was more.
             let read = flate2::read::GzDecoder::new(body)
                 .take(limit.saturating_add(1))
-                .read_to_string(&mut text)
+                .read_to_end(&mut bytes)
                 .map_err(|e| format!("could not decompress: {e}"))?;
             let truncated = read as u64 > limit;
             if truncated {
-                text.truncate(limit as usize);
+                bytes.truncate(floor_char_boundary(&bytes, limit as usize));
             }
+            let text = String::from_utf8(bytes).map_err(|e| format!("not text: {e}"))?;
             return Ok(Decompressed { text, truncated });
         }
 
@@ -779,6 +791,14 @@ pub mod stream {
                 truncated: false,
             })
             .map_err(|e| format!("not text: {e}"))
+    }
+
+    fn floor_char_boundary(bytes: &[u8], index: usize) -> usize {
+        let mut cut = index.min(bytes.len());
+        while cut > 0 && cut < bytes.len() && bytes[cut] & 0b1100_0000 == 0b1000_0000 {
+            cut -= 1;
+        }
+        cut
     }
 }
 

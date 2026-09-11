@@ -223,6 +223,41 @@ fn relationships_stand_in_for_a_missing_configuration_snapshot() {
     assert!(keys.contains(&node_key(&Node::AwsEc2SecurityGroup("sg-globex".into()))));
 }
 
+/// The fallback knows interface *ids* and nothing else, so the ENI it adds must
+/// stay unattached. Guessing the instance's own subnet is wrong for every
+/// multi-homed instance, and rule 1 makes a wrong edge worse than a missing
+/// one: reconciliation deletes it and the next event puts it back, forever.
+#[test]
+fn an_eni_from_relationships_alone_attaches_to_no_subnet() {
+    let body = instance_config_item("OK");
+    let stripped = body
+        .split("\"configuration\": {")
+        .next()
+        .expect("split")
+        .trim_end()
+        .trim_end_matches(',')
+        .to_owned()
+        + "}}}";
+
+    let events = parse(&stripped, INCLUDE_UNKNOWN).expect("still a readable event");
+    let typed = events
+        .iter()
+        .find(|e| matches!(e.node, Node::AwsEc2Instance(_)))
+        .expect("the typed instance event");
+
+    assert!(
+        node_keys(&typed.context).contains(&node_key(&Node::AwsEc2Eni("eni-0abc123a".into()))),
+        "the interface itself is still known, and the scan produces it"
+    );
+    assert!(
+        !typed
+            .context
+            .edge_references()
+            .any(|e| e.weight() == &Edge::AttachedTo),
+        "an interface with no reported subnet must not be attached to a guessed one"
+    );
+}
+
 /// The full scan produces both a typed node and an AWS Config catch-all node
 /// for an instance. A delete that only took the typed one would leave the
 /// catch-all standing until reconciliation swept it.

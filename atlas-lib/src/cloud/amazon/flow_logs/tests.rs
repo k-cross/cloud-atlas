@@ -399,6 +399,18 @@ fn a_gzipped_object_is_decompressed() {
 }
 
 #[test]
+fn a_cut_that_lands_inside_a_character_still_yields_the_part_before_it() {
+    let text = "é".repeat(100);
+    let limit = 51;
+
+    let out = decompress(&gzip(&text), limit).expect("a mid-character cut must not lose the object");
+
+    assert!(out.truncated);
+    assert_eq!(out.text, "é".repeat(25));
+    assert!(text.starts_with(&out.text));
+}
+
+#[test]
 fn a_plain_text_object_is_read_as_is() {
     let text = default_record("10.10.1.10", "198.51.100.10", "ACCEPT");
 
@@ -474,6 +486,52 @@ async fn a_queued_object_reaches_the_graph_as_traffic_edges() {
     assert!(
         graph.contains(&Node::GenericIpAddress("203.0.113.7".into())),
         "an address no scan reported still earns the generic pivot node"
+    );
+}
+
+#[tokio::test]
+async fn an_object_that_could_not_be_read_leaves_its_notification_on_the_queue() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (403, br#"<Error><Code>AccessDenied</Code></Error>"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config).receive().await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        Some(crate::atlas::collection::FailureKind::Unauthorized)
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        2,
+        "receive and get-object only — deleting here would lose the object for good"
+    );
+}
+
+#[tokio::test]
+async fn an_object_that_was_read_but_makes_no_sense_is_deleted_anyway() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (OK, b"PAR1unsupported".to_vec()),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config).receive().await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        None,
+        "a drifted object is Malformed, never an unreadable source"
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "redelivering an object that will not parse just replays the failure"
     );
 }
 
