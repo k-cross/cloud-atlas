@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
 	applyPatch,
 	buildGraph,
+	changesTopology,
 	type GraphPatch,
 	SNAPSHOT_VERSION,
 	type Snapshot,
@@ -101,6 +102,26 @@ describe("buildGraph", () => {
 		const graph = buildGraph(snapshot({}));
 		expect(graph.order).toBe(0);
 		expect(graph.size).toBe(0);
+	});
+});
+
+describe("changesTopology", () => {
+	test("an observation-only patch changes no topology", () => {
+		expect(
+			changesTopology(
+				patch({
+					observations: [observation("a", 7)],
+					expired: ["b"],
+				}),
+			),
+		).toBe(false);
+	});
+
+	test("any node or edge change is topology", () => {
+		expect(changesTopology(patch({ removed_nodes: ["a"] }))).toBe(true);
+		expect(changesTopology(patch({ added_nodes: [node("a", "AwsEc2Instance")] }))).toBe(true);
+		expect(changesTopology(patch({ removed_edges: ["e"] }))).toBe(true);
+		expect(changesTopology(patch({ added_edges: [edge("a", "b", "RoutesTo")] }))).toBe(true);
 	});
 });
 

@@ -448,6 +448,30 @@ async fn an_object_that_could_not_be_read_leaves_its_notification_on_the_queue()
 }
 
 #[tokio::test]
+async fn an_object_that_is_gone_releases_its_notification() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (404, br#"<Error><Code>NoSuchKey</Code></Error>"#.to_vec()),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config).receive().await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        None,
+        "an object a lifecycle rule aged out is not an unreadable source"
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "redelivering a notification for an object that no longer exists never succeeds"
+    );
+}
+
+#[tokio::test]
 async fn an_object_that_was_read_but_makes_no_sense_is_deleted_anyway() {
     let http = replay(vec![
         (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),

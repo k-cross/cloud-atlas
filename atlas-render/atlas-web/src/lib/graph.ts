@@ -58,6 +58,15 @@ export interface GraphPatch {
 	expired?: string[];
 }
 
+export function changesTopology(patch: GraphPatch): boolean {
+	return (
+		patch.added_nodes.length > 0 ||
+		patch.removed_nodes.length > 0 ||
+		patch.added_edges.length > 0 ||
+		patch.removed_edges.length > 0
+	);
+}
+
 function edgeColor(kind: string): string {
 	return EDGE_COLORS[kind] ?? DEFAULT_EDGE_COLOR;
 }

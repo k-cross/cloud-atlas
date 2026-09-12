@@ -1,6 +1,7 @@
 use crate::atlas::collection::CollectionSource;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{edge_key, node_key};
+use crate::atlas::flow::{eviction_cut, survives};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::patch::{GraphPatch, merge_additions};
 use petgraph::graph::Graph;
@@ -159,10 +160,10 @@ impl EventApplier {
             return;
         }
 
-        let mut times: Vec<i64> = self.applied.values().map(|&(at, _)| at).collect();
-        times.sort_unstable();
-        let cutoff = times[times.len() - Self::LOW_WATER];
-        self.applied.retain(|_, &mut (at, _)| at > cutoff);
+        let (cutoff, mut ties) =
+            eviction_cut(self.applied.values().map(|&(at, _)| at), Self::LOW_WATER);
+        self.applied
+            .retain(|_, &mut (at, _)| survives(at, cutoff, &mut ties));
     }
 }
 
@@ -327,6 +328,25 @@ mod tests {
 
         applier.apply(&mut live, &created("i-1", T0 + 2_000));
         assert!(live.contains(&instance("i-1")), "the resource came back");
+    }
+
+    #[test]
+    fn pruning_keeps_a_batch_that_shares_one_timestamp() {
+        let mut applier = EventApplier::new();
+        for i in 0..=EventApplier::MAX_TRACKED {
+            applier
+                .applied
+                .insert(format!("aws/i-{i}"), (T0, Claim::Present));
+        }
+        applier.newest = T0;
+
+        applier.prune();
+
+        assert_eq!(
+            applier.applied.len(),
+            EventApplier::LOW_WATER,
+            "a tied batch must be trimmed to the low-water mark, not emptied"
+        );
     }
 
     #[test]

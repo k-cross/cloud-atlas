@@ -222,9 +222,9 @@ pub mod stream {
     use super::{SOURCE, parse};
     use crate::atlas::collection::{CollectionReport, FailureKind};
     use crate::atlas::flow::FlowObservation;
+    use crate::cloud::amazon::sqs::feed::{self, unwrap_sns};
     use aws_sdk_s3::Client as S3Client;
     use aws_sdk_sqs::Client as SqsClient;
-    use aws_sdk_sqs::types::DeleteMessageBatchRequestEntry;
     use serde::Deserialize;
     use std::io::Read;
 
@@ -258,14 +258,6 @@ pub mod stream {
     #[derive(Deserialize)]
     struct KeyedObject {
         key: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct SnsEnvelope {
-        #[serde(rename = "Type")]
-        kind: Option<String>,
-        #[serde(rename = "Message")]
-        message: Option<String>,
     }
 
     pub struct FlowLogQueue {
@@ -325,10 +317,8 @@ pub mod stream {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    let kind = match error.raw_response().map(|r| r.status().as_u16()) {
-                        Some(401 | 403) => FailureKind::Unauthorized,
-                        _ => FailureKind::Unavailable,
-                    };
+                    let kind =
+                        feed::failure_kind(error.raw_response().map(|r| r.status().as_u16()));
                     report.record(SOURCE, kind, self.scope(), error);
                     return FlowBatch {
                         observations: Vec::new(),
@@ -354,7 +344,15 @@ pub mod stream {
                 }
             }
 
-            self.delete(processed, &mut report).await;
+            feed::delete(
+                &self.sqs,
+                &self.queue_url,
+                processed,
+                &mut report,
+                &self.scope(),
+                "notification",
+            )
+            .await;
 
             FlowBatch {
                 observations,
@@ -382,16 +380,19 @@ pub mod stream {
                 Ok(object) => object,
                 Err(error) => {
                     let kind = match error.raw_response().map(|r| r.status().as_u16()) {
-                        Some(401 | 403) => FailureKind::Unauthorized,
-                        _ => FailureKind::Unavailable,
+                        Some(404 | 410) => FailureKind::Malformed,
+                        status => feed::failure_kind(status),
                     };
-                    report.record(
+                    report.note(
                         SOURCE,
                         kind,
                         scope,
                         format!("s3://{bucket}/{key}: {error:?}"),
                     );
-                    return None;
+                    return match kind {
+                        FailureKind::Malformed => Some(Vec::new()),
+                        _ => None,
+                    };
                 }
             };
 
@@ -485,51 +486,6 @@ pub mod stream {
             }
             Some(parsed.observations)
         }
-
-        async fn delete(&self, handles: Vec<String>, report: &mut CollectionReport) {
-            if handles.is_empty() {
-                return;
-            }
-
-            let entries: Vec<_> = handles
-                .into_iter()
-                .enumerate()
-                .filter_map(|(i, handle)| {
-                    DeleteMessageBatchRequestEntry::builder()
-                        .id(i.to_string())
-                        .receipt_handle(handle)
-                        .build()
-                        .ok()
-                })
-                .collect();
-
-            let result = self
-                .sqs
-                .delete_message_batch()
-                .queue_url(&self.queue_url)
-                .set_entries(Some(entries))
-                .send()
-                .await;
-
-            match result {
-                Ok(response) if !response.failed().is_empty() => report.note(
-                    SOURCE,
-                    FailureKind::Malformed,
-                    self.scope(),
-                    format!(
-                        "{} processed notification(s) could not be deleted",
-                        response.failed().len()
-                    ),
-                ),
-                Ok(_) => {}
-                Err(error) => report.record(
-                    SOURCE,
-                    FailureKind::Malformed,
-                    self.scope(),
-                    format!("could not delete processed notifications: {error:?}"),
-                ),
-            }
-        }
     }
 
     pub fn objects(
@@ -562,16 +518,6 @@ pub mod stream {
                 Some((bucket, decode_key(&key)))
             })
             .collect()
-    }
-
-    fn unwrap_sns(body: &str) -> std::borrow::Cow<'_, str> {
-        match serde_json::from_str::<SnsEnvelope>(body) {
-            Ok(SnsEnvelope {
-                kind: Some(kind),
-                message: Some(message),
-            }) if kind == "Notification" => std::borrow::Cow::Owned(message),
-            _ => std::borrow::Cow::Borrowed(body),
-        }
     }
 
     fn decode_key(key: &str) -> String {

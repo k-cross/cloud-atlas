@@ -27,8 +27,17 @@ observations are keyed by endpoint pair, so only the volume counters
 double-count, and those reset when the entry lapses. Losing the object outright
 is worse.
 
-Pinned by `an_object_that_could_not_be_read_leaves_its_notification_on_the_queue`
-and `an_object_that_was_read_but_makes_no_sense_is_deleted_anyway`.
+The exception is an object that is *gone*. A 404/410 is not a read that might
+succeed later, so leaving the message on the queue pins it forever: SQS
+redelivers after every visibility timeout, and each redelivery re-observes the
+siblings that did read, inflating their volume counters without bound. A missing
+object is reported as `Malformed` — the same treatment as content that will not
+parse — and the message is released. Auth failures keep the retry, since those
+are the ones a human can fix.
+
+Pinned by `an_object_that_could_not_be_read_leaves_its_notification_on_the_queue`,
+`an_object_that_was_read_but_makes_no_sense_is_deleted_anyway` and
+`an_object_that_is_gone_releases_its_notification`.
 
 ### The merge context is bounded by what the index kept, not by the batch
 
@@ -91,3 +100,35 @@ self-healing; a wrong one never settles.
 
 Pinned by `an_eni_from_relationships_alone_attaches_to_no_subnet` and, for the
 containment rule generally, `an_instance_event_produces_only_what_a_full_scan_would`.
+
+### Ordering is pruned on a tie without emptying the table
+
+`EventApplier::prune` had the bug `FlowIndex::evict` was already fixed for one
+file over: a strict `at > cutoff` with no budget for entries *at* the cutoff. A
+Config batch stamped with one millisecond makes the cutoff equal every entry's
+time, so the table empties instead of trimming to the low-water mark. An empty
+ordering table means `is_stale` no longer recognises a redelivered create as
+stale, and it resurrects a resource a later delete removed — the exact failure
+Tier-1 rule 3 exists to prevent. `prune` now shares `eviction_cut`/`survives`
+with the flow index rather than re-deriving the cut.
+
+Pinned by `pruning_keeps_a_batch_that_shares_one_timestamp`.
+
+## Tier 3 (reconciliation)
+
+### An edge is carried forward by its owner, not by the pivot it touches
+
+`carry_forward` kept an edge when *either* endpoint was held. Ownerless nodes
+(`GenericIpAddress`, `GenericHostname`) count as held whenever anything still
+points at them, and those are the cross-cloud stitching points every projector
+emits — so a healthy provider's edge into one was carried forward for as long as
+some *other* provider was unreadable. Repoint a GCP DNS record away from a
+hostname while AWS is throttled and the stale `ResolvesTo` edge came back on
+every tick, with the differ never emitting its removal.
+
+An edge is now carried only when every endpoint that *has* an owner is held, so
+the retention stays inside the failed provider's territory the way the node rule
+always did. `merge_selected`'s edge predicate takes the endpoints for this
+reason; there is no separate "either endpoint" rule left.
+
+Pinned by `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.

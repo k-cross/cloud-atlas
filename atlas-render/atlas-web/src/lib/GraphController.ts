@@ -4,6 +4,7 @@ import init, { LayoutEngine } from "../../static/pkg/atlas_layout_wasm.js";
 import {
 	applyPatch,
 	buildGraph,
+	changesTopology,
 	type GraphPatch,
 	SNAPSHOT_VERSION,
 	type Snapshot,
@@ -246,7 +247,7 @@ export class GraphController {
 		try {
 			checkVersion(patch.version);
 			applyPatch(this.graph, patch);
-			this.layoutAndReveal(true);
+			if (changesTopology(patch)) this.layoutAndReveal(true);
 			this.renderLegend();
 		} catch (e) {
 			this.options.onError(errorText(e));

@@ -195,14 +195,18 @@ pub fn carry_forward(
         .flat_map(|e| [&previous[e.source()], &previous[e.target()]])
         .collect();
 
-    next.merge_selected(
-        previous,
-        |node| match node.owner() {
-            Some(source) => unreadable.contains(&source),
-            None => anchored.contains(node),
-        },
-        |edge| *edge != Edge::TrafficFlow,
-    );
+    let held = |node: &Node| match node.owner() {
+        Some(source) => unreadable.contains(&source),
+        None => anchored.contains(node),
+    };
+
+    next.merge_selected(previous, held, |source, target, edge| {
+        *edge != Edge::TrafficFlow
+            && [source, target].iter().all(|node| {
+                node.owner()
+                    .is_none_or(|source| unreadable.contains(&source))
+            })
+    });
 }
 
 pub struct Retention {

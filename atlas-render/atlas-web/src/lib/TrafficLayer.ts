@@ -94,7 +94,7 @@ export class TrafficLayer {
 				color: haloColor(attrs.flowStatus as string | undefined),
 			});
 		});
-		this.onSummary(trafficSummary(this.graph));
+		this.onSummary(trafficSummary(this.graph, this.flows));
 	}
 
 	private viewport(key: string): Point | null {

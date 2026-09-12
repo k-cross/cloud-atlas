@@ -17,40 +17,81 @@ use std::time::Duration;
 #[derive(Debug, Parser)]
 #[clap(about = "Cloud Atlas live backend server", version, long_about = None)]
 pub struct Opt {
-    #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"])]
+    #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"], help = "The AWS Regions to collect from.")]
     regions: Vec<String>,
 
-    #[clap(long, value_parser, num_args = 1..)]
+    #[clap(long, value_parser, num_args = 1.., help = "The GCP Projects.")]
     gcp_projects: Option<Vec<String>>,
 
-    #[clap(long, value_parser, num_args = 1..)]
+    #[clap(long, value_parser, num_args = 1.., help = "The Azure Subscriptions.")]
     azure_subscriptions: Option<Vec<String>>,
 
-    #[clap(long)]
+    #[clap(long, help = "Whether to include Cloudflare resources.")]
     cloudflare: bool,
 
-    #[clap(short, long)]
+    #[clap(short, long, help = "Whether to display additional information.")]
     verbose: bool,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "Serve the credential-free \"Globex\" fixtures instead of collecting from real clouds.",
+        long_help = "Serve the credential-free \"Globex\" fixtures with a live-changing sentinel \
+                     instead of collecting from real clouds. For local development and demos."
+    )]
     demo: bool,
 
-    #[clap(long, default_value_t = 4681)]
+    #[clap(long, default_value_t = 4681, help = "TCP port to listen on.")]
     port: u16,
 
-    #[clap(long, default_value_t = 60)]
+    #[clap(
+        long,
+        default_value_t = 60,
+        help = "Seconds between reconciliation scans."
+    )]
     poll_secs: u64,
 
-    #[clap(long, default_value_t = Retention::DEFAULT_BUDGET)]
+    #[clap(
+        long,
+        default_value_t = Retention::DEFAULT_BUDGET,
+        help = "How many consecutive incomplete scans a provider's resources are held through.",
+        long_help = "How many consecutive incomplete scans a provider's resources are held \
+                     through before the graph stops waiting and deletes what it cannot confirm. \
+                     0 deletes unconfirmed resources immediately; a large value holds them \
+                     effectively forever."
+    )]
     retain_scans: u32,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "SQS queue URL fed by an EventBridge rule, consumed as the Tier-1 live change feed.",
+        long_help = "URL of an SQS queue fed by an EventBridge rule, to consume as the Tier-1 \
+                     live change feed (AWS Config items, EC2 state changes, CloudTrail management \
+                     events).\n\nOptional: without it the graph is still correct, just at \
+                     poll-interval latency instead of seconds. The queue is read in the first \
+                     --regions region, which is where its EventBridge rule lives."
+    )]
     aws_event_queue: Option<String>,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "SQS queue URL subscribed to a VPC Flow Logs bucket, consumed as the Tier-2 liveness feed.",
+        long_help = "URL of an SQS queue subscribed to a VPC Flow Logs bucket's S3 event \
+                     notifications, to consume as the Tier-2 liveness feed.\n\nOptional, and \
+                     orthogonal to the other two tiers: without it the graph is complete and \
+                     correct but carries no liveness, so nothing can say whether any of it is \
+                     actually passing traffic."
+    )]
     aws_flow_log_queue: Option<String>,
 
-    #[clap(long)]
+    #[clap(
+        long,
+        help = "How long an observed flow counts as current.",
+        long_help = "How long an observed flow counts as current. Past this, the traffic edge is \
+                     removed and the resources it touched stop reporting as live.\n\nUnset, the \
+                     collection source answers: fifteen minutes for a real flow feed, generous on \
+                     purpose relative to flow logs' own aggregation and delivery lag, which is \
+                     minutes."
+    )]
     flow_ttl_secs: Option<u64>,
 }
 

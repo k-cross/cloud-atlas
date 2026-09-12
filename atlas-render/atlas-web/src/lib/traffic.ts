@@ -55,8 +55,7 @@ export function observedFlows(graph: Graph): ObservedFlow[] {
 	return flows.sort((a, b) => b.packets - a.packets || a.key.localeCompare(b.key));
 }
 
-export function trafficSummary(graph: Graph): TrafficSummary {
-	const flows = observedFlows(graph);
+export function trafficSummary(graph: Graph, flows = observedFlows(graph)): TrafficSummary {
 	const byStatus: Record<string, number> = {};
 	let packets = 0;
 	let bytes = 0;

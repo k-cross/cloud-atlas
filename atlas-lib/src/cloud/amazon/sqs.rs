@@ -1,3 +1,90 @@
+pub mod feed {
+    use crate::atlas::collection::{CollectionReport, FailureKind};
+    use aws_sdk_sqs::Client;
+    use aws_sdk_sqs::types::DeleteMessageBatchRequestEntry;
+    use serde::Deserialize;
+    use std::borrow::Cow;
+
+    const SOURCE: crate::atlas::collection::CollectionSource =
+        crate::atlas::collection::CollectionSource::Aws;
+
+    #[derive(Deserialize)]
+    struct SnsEnvelope {
+        #[serde(rename = "Type")]
+        kind: Option<String>,
+        #[serde(rename = "Message")]
+        message: Option<String>,
+    }
+
+    pub fn unwrap_sns(body: &str) -> Cow<'_, str> {
+        match serde_json::from_str::<SnsEnvelope>(body) {
+            Ok(SnsEnvelope {
+                kind: Some(kind),
+                message: Some(message),
+            }) if kind == "Notification" => Cow::Owned(message),
+            _ => Cow::Borrowed(body),
+        }
+    }
+
+    pub fn failure_kind(status: Option<u16>) -> FailureKind {
+        match status {
+            Some(401 | 403) => FailureKind::Unauthorized,
+            _ => FailureKind::Unavailable,
+        }
+    }
+
+    pub async fn delete(
+        client: &Client,
+        queue_url: &str,
+        handles: Vec<String>,
+        report: &mut CollectionReport,
+        scope: &str,
+        noun: &str,
+    ) {
+        if handles.is_empty() {
+            return;
+        }
+
+        let entries: Vec<_> = handles
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, handle)| {
+                DeleteMessageBatchRequestEntry::builder()
+                    .id(i.to_string())
+                    .receipt_handle(handle)
+                    .build()
+                    .ok()
+            })
+            .collect();
+
+        let result = client
+            .delete_message_batch()
+            .queue_url(queue_url)
+            .set_entries(Some(entries))
+            .send()
+            .await;
+
+        match result {
+            Ok(response) if !response.failed().is_empty() => report.note(
+                SOURCE,
+                FailureKind::Malformed,
+                scope,
+                format!(
+                    "{} processed {noun}(s) could not be deleted",
+                    response.failed().len()
+                ),
+            ),
+            Ok(_) => {}
+            Err(error) => report.note(
+                SOURCE,
+                FailureKind::Malformed,
+                scope,
+                format!("could not delete processed {noun}s: {error:?}"),
+            ),
+        }
+    }
+}
+
 pub mod collector {
     use crate::cloud::definition::QueueUrl;
     use aws_sdk_sqs::Client;

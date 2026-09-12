@@ -133,14 +133,14 @@ impl GraphBuilder {
     }
 
     pub fn merge_where(&mut self, other: &Graph<Node, Edge>, keep: impl Fn(&Node) -> bool) {
-        self.merge_selected(other, keep, |_| true);
+        self.merge_selected(other, keep, |_, _, _| true);
     }
 
     pub fn merge_selected(
         &mut self,
         other: &Graph<Node, Edge>,
         keep: impl Fn(&Node) -> bool,
-        keep_edge: impl Fn(&Edge) -> bool,
+        keep_edge: impl Fn(&Node, &Node, &Edge) -> bool,
     ) {
         for node in other.node_weights() {
             if keep(node) {
@@ -148,12 +148,9 @@ impl GraphBuilder {
             }
         }
         for edge_idx in other.edge_indices() {
-            if !keep_edge(&other[edge_idx]) {
-                continue;
-            }
             if let Some((a, b)) = other.edge_endpoints(edge_idx) {
                 let (source, target) = (&other[a], &other[b]);
-                if !keep(source) && !keep(target) {
+                if !keep_edge(source, target, &other[edge_idx]) {
                     continue;
                 }
                 if let (Some(&a_idx), Some(&b_idx)) =

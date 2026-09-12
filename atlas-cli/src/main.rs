@@ -4,25 +4,34 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[clap(about, version, long_about = None)]
 pub struct Opt {
-    #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"])]
+    #[clap(short, long, value_parser, num_args = 1.., default_values = vec!["us-east-1"], help = "The AWS Regions to collect from.")]
     regions: Vec<String>,
 
-    #[clap(long, value_parser, num_args = 1..)]
+    #[clap(long, value_parser, num_args = 1.., help = "The GCP Projects.")]
     gcp_projects: Option<Vec<String>>,
 
-    #[clap(long, value_parser, num_args = 1..)]
+    #[clap(long, value_parser, num_args = 1.., help = "The Azure Subscriptions.")]
     azure_subscriptions: Option<Vec<String>>,
 
-    #[clap(long)]
+    #[clap(long, help = "Whether to include Cloudflare resources.")]
     cloudflare: bool,
 
-    #[clap(short, long)]
+    #[clap(short, long, help = "Whether to display additional information.")]
     verbose: bool,
 
-    #[clap(short, long, hide(true))]
+    #[clap(
+        short,
+        long,
+        hide(true),
+        help = "Whether to exclude non-explicitly defined values by default."
+    )]
     exclude: bool,
 
-    #[clap(short, long)]
+    #[clap(
+        short,
+        long,
+        help = "Run as a long-running daemon that updates continuously."
+    )]
     daemon: bool,
 }
 

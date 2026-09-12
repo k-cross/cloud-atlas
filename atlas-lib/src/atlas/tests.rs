@@ -856,6 +856,39 @@ mod tests {
     }
 
     #[test]
+    fn carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot() {
+        use crate::atlas::patch::carry_forward;
+
+        let host = Node::GenericHostname("old.example.com".into());
+        let zone = Node::GcpDnsManagedZone("globex-zone".into());
+        let instance = Node::AwsEc2Instance("i-1".into());
+
+        let mut live = GraphBuilder::new();
+        let zone_idx = live.get_or_add_node(zone.clone());
+        live.link_to(zone_idx, host.clone(), Edge::ResolvesTo);
+        let instance_idx = live.get_or_add_node(instance.clone());
+        live.link_to(instance_idx, host.clone(), Edge::ConnectsTo);
+
+        let mut next = GraphBuilder::new();
+        next.get_or_add_node(zone.clone());
+
+        carry_forward(
+            &mut next,
+            &live.graph,
+            &std::collections::HashSet::from([CollectionSource::Aws]),
+        );
+
+        assert!(
+            next.has_edge(&instance, &host, &Edge::ConnectsTo),
+            "the unreadable source's edge must be retained"
+        );
+        assert!(
+            !next.has_edge(&zone, &host, &Edge::ResolvesTo),
+            "a healthy source's deleted edge must not be resurrected by the pivot it shares"
+        );
+    }
+
+    #[test]
     fn carry_forward_restores_only_what_the_scan_is_missing() {
         use crate::atlas::export::{edge_key, node_key};
         use crate::atlas::patch::{carry_forward, diff};

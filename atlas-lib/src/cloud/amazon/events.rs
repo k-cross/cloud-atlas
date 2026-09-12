@@ -5,6 +5,7 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector::aws::{
     EniFacts, InstanceFacts, project_instance, use_aws_resource, use_global,
 };
+use crate::cloud::amazon::sqs::feed::unwrap_sns;
 use aws_smithy_types::date_time::{DateTime, Format};
 use petgraph::graph::Graph;
 use serde::Deserialize;
@@ -42,14 +43,6 @@ struct Envelope {
     detail: Option<Value>,
 }
 
-#[derive(Deserialize)]
-struct SnsEnvelope {
-    #[serde(rename = "Type")]
-    kind: Option<String>,
-    #[serde(rename = "Message")]
-    message: Option<String>,
-}
-
 pub fn parse(body: &str, exclude_by_default: bool) -> Result<Vec<ChangeEvent>, MalformedEvent> {
     let body = unwrap_sns(body);
     let envelope: Envelope = serde_json::from_str(&body)
@@ -73,16 +66,6 @@ pub fn parse(body: &str, exclude_by_default: bool) -> Result<Vec<ChangeEvent>, M
         "EC2 Instance State-change Notification" => from_instance_state(detail, region, id, time),
         "AWS API Call via CloudTrail" => from_cloud_trail(detail, region, id, time),
         _ => Ok(Vec::new()),
-    }
-}
-
-fn unwrap_sns(body: &str) -> std::borrow::Cow<'_, str> {
-    match serde_json::from_str::<SnsEnvelope>(body) {
-        Ok(SnsEnvelope {
-            kind: Some(kind),
-            message: Some(message),
-        }) if kind == "Notification" => std::borrow::Cow::Owned(message),
-        _ => std::borrow::Cow::Borrowed(body),
     }
 }
 
@@ -766,8 +749,8 @@ pub mod stream {
     use super::{MalformedEvent, SOURCE, parse};
     use crate::atlas::collection::{CollectionReport, FailureKind};
     use crate::atlas::event::ChangeEvent;
+    use crate::cloud::amazon::sqs::feed;
     use aws_sdk_sqs::Client;
-    use aws_sdk_sqs::types::DeleteMessageBatchRequestEntry;
 
     pub struct EventBatch {
         pub events: Vec<ChangeEvent>,
@@ -826,10 +809,8 @@ pub mod stream {
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    let kind = match error.raw_response().map(|r| r.status().as_u16()) {
-                        Some(401 | 403) => FailureKind::Unauthorized,
-                        _ => FailureKind::Unavailable,
-                    };
+                    let kind =
+                        feed::failure_kind(error.raw_response().map(|r| r.status().as_u16()));
                     report.record(SOURCE, kind, self.scope(), error);
                     return EventBatch {
                         events: Vec::new(),
@@ -859,55 +840,17 @@ pub mod stream {
                 }
             }
 
-            self.delete(processed, &mut report).await;
+            feed::delete(
+                &self.client,
+                &self.queue_url,
+                processed,
+                &mut report,
+                &self.scope(),
+                "event",
+            )
+            .await;
 
             EventBatch { events, report }
-        }
-
-        async fn delete(&self, handles: Vec<String>, report: &mut CollectionReport) {
-            if handles.is_empty() {
-                return;
-            }
-
-            let entries: Vec<_> = handles
-                .into_iter()
-                .enumerate()
-                .filter_map(|(i, handle)| {
-                    DeleteMessageBatchRequestEntry::builder()
-                        .id(i.to_string())
-                        .receipt_handle(handle)
-                        .build()
-                        .ok()
-                })
-                .collect();
-
-            let result = self
-                .client
-                .delete_message_batch()
-                .queue_url(&self.queue_url)
-                .set_entries(Some(entries))
-                .send()
-                .await;
-
-            match result {
-                Ok(response) => {
-                    let failed = response.failed();
-                    if !failed.is_empty() {
-                        report.note(
-                            SOURCE,
-                            FailureKind::Malformed,
-                            self.scope(),
-                            format!("{} processed event(s) could not be deleted", failed.len()),
-                        );
-                    }
-                }
-                Err(error) => report.record(
-                    SOURCE,
-                    FailureKind::Malformed,
-                    self.scope(),
-                    format!("could not delete processed events: {error:?}"),
-                ),
-            }
         }
     }
 }

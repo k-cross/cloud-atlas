@@ -9,8 +9,9 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     println!("Projecting the fake Globex multi-cloud environment (no credentials needed)...\n");
 
-    let builder = fixtures::build_graph();
+    let mut builder = fixtures::topology();
     let observed = fixtures::observed();
+    observed.overlay(&mut builder);
 
     let filename = "multi_cloud_demo.dot";
     let dot = format!("{}", Dot::with_config(&builder.graph, &[]));

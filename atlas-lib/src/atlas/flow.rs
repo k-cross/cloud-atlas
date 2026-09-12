@@ -287,13 +287,16 @@ impl FlowIndex {
     }
 }
 
-fn eviction_cut(last_seen: impl Iterator<Item = i64> + Clone, keep: usize) -> (i64, usize) {
+pub(crate) fn eviction_cut(
+    last_seen: impl Iterator<Item = i64> + Clone,
+    keep: usize,
+) -> (i64, usize) {
     let cutoff = nth_oldest(last_seen.clone(), keep);
     let newer = last_seen.filter(|seen| *seen > cutoff).count();
     (cutoff, keep.saturating_sub(newer))
 }
 
-fn survives(last_seen: i64, cutoff: i64, ties: &mut usize) -> bool {
+pub(crate) fn survives(last_seen: i64, cutoff: i64, ties: &mut usize) -> bool {
     if last_seen > cutoff {
         return true;
     }
