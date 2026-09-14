@@ -15,10 +15,8 @@ In `atlas-lib/src/atlas/collection.rs`, add a `CollectionSource::<Name>` variant
 ## Step 2 — Add Node and Edge variants to `definition.rs`
 
 In `atlas-lib/src/atlas/definition.rs`:
-- Add a new section comment (e.g., `// Hetzner`) to the `Node` enum.
-- Add `Node::<Provider><ResourceType>(std::sync::Arc<str>)` variants for each resource type.
-- Add `Display` arms following the `Provider::SubType(id)` format pattern.
-- Add every new variant to the `owned_kinds!(Node, ...)` list at the bottom of the file, under a new `Some(CollectionSource::<Name>) => [..]` group. That group generates `kind()`, `ALL_KINDS` and `owner()`; `owner()` is what scopes carry-forward when the new provider's scan comes back incomplete. The exhaustive match makes skipping this a compile error.
+- Add a new `Some(CollectionSource::<Name>) => [..]` group to the `nodes!(..)` list, with one line per resource type: `<Provider><ResourceType>(id) => "Provider::SubType({id})"`, following the label pattern already present in the file.
+- Those lines are the whole `Node` change — the group declares the variants, their `Display`, and their entries in `kind()`, `ALL_KINDS` and `owner()`; `owner()` is what scopes carry-forward when the new provider's scan comes back incomplete.
 - Add new `Edge` variants only if the existing set (`Contains`, `ConnectsTo`, `AttachedTo`, `HasIp`, `RoutesTo`, `ResolvesTo`, `DependsOn`, `TrafficFlow`) doesn't cover the needed relationships (update `kinds!(Edge, ...)` too).
 - Variants key **identity only** — never a counter, timestamp or status. Those live beside the graph (`atlas::flow::FlowIndex`), keyed by `node_key`.
 
@@ -48,8 +46,8 @@ In `atlas-lib/src/lib.rs` add the field to `Settings`, and in **both** `atlas-cl
 ## Step 6 — Create the projector
 
 Create `atlas-lib/src/atlas/projector/<provider>.rs`:
-- Implement `pub fn <provider>_projector(builder: &mut GraphBuilder, data: &..)`.
-- For each resource, link it in with `builder.link_to(parent, Node::<Type>(id.into()), Edge::Contains)` / `link_from(..)`. Use `get_or_add_node` / `get_or_add_ref` only when you need the `NodeIndex` for more than one edge, and `project_leaf!` (see `projector/{azure,gcp}.rs`) for resources that only add a standalone node.
+- Implement `pub fn <provider>_projector(builder: &mut GraphBuilder, data: &..)`. When the payload is a slice of per-scope collections, the body is one call to `project_parallel(builder, data, |local, item| project_<provider>_collection(local, item))` — it fans the per-item projection out across rayon into its own `GraphBuilder` and merges the results back in order, so never hand-roll that.
+- For each resource, link it in with `builder.link_to(parent, Node::<Type>(id.into()), Edge::Contains)` / `link_from(..)`. Use `get_or_add_node` / `get_or_add_ref` only when you need the `NodeIndex` for more than one edge, and `project_leaf!` (in `projector/mod.rs`, imported with `use super::project_leaf;`) for resources that only add a node.
 - For any resource that exposes an IP or hostname, add `Node::GenericIpAddress` / `Node::GenericHostname` nodes connected via `Edge::RoutesTo` or `Edge::ResolvesTo`. These dedup automatically and are what stitch the new provider into the other clouds' estates.
 
 ## Step 7 — Register the projector

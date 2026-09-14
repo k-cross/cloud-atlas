@@ -1,32 +1,13 @@
+use super::{project_leaf, project_parallel};
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::GoogleCollection;
-use rayon::prelude::*;
-
-macro_rules! project_leaf {
-    ($builder:expr, $items:expr, $field:ident, $variant:path) => {
-        for item in $items {
-            if let Some(id) = &item.$field {
-                $builder.get_or_add_node($variant(id.as_str().into()));
-            }
-        }
-    };
-}
 
 pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[(String, GoogleCollection)]) {
-    let sub_graphs: Vec<GraphBuilder> = gcp_data
-        .par_iter()
-        .map(|(project, collection)| {
-            let mut local = GraphBuilder::new();
-            project_google_collection(&mut local, project, collection);
-            local
-        })
-        .collect();
-
-    for sub in &sub_graphs {
-        builder.merge(&sub.graph);
-    }
+    project_parallel(builder, gcp_data, |local, (project, collection)| {
+        project_google_collection(local, project, collection)
+    });
 }
 
 fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &GoogleCollection) {

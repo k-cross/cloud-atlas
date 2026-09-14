@@ -1,32 +1,11 @@
+use super::{project_leaf, project_parallel};
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::MicrosoftCollection;
-use rayon::prelude::*;
-
-macro_rules! project_leaf {
-    ($builder:expr, $items:expr, $field:ident, $variant:path) => {
-        for item in $items {
-            if let Some(id) = &item.$field {
-                $builder.get_or_add_node($variant(id.as_str().into()));
-            }
-        }
-    };
-}
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
-    let sub_graphs: Vec<GraphBuilder> = azure_data
-        .par_iter()
-        .map(|collection| {
-            let mut local = GraphBuilder::new();
-            project_microsoft_collection(&mut local, collection);
-            local
-        })
-        .collect();
-
-    for sub in &sub_graphs {
-        builder.merge(&sub.graph);
-    }
+    project_parallel(builder, azure_data, project_microsoft_collection);
 }
 
 fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollection) {

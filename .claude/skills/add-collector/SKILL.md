@@ -11,9 +11,7 @@ Read `CLAUDE.md` first — the architecture rules there (identity vs. state, fai
 ## Step 1 — Add Node variant(s) to `definition.rs`
 
 In `atlas-lib/src/atlas/definition.rs`:
-- Add a new `Node::<Provider><ResourceType>(std::sync::Arc<str>)` variant to the `Node` enum in the correct provider section.
-- Add the corresponding `Display` arm to the `impl fmt::Display for Node` block, using the `Provider::SubType(id)` format pattern already present in the file.
-- Add the variant to the `owned_kinds!(Node, ...)` list at the bottom of the file, **under the `Some(CollectionSource::<Provider>)` group whose scan is authoritative for it**. That grouping generates `kind()`, `ALL_KINDS` and `owner()`, and `owner()` is what scopes carry-forward when a scan comes back incomplete — filing a variant under the wrong provider means an outage in the wrong cloud protects it. The exhaustive match makes skipping this a compile error.
+- Add one line to the `nodes!(..)` list, **under the `Some(CollectionSource::<Provider>)` group whose scan is authoritative for it**: `<Provider><ResourceType>(id) => "Provider::SubType({id})"`, following the label pattern already present in the file. That one line declares the variant, its `Display`, and its entry in `kind()`, `ALL_KINDS` and `owner()`; `owner()` is what scopes carry-forward when a scan comes back incomplete — filing a variant under the wrong provider means an outage in the wrong cloud protects it.
 - Add any new `Edge` variants needed (rare), with a `Display` arm and a `kinds!(Edge, ...)` entry.
 - The variant keys **identity only**. A field that changes while the resource stays the same (a counter, a `last_seen`, a status) must not go in the enum — it belongs beside the graph, keyed by `node_key`.
 
@@ -46,7 +44,7 @@ In `atlas-lib/src/cloud/<provider>/mod.rs`, add `pub mod <resource>;` (or `mod <
 
 In `atlas-lib/src/atlas/projector/<provider>.rs`:
 - Add an arm that iterates over the collected resources and links each one in with `graph_builder.link_to(parent, Node::<NewType>(id.into()), Edge::Contains)` / `link_from(..)` — the one-call "get-or-add this node and connect it" helper. Use `get_or_add_node` / `get_or_add_ref` directly only when you need the `NodeIndex` for more than one edge.
-- `project_leaf!` in `projector/{azure,gcp}.rs` covers resources that only add a standalone node.
+- `project_leaf!` in `projector/mod.rs` covers resources that only add a node — `(builder, items, field, Node::Variant)` for a struct field and a standalone node, `(builder, items, accessor(), Node::Variant, parent, edge)` for an accessor and a parent link.
 - Wire edges to parent nodes (VPC, subnet, ENI, etc.) using the appropriate `Edge` variant. Networking paths pivot on the ENI: `Instance -> HasIp -> ENI -> AttachedTo -> Subnet`.
 - For resources that expose IP addresses or hostnames, stitch them to `Node::GenericIpAddress` / `Node::GenericHostname` via `Edge::RoutesTo` or `Edge::ResolvesTo`. Those nodes dedup automatically, which is what makes cross-cloud merging work.
 

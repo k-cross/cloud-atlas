@@ -1,28 +1,19 @@
+use super::{project_leaf, project_parallel};
 use crate::Settings;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection};
 use petgraph::graph::NodeIndex;
-use rayon::prelude::*;
 
 pub fn aws_projector(
     builder: &mut GraphBuilder,
     aws_data: &[(String, AmazonCollection)],
     opts: &Settings,
 ) {
-    let sub_graphs: Vec<GraphBuilder> = aws_data
-        .par_iter()
-        .map(|(region, collection)| {
-            let mut local = GraphBuilder::new();
-            project_amazon_collection(&mut local, region, collection, opts);
-            local
-        })
-        .collect();
-
-    for sub in &sub_graphs {
-        builder.merge(&sub.graph);
-    }
+    project_parallel(builder, aws_data, |local, (region, collection)| {
+        project_amazon_collection(local, region, collection, opts)
+    });
 }
 
 fn project_amazon_collection(
@@ -100,11 +91,14 @@ fn project_amazon_collection(
             }
         }
         AmazonCollection::AmazonClusters(clusters) => {
-            for cluster in clusters {
-                if let Some(arn) = cluster.cluster_arn() {
-                    builder.link_to(region_idx, Node::AwsEcsCluster(arn.into()), Edge::Contains);
-                }
-            }
+            project_leaf!(
+                builder,
+                clusters,
+                cluster_arn(),
+                Node::AwsEcsCluster,
+                region_idx,
+                Edge::Contains
+            )
         }
         AmazonCollection::AmazonLambdas(lambdas) => {
             for lambda in lambdas {
@@ -264,15 +258,14 @@ fn project_amazon_collection(
             }
         }
         AmazonCollection::AmazonApiGateway(apis) => {
-            for api in apis {
-                if let Some(id) = api.id() {
-                    builder.link_to(
-                        region_idx,
-                        Node::AwsApiGatewayRestApi(id.into()),
-                        Edge::Contains,
-                    );
-                }
-            }
+            project_leaf!(
+                builder,
+                apis,
+                id(),
+                Node::AwsApiGatewayRestApi,
+                region_idx,
+                Edge::Contains
+            )
         }
         AmazonCollection::AmazonRds(dbs) => {
             for db in dbs {
@@ -318,11 +311,14 @@ fn project_amazon_collection(
             }
         }
         AmazonCollection::AmazonSns(topics) => {
-            for t in topics {
-                if let Some(arn) = t.topic_arn() {
-                    builder.link_to(region_idx, Node::AwsSnsTopic(arn.into()), Edge::Contains);
-                }
-            }
+            project_leaf!(
+                builder,
+                topics,
+                topic_arn(),
+                Node::AwsSnsTopic,
+                region_idx,
+                Edge::Contains
+            )
         }
         AmazonCollection::AmazonCloudFront(dists) => {
             let g_idx = builder.get_or_add_node(Node::AwsRegion("global".into()));
