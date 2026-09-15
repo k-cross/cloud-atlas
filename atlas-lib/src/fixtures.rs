@@ -1,5 +1,6 @@
 use crate::Settings;
 use crate::atlas::collection::CollectionSource;
+use crate::atlas::containment;
 use crate::atlas::definition::Node;
 use crate::atlas::flow::{FlowAction, FlowIndex, FlowObservation};
 use crate::atlas::graph_builder::GraphBuilder;
@@ -39,6 +40,7 @@ pub fn all() -> Vec<Provider> {
 pub fn build_graph() -> GraphBuilder {
     let mut builder = topology();
     observed().overlay(&mut builder);
+    containment::link(&mut builder);
     builder
 }
 
@@ -408,6 +410,12 @@ pub fn aws() -> Provider {
                         .cidr_ipv6("2001:0DB8:0000:0000:0000:0000:0000:0044/128")
                         .build(),
                 )
+                .build(),
+        )
+        .ip_permissions_egress(
+            IpPermission::builder()
+                .ip_ranges(IpRange::builder().cidr_ip("203.0.113.0/24").build())
+                .ipv6_ranges(Ipv6Range::builder().cidr_ipv6("2001:db8::/32").build())
                 .build(),
         )
         .build();

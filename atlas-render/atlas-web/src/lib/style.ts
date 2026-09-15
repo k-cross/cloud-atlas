@@ -30,6 +30,7 @@ export const EDGE_COLORS: Record<string, string> = {
 	ResolvesTo: "#6c4a78",
 
 	TrafficFlow: "#3f8f6f",
+	Covers: "#3d4f60",
 };
 
 export const FLOW_STATUS_COLORS: Record<string, string> = {

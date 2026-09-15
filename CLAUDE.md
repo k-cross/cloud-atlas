@@ -319,6 +319,18 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
 - `GraphBuilder::add_edge` deduplicates identical edges automatically, and `GraphBuilder::merge(&graph)` is the single definition of folding one graph into another by node identity — `patch::carry_forward` is a thin policy wrapper over it, so never hand-roll a node/edge dedup pass. `GraphBuilder::remove_node` is the matching removal: it reports every edge that died with the node (the patch needs to name them) and repairs `node_map` after petgraph's swap-remove, which silently moves the last node onto the removed index. Never call `graph.remove_node` directly on a builder-owned graph.
 - Event adapters: `atlas::event::ChangeEvent` is the normalized shape every provider's live feed translates into, and `EventApplier` is the only thing that applies one (idempotency + ordering live there, not at the call sites). A new adapter builds its `context` subgraph with the *projector's* own functions — see `projector::aws::project_instance` and `InstanceFacts` — so it cannot emit a shape the full scan would disagree with.
 - Flow adapters: `atlas::flow::FlowObservation` is the Tier-2 equivalent, and `FlowIndex` is the only thing that stores one — the admission rule (which endpoints may become nodes), expiry and the capacity bound all live there, not at the call sites.
+- Derived edges: `atlas::containment::link(&mut builder)` links every
+  `GenericIpAddress` that is a bare address into every one that is a CIDR range
+  covering it (`Edge::Covers`) — the thing that lets a flow record confirm the
+  security-group rule that permitted it. Call it at every point a graph is
+  finalized, **after** `patch::carry_forward` and `FlowIndex::overlay`
+  (`poll::reconcile`, `AtlasEngine::install`, `fixtures::build_graph`,
+  `examples/demo.rs`). It is *derived*, not observed: a pure function of which
+  pivots are present, so it holds no state, needs no TTL, and every lifecycle
+  falls out of the ordinary differ. The matching corollary is that
+  `carry_forward` must not hold it — `Edge::is_projected()` is the exhaustive
+  match that says which edge kinds are a scan's own evidence (`TrafficFlow` and
+  `Covers` are not), and a new `Edge` variant has to declare its side.
 - Cross-cloud pivots: `Node::ip(value)` / `Node::hostname(value)` are the only
   way to build a `GenericIpAddress`/`GenericHostname` — never name the variant
   at a producer. They canonicalise through `atlas::util::canonical_address` and

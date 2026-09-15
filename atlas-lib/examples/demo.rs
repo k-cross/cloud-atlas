@@ -1,3 +1,4 @@
+use atlas_lib::atlas::containment;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::export::{RenderObservation, render_snapshot_with};
 use atlas_lib::fixtures;
@@ -12,6 +13,7 @@ fn main() -> ExitCode {
     let mut builder = fixtures::topology();
     let observed = fixtures::observed();
     observed.overlay(&mut builder);
+    containment::link(&mut builder);
 
     let filename = "multi_cloud_demo.dot";
     let dot = format!("{}", Dot::with_config(&builder.graph, &[]));

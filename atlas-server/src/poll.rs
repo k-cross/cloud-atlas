@@ -2,6 +2,7 @@ use crate::demo;
 use crate::state::AppState;
 use crate::stream;
 use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
+use atlas_lib::atlas::containment;
 use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
@@ -59,6 +60,7 @@ fn reconcile(
         carry_forward(next, live, held);
     }
     flows.overlay(next);
+    containment::link(next);
     diff(live, &next.graph)
 }
 
@@ -280,6 +282,7 @@ mod tests {
 
     use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
     use atlas_lib::atlas::event::ChangeOp;
+    use atlas_lib::atlas::export::{edge_key, node_key};
     use atlas_lib::atlas::flow::FlowAction;
 
     const T0: i64 = 1_788_436_800_000;
@@ -307,6 +310,13 @@ mod tests {
         trimmed.retain_nodes(|g, i| g[i].kind() != kind);
         let mut builder = GraphBuilder::new();
         builder.merge(&trimmed);
+        builder
+    }
+
+    // A graph a previous reconcile produced already carries its derived edges;
+    // a hand-built baseline has to say so or the next diff reads them as new.
+    fn settled(mut builder: GraphBuilder) -> GraphBuilder {
+        containment::link(&mut builder);
         builder
     }
 
@@ -515,7 +525,7 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_still_applies_additions() {
-        let live = demo::graph(2).graph;
+        let live = settled(demo::graph(2)).graph;
         let mut next = without_kind(&demo::graph(3).graph, "AwsEc2Instance");
 
         let patch = reconcile(&live, &mut next, &holding_aws(), &no_flows());
@@ -531,12 +541,12 @@ mod tests {
 
     #[test]
     fn a_complete_scan_is_unaffected_by_carry_forward() {
-        let live = demo::graph(2).graph;
+        let live = settled(demo::graph(2)).graph;
         let mut next = demo::graph(3);
-        let same = next.graph.clone();
+        let same = settled(demo::graph(3));
 
         let with_policy = reconcile(&live, &mut next, &nothing_held(), &no_flows());
-        let plain = diff(&live, &same);
+        let plain = diff(&live, &same.graph);
 
         assert_eq!(with_policy.added_nodes.len(), plain.added_nodes.len());
         assert_eq!(with_policy.removed_nodes.len(), plain.removed_nodes.len());
@@ -665,6 +675,85 @@ mod tests {
             action: Some(FlowAction::Accepted),
             observed_at: at,
         }
+    }
+
+    fn rule_to(range: &str) -> GraphBuilder {
+        let mut builder = GraphBuilder::new();
+        let sg = builder.get_or_add_node(Node::AwsEc2SecurityGroup("sg-web".into()));
+        builder.link_to(sg, Node::ip(range), Edge::RoutesTo);
+        builder
+    }
+
+    #[test]
+    fn observed_traffic_confirms_the_rule_that_permitted_it() {
+        let live = GraphBuilder::new();
+        let mut flows = FlowIndex::default();
+        flows.observe(&observed("10.10.1.10", "203.0.113.77", now_millis()));
+
+        let mut next = rule_to("203.0.113.0/24");
+        reconcile(&live.graph, &mut next, &HashSet::new(), &flows);
+
+        assert!(next.has_edge(
+            &Node::ip("203.0.113.0/24"),
+            &Node::ip("203.0.113.77"),
+            &Edge::Covers
+        ));
+    }
+
+    #[test]
+    fn a_lapsed_flow_takes_its_containment_edge_with_it() {
+        let mut flows = FlowIndex::new(Duration::from_millis(50), FlowIndex::DEFAULT_CAPACITY);
+        flows.observe(&observed("10.10.1.10", "203.0.113.77", now_millis()));
+
+        let mut live = rule_to("203.0.113.0/24");
+        reconcile(
+            &GraphBuilder::new().graph,
+            &mut live,
+            &HashSet::new(),
+            &flows,
+        );
+        let covers = edge_key(
+            &node_key(&Node::ip("203.0.113.0/24")),
+            &node_key(&Node::ip("203.0.113.77")),
+            &Edge::Covers,
+        );
+
+        flows.expire(now_millis() + 100);
+        let mut next = rule_to("203.0.113.0/24");
+        let patch = reconcile(&live.graph, &mut next, &HashSet::new(), &flows);
+
+        assert!(
+            patch.removed_edges.contains(&covers),
+            "nothing expires a derived edge; the differ removes it once an endpoint is gone"
+        );
+    }
+
+    #[test]
+    fn a_derived_edge_never_holds_an_endpoint_through_an_outage() {
+        let mut flows = FlowIndex::default();
+        flows.observe(&observed("10.10.1.10", "203.0.113.77", now_millis()));
+
+        let mut live = rule_to("203.0.113.0/24");
+        reconcile(
+            &GraphBuilder::new().graph,
+            &mut live,
+            &HashSet::new(),
+            &flows,
+        );
+        assert!(live.contains(&Node::ip("203.0.113.77")));
+
+        let held = HashSet::from([CollectionSource::Aws]);
+        let mut next = GraphBuilder::new();
+        reconcile(&live.graph, &mut next, &held, &FlowIndex::default());
+
+        assert!(
+            !next.contains(&Node::ip("203.0.113.77")),
+            "carry_forward must not treat a Covers edge as a scan's evidence"
+        );
+        assert!(
+            next.contains(&Node::ip("203.0.113.0/24")),
+            "the rule itself is still carried, anchored by the security group"
+        );
     }
 
     fn state_with(graph: GraphBuilder) -> AppState {
@@ -812,6 +901,7 @@ mod tests {
 
         let mut live = demo::graph(2);
         flows.overlay(&mut live);
+        let live = settled(live);
         let mut next = demo::graph(2);
 
         let patch = reconcile(&live.graph, &mut next, &nothing_held(), &flows);

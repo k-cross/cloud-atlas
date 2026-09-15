@@ -47,17 +47,57 @@ For services without direct API integration, we infer their presence using secur
   the ordinary Tier-3 differ removes its edge — this tier never deletes anything
   itself.
 
-### Known gap: observed traffic does not yet confirm §2's inferred reachability
+### Observed traffic confirms §2's inferred reachability
 
-A security-group rule projects `GenericIpAddress("198.51.100.0/24")`; a flow
-record projects `GenericIpAddress("198.51.100.10")`. Generic-node identity is a
-byte-exact `HashMap<Node, NodeIndex>` lookup, so the two never meet and "a flow
-log proves the rule is actually used" does not work today. Closing it needs CIDR
-*containment* — a prefix trie over the CIDR-shaped generic nodes, rebuilt per
-scan — plus a decision on what edge kind owns the resulting link and which tier
-is allowed to expire it. Tracked as an open question in
-`docs/change_monitoring_design.md` §10. The related problem — that generic-node
-values were never canonicalised, so `2001:db8::1` and `2001:0db8:0000:…` were two
-different pivots — is now fixed: `Node::ip` / `Node::hostname` are the only
-construction point and normalize through `atlas::util`. Containment can
-therefore assume both sides are already spelled one way.
+**Built** — `atlas-lib/src/atlas/containment.rs`.
+
+A security-group rule projects `GenericIpAddress("203.0.113.0/24")`; a flow
+record projects `GenericIpAddress("203.0.113.77")`. Generic-node identity is a
+byte-exact `HashMap<Node, NodeIndex>` lookup, so the two never met and "a flow
+log proves the rule is actually used" did not work. `containment::link` closes
+it with containment rather than equality: once per pass it splits the graph's
+generic pivots into ranges and addresses and links each address into every range
+that covers it, giving the full chain
+
+```
+AwsEc2SecurityGroup -RoutesTo-> 203.0.113.0/24 -Covers-> 203.0.113.77 <-TrafficFlow- 10.10.1.11
+```
+
+- **`Edge::Covers` is its own kind.** It asserts something about a *rule*, not
+  about traffic; reusing `RoutesTo` would make a derived link indistinguishable
+  from one a scan reported.
+- **Nothing owns it, because it is derived rather than observed.** It is a pure
+  function of which pivots are present, so it is recomputed wherever a graph is
+  finalized — after `carry_forward` and after `FlowIndex::overlay` — and never
+  retained or expired on its own. Delete the rule and the range node goes with
+  it; let the flow lapse and the address goes; either way the ordinary Tier-3
+  differ removes the edge. `patch::carry_forward` correspondingly refuses to
+  hold it (`Edge::is_projected`), since a derived edge is not a provider's
+  evidence that anything still exists.
+- **Matching is per-family and width-aware.** Addresses probe only the prefix
+  widths the estate's rules actually wrote, so the pass costs what the rules
+  cost, not the 33/129 widths a family could express. A CIDR written with host
+  bits set (`198.51.100.10/24`) still matches on its network.
+- **Range-to-range is not built.** One rule subsuming another is policy overlap,
+  not traffic.
+
+Both sides arrive here already canonicalised (`Node::ip`), so containment never
+has to reason about spelling — see §10 of `docs/change_monitoring_design.md`.
+
+## 4. Service Topology
+
+**Designed, not built** — `docs/service_topology_design.md`.
+
+§1-3 stop at the address. A flow record proves traffic moved between two
+pivots; it does not yet say *which resources* were talking, because almost
+nothing in the graph carries an address — only EC2 instances, and only their
+primary private IP. An AWS load balancer's traffic rides ENIs that
+`DescribeLoadBalancers` never returns, so `alb -> instance` traffic lands with
+the balancer's side an orphan pivot. GCP instances drop `network_ip` entirely.
+
+That document states the invariant this needs — *every resource that can appear
+as a flow endpoint must carry its addresses in the graph* — and the derived
+`Edge::Serves` that collapses
+`A -> ip -TrafficFlow-> ip <- B` into one link between typed resources,
+carrying an `inferred`/`confirmed` status beside the graph so a registered
+target that receives nothing stays distinguishable from one that does not exist.

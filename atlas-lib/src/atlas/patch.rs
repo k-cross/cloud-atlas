@@ -191,7 +191,7 @@ pub fn carry_forward(
 ) {
     let anchored: HashSet<&Node> = previous
         .edge_references()
-        .filter(|e| e.weight() != &Edge::TrafficFlow)
+        .filter(|e| e.weight().is_projected())
         .flat_map(|e| [&previous[e.source()], &previous[e.target()]])
         .collect();
 
@@ -201,7 +201,7 @@ pub fn carry_forward(
     };
 
     next.merge_selected(previous, held, |source, target, edge| {
-        *edge != Edge::TrafficFlow
+        edge.is_projected()
             && [source, target].iter().all(|node| {
                 node.owner()
                     .is_none_or(|source| unreadable.contains(&source))

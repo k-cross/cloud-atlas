@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub fn is_large_cidr(cidr: &str) -> bool {
     if cidr == "0.0.0.0/0" || cidr == "::/0" || cidr == "*" {
@@ -12,7 +12,7 @@ pub fn is_large_cidr(cidr: &str) -> bool {
     false
 }
 
-pub fn canonical_address(value: &str) -> Option<String> {
+pub fn parse_address(value: &str) -> Option<(IpAddr, Option<u8>)> {
     let (addr, prefix) = match value.split_once('/') {
         Some((addr, prefix)) => (addr, Some(prefix.parse::<u8>().ok()?)),
         None => (value, None),
@@ -30,10 +30,36 @@ pub fn canonical_address(value: &str) -> Option<String> {
     };
 
     match prefix {
-        Some(width) if width > if addr.is_ipv4() { 32 } else { 128 } => None,
-        Some(width) => Some(format!("{addr}/{width}")),
-        None => Some(addr.to_string()),
+        Some(width) if width > address_bits(&addr) => None,
+        _ => Some((addr, prefix)),
     }
+}
+
+pub fn canonical_address(value: &str) -> Option<String> {
+    match parse_address(value)? {
+        (addr, Some(width)) => Some(format!("{addr}/{width}")),
+        (addr, None) => Some(addr.to_string()),
+    }
+}
+
+pub fn address_bits(addr: &IpAddr) -> u8 {
+    if addr.is_ipv4() { 32 } else { 128 }
+}
+
+pub fn mask_to_prefix(addr: &IpAddr, prefix: u8) -> Option<IpAddr> {
+    if prefix > address_bits(addr) {
+        return None;
+    }
+    Some(match addr {
+        IpAddr::V4(v4) => {
+            let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+            IpAddr::V4(Ipv4Addr::from(u32::from(*v4) & mask))
+        }
+        IpAddr::V6(v6) => {
+            let mask = u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
+            IpAddr::V6(Ipv6Addr::from(u128::from(*v6) & mask))
+        }
+    })
 }
 
 pub fn canonical_hostname(value: &str) -> Option<String> {

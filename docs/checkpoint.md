@@ -8,8 +8,14 @@ All four clouds collect, all three change-detection tiers are built for AWS, and
 the whole stack runs credential-free.
 
 - **`atlas-lib`** — collectors + projectors for AWS, GCP, Azure and Cloudflare;
-  69 `Node` kinds and 8 `Edge` kinds, with exhaustiveness guards that fail until
+  70 `Node` kinds and 9 `Edge` kinds, with exhaustiveness guards that fail until
   a new variant has a projector *and* fixture data.
+- **Containment** — `atlas::containment` links every generic address into the
+  CIDR ranges that cover it (`Edge::Covers`), so a flow record confirms the
+  security-group rule that permitted it. Derived, not owned: recomputed at every
+  graph-finalisation point after `carry_forward` and the flow overlay, so the
+  ordinary differ handles its whole lifecycle and `carry_forward` refuses to
+  hold it (`Edge::is_projected`).
 - **Generic pivots are canonical** — `Node::ip` / `Node::hostname` are the only
   way a `GenericIpAddress`/`GenericHostname` is built, normalizing through
   `util::canonical_address` (`IpAddr` round-trip, `::ffff:` unmapping, CIDR
@@ -44,10 +50,10 @@ the whole stack runs credential-free.
 
 | Suite | Command | Count |
 |---|---|---|
-| Root workspace | `cargo nextest run --all-targets` | **232** (atlas-lib 188, atlas-server 44) |
+| Root workspace | `cargo nextest run --all-targets` | **244** (atlas-lib 197, atlas-server 47) |
 | Render workspace | `cargo nextest run --all-targets` in `atlas-render/` | **21** |
 | Frontend unit | `bun test src/lib` | **40** |
-| Frontend e2e | `bun run test:e2e` | **14** |
+| Frontend e2e | `bun run test:e2e` | **13** |
 
 Collector coverage (HTTP → struct, by replay): AWS 12 in
 `cloud/amazon/collector_tests.rs` plus per-module replays, GCP 11, Cloudflare 10
@@ -61,7 +67,8 @@ succeeded.
 `c060864` server → `cbf43cf` shake fix → `6a8616d` svelte migration →
 `d381806` collector tests → `eb2944a` `atlas::collection` contract →
 `65ada32` failure handling by enum kind → `429d832`/`5f25cc4` network flows
-(Tier 2) → `56351df` → generic-pivot canonicalisation, current.
+(Tier 2) → `56351df` → generic-pivot canonicalisation → CIDR containment,
+current.
 
 ## Next up (in priority order)
 
@@ -69,13 +76,15 @@ succeeded.
    `change_monitoring_design.md`): GCP Cloud Asset Inventory feeds → Pub/Sub,
    Azure Event Grid, GCP/Azure flow logs into the same `FlowObservation`.
    Cloudflare stays on fast polling — it has no good push story.
-2. **CIDR containment for inferred reachability.** A security-group rule projects
-   `GenericIpAddress("198.51.100.0/24")`; a flow log projects
-   `GenericIpAddress("198.51.100.10")`. Exact matching keeps them apart, so
-   "observed traffic confirms an inferred edge" does not actually work yet.
-   Needs a prefix trie per scan, plus a decision on what edge kind owns the link
-   and which tier may expire it. Both sides are now canonically spelled, so
-   containment is the only thing left to build.
+2. **Service topology** (`docs/service_topology_design.md`, written this
+   session, nothing built). Flow logs cannot yet say *which resources* are
+   talking, because only EC2 instances carry an address — an ALB's traffic rides
+   ENIs the scan never sees, and GCP instances drop `network_ip` outright. Phase
+   1 is address coverage (AWS `DescribeNetworkInterfaces` is the keystone, and
+   also unblocks the Tier-1 Config ENI arm); Phase 2 is the derived
+   `Edge::Serves`, `inferred` from the control-plane chain and `confirmed` by
+   observed traffic, with the status beside the graph on the existing
+   observation channel — no `SNAPSHOT_VERSION` bump.
 3. **Rendering Phase 3 remainder**: metadata tooltips and per-node drill-down.
    Phase 4 (search) is untouched. The Tier-2 overlay ships richer data than the
    UI can currently show — `observations` carries `last_seen`/`packets`/`bytes`/
@@ -109,5 +118,6 @@ cargo run --example demo    # fixtures → multi_cloud_demo.{dot,json} + coverag
 
 Deep context: `CLAUDE.md` (architecture, testing rules, collector-test pattern),
 `docs/change_monitoring_design.md` (the three-tier roadmap and why each rule
-exists), `docs/audit_findings.md` (resolved findings, kept as patterns not to
-reintroduce).
+exists), `docs/service_topology_design.md` (the address-coverage invariant and
+the derived `Edge::Serves`), `docs/audit_findings.md` (resolved findings, kept as
+patterns not to reintroduce).

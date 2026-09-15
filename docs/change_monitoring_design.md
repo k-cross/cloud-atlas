@@ -393,19 +393,41 @@ pushes deltas. This is the server the user asked about.
   Route 53 FQDN's trailing dot) so the guard tests fail if a producer goes
   around the constructors.
 
-- **Observed traffic does not confirm inferred reachability.** §4 lists
-  "confirming inferred edges" as one of the things flow logs are genuinely good
-  for — a security-group rule says traffic *could* flow, a flow record proves it
-  *did* — and that link does not exist. Security groups project their rules as
-  `GenericIpAddress("198.51.100.0/24")` (`projector/aws.rs`), flow logs produce
-  `GenericIpAddress("198.51.100.10")`, and exact-value matching keeps them
-  apart. Closing it means CIDR *containment*, not equality: build a prefix trie
-  over the CIDR-shaped generic nodes once per scan and link each observed
-  address into the ranges that contain it. Two things to decide first — whether
-  that link is a new edge kind or a reuse of `RoutesTo` (it asserts something
-  about a *rule*, not about traffic, so probably its own kind), and who owns it,
-  since a rule-to-address edge is derived from both tiers at once and therefore
-  fits neither `carry_forward`'s ownership model nor the flow overlay's expiry.
+- ~~**Observed traffic does not confirm inferred reachability.**~~ — settled in
+  `atlas::containment`. §4 lists "confirming inferred edges" as one of the things
+  flow logs are genuinely good for: a security-group rule says traffic *could*
+  flow, a flow record proves it *did*. Security groups project their rules as
+  `GenericIpAddress("203.0.113.0/24")` and flow logs produce
+  `GenericIpAddress("203.0.113.77")`, so exact-value matching kept them apart.
+  `containment::link` now walks the graph's generic pivots once per pass, splits
+  them into ranges and addresses, and links each address into every range that
+  contains it, so the whole chain reads
+  `SecurityGroup -RoutesTo-> 203.0.113.0/24 -Covers-> 203.0.113.77 <-TrafficFlow- 10.10.1.11`.
+  The two decisions this document asked for:
+
+  - **Its own edge kind.** `Edge::Covers` asserts something about a *rule*, not
+    about traffic, and reusing `RoutesTo` would have made a derived link
+    indistinguishable from one a scan actually reported.
+  - **Owned by no tier — because it is derived, not observed.** A containment
+    edge is a pure function of which pivots are in the graph at that moment, so
+    it has no independent lifetime and needs neither `carry_forward`'s ownership
+    model nor the flow overlay's expiry. It is *recomputed* at every point a
+    graph is finalized, after `carry_forward` and after `FlowIndex::overlay`
+    (`poll::reconcile`, `AtlasEngine::install`, `fixtures::build_graph`,
+    `examples/demo.rs`). Every lifecycle then falls out of the ordinary differ:
+    delete the rule and the range node goes, so the edge goes; let the flow
+    lapse and the address goes, so the edge goes.
+
+  The corollary is that `carry_forward` must refuse to hold it, exactly as it
+  already refused `TrafficFlow` — otherwise a `Covers` edge would anchor a
+  flow-derived address through a provider outage and keep alive the very node
+  the overlay had dropped. `Edge::is_projected()` is that distinction, an
+  exhaustive match so a new edge kind has to declare which side it is on.
+
+  Range-to-range containment is deliberately **not** built: one rule subsuming
+  another is a statement about policy overlap, not about traffic, and it would
+  add an edge per nested pair in estates that write a lot of rules.
+
 - **Cross-account/org onboarding** — event feeds need setup per account/project/
   subscription; how do we make enabling them turnkey for an operator?
 - ~~**Ordering & idempotency**~~ — settled for Tier 1 in `atlas::event`:

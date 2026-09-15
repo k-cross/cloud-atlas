@@ -1,4 +1,5 @@
 pub mod collection;
+pub mod containment;
 pub mod definition;
 pub mod engine;
 pub mod event;
