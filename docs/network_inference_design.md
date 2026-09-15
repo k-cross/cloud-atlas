@@ -56,6 +56,8 @@ log proves the rule is actually used" does not work today. Closing it needs CIDR
 *containment* — a prefix trie over the CIDR-shaped generic nodes, rebuilt per
 scan — plus a decision on what edge kind owns the resulting link and which tier
 is allowed to expire it. Tracked as an open question in
-`docs/change_monitoring_design.md` §10, alongside the related problem that
-generic-node values are never canonicalised (`2001:db8::1` and
-`2001:0db8:0000:…` are two different pivots).
+`docs/change_monitoring_design.md` §10. The related problem — that generic-node
+values were never canonicalised, so `2001:db8::1` and `2001:0db8:0000:…` were two
+different pivots — is now fixed: `Node::ip` / `Node::hostname` are the only
+construction point and normalize through `atlas::util`. Containment can
+therefore assume both sides are already spelled one way.

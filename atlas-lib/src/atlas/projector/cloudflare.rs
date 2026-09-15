@@ -15,22 +15,13 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                     Edge::Contains,
                 );
 
-                let hostname_node = builder.link_to(
-                    record_node,
-                    Node::GenericHostname(record.name.as_str().into()),
-                    Edge::RoutesTo,
-                );
+                let hostname_node =
+                    builder.link_to(record_node, Node::hostname(&record.name), Edge::RoutesTo);
 
                 let target = match &record.content {
-                    DnsContent::A { content } => {
-                        Some(Node::GenericIpAddress(content.to_string().into()))
-                    }
-                    DnsContent::AAAA { content } => {
-                        Some(Node::GenericIpAddress(content.to_string().into()))
-                    }
-                    DnsContent::CNAME { content } => {
-                        Some(Node::GenericHostname(content.as_str().into()))
-                    }
+                    DnsContent::A { content } => Some(Node::ip(&content.to_string())),
+                    DnsContent::AAAA { content } => Some(Node::ip(&content.to_string())),
+                    DnsContent::CNAME { content } => Some(Node::hostname(content)),
                     _ => None,
                 };
                 if let Some(target) = target {

@@ -92,11 +92,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                                             Edge::RoutesTo,
                                         );
                                     } else if !is_large_cidr(dest) {
-                                        builder.link_to(
-                                            idx,
-                                            Node::GenericIpAddress(dest.as_str().into()),
-                                            Edge::RoutesTo,
-                                        );
+                                        builder.link_to(idx, Node::ip(dest), Edge::RoutesTo);
                                     }
                                 }
                             }
@@ -112,11 +108,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                         builder.get_or_add_node(Node::AzurePublicIpAddress(id.as_str().into()));
 
                     if let Some(ip) = &pip.ip_address {
-                        builder.link_to(
-                            idx,
-                            Node::GenericIpAddress(ip.as_str().into()),
-                            Edge::ConnectsTo,
-                        );
+                        builder.link_to(idx, Node::ip(ip), Edge::ConnectsTo);
                     }
                 }
             }
@@ -139,11 +131,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                     if let Some(props) = &app.properties
                         && let Some(hostname) = &props.default_host_name
                     {
-                        builder.link_from(
-                            app_idx,
-                            Node::GenericHostname(hostname.as_str().into()),
-                            Edge::RoutesTo,
-                        );
+                        builder.link_from(app_idx, Node::hostname(hostname), Edge::RoutesTo);
                     }
                 }
             }

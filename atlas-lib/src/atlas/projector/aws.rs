@@ -223,9 +223,9 @@ fn project_amazon_collection(
                 for r in rs.resource_records() {
                     let val = r.value();
                     let pivot_node = if is_ip {
-                        Node::GenericIpAddress(val.into())
+                        Node::ip(val)
                     } else {
-                        Node::GenericHostname(val.into())
+                        Node::hostname(val)
                     };
                     builder.link_to(rs_idx, pivot_node, Edge::ConnectsTo);
                 }
@@ -341,11 +341,7 @@ fn project_amazon_collection(
                 if let Some(alloc) = addr.allocation_id().or_else(|| addr.public_ip()) {
                     let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
                     if let Some(public_ip) = addr.public_ip() {
-                        builder.link_to(
-                            eip_idx,
-                            Node::GenericIpAddress(public_ip.into()),
-                            Edge::ConnectsTo,
-                        );
+                        builder.link_to(eip_idx, Node::ip(public_ip), Edge::ConnectsTo);
                     }
                 }
             }
@@ -450,22 +446,14 @@ fn project_amazon_collection(
                             if let Some(cidr) = ip_range.cidr_ip()
                                 && !is_large_cidr(cidr)
                             {
-                                builder.link_to(
-                                    idx,
-                                    Node::GenericIpAddress(cidr.into()),
-                                    Edge::RoutesTo,
-                                );
+                                builder.link_to(idx, Node::ip(cidr), Edge::RoutesTo);
                             }
                         }
                         for ipv6_range in perm.ipv6_ranges() {
                             if let Some(cidr) = ipv6_range.cidr_ipv6()
                                 && !is_large_cidr(cidr)
                             {
-                                builder.link_to(
-                                    idx,
-                                    Node::GenericIpAddress(cidr.into()),
-                                    Edge::RoutesTo,
-                                );
+                                builder.link_to(idx, Node::ip(cidr), Edge::RoutesTo);
                             }
                         }
                     }
@@ -540,11 +528,7 @@ pub(crate) fn project_instance(
     }
 
     if let Some(private_ip) = facts.private_ip {
-        builder.link_to(
-            inst_idx,
-            Node::GenericIpAddress(private_ip.into()),
-            Edge::ConnectsTo,
-        );
+        builder.link_to(inst_idx, Node::ip(private_ip), Edge::ConnectsTo);
     }
 
     for (key, value) in &facts.tags {

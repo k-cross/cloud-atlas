@@ -5,7 +5,7 @@ mod tests {
     use crate::atlas::definition::{Edge, Node};
     use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector;
-    use crate::atlas::util::is_large_cidr;
+    use crate::atlas::util::{canonical_address, canonical_hostname, is_large_cidr};
     use crate::fixtures;
     use crate::{Settings, fixtures::azure_id};
 
@@ -545,6 +545,32 @@ mod tests {
     }
 
     #[test]
+    fn differently_spelled_addresses_land_on_one_pivot() {
+        let builder = fixtures::build_graph();
+
+        let v6 = Node::ip("2001:db8::10");
+        assert_edge(
+            &builder,
+            &Node::hostname("v6.globex.io"),
+            &v6,
+            &Edge::ResolvesTo,
+        );
+        assert_edge(
+            &builder,
+            &v6,
+            &Node::ip("198.51.100.10"),
+            &Edge::TrafficFlow,
+        );
+
+        let expanded = Node::GenericIpAddress("2001:0db8:0000:0000:0000:0000:0000:0010".into());
+        assert!(
+            !builder.node_map.contains_key(&expanded),
+            "the flow log's spelling became a second pivot: {:?}",
+            expanded
+        );
+    }
+
+    #[test]
     fn identical_nodes_merge() {
         let mut builder = GraphBuilder::new();
         let a = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
@@ -564,6 +590,54 @@ mod tests {
 
         builder.add_edge(a, b, Edge::RoutesTo);
         assert_eq!(builder.graph.edge_count(), 2);
+    }
+
+    #[test]
+    fn addresses_canonicalise_to_one_spelling() {
+        let canonical = |v: &str| canonical_address(v).unwrap();
+
+        assert_eq!(
+            canonical("2001:0db8:0000:0000:0000:0000:0000:0010"),
+            "2001:db8::10"
+        );
+        assert_eq!(canonical("2001:DB8::10"), "2001:db8::10");
+        assert_eq!(canonical("::ffff:192.0.2.1"), "192.0.2.1");
+        assert_eq!(canonical("192.0.2.1"), "192.0.2.1");
+
+        assert_eq!(canonical("2001:0DB8:0000::0044/128"), "2001:db8::44/128");
+        assert_eq!(canonical("198.51.100.0/24"), "198.51.100.0/24");
+        assert_eq!(canonical("::ffff:198.51.100.0/120"), "198.51.100.0/24");
+        // Shorter than the ::ffff:0:0/96 block, so it is not the v4 range it resembles.
+        assert_eq!(canonical("::ffff:0.0.0.0/64"), "::ffff:0.0.0.0/64");
+
+        assert_eq!(
+            canonical_address("2001:db8::10"),
+            Some("2001:db8::10".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_value_that_will_not_parse_is_left_alone() {
+        assert_eq!(canonical_address("not-an-address"), None);
+        assert_eq!(canonical_address("192.0.2.1/33"), None);
+        assert_eq!(canonical_address("2001:db8::1/129"), None);
+        assert_eq!(canonical_address("198.51.100.0/"), None);
+        assert_eq!(canonical_hostname("."), None);
+
+        let odd = Node::ip("pl-1a2b3c4d");
+        assert_eq!(odd, Node::GenericIpAddress("pl-1a2b3c4d".into()));
+    }
+
+    #[test]
+    fn hostnames_canonicalise_to_one_spelling() {
+        assert_eq!(
+            canonical_hostname("App.Globex.IO."),
+            Some("app.globex.io".to_owned())
+        );
+        assert_eq!(
+            Node::hostname("app.globex.io."),
+            Node::hostname("APP.GLOBEX.IO")
+        );
     }
 
     #[test]

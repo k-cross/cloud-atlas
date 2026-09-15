@@ -1,4 +1,4 @@
-# Checkpoint — 2026-09-11
+# Checkpoint — 2026-09-15
 
 Where we are and what's next, so work can resume cleanly.
 
@@ -10,6 +10,12 @@ the whole stack runs credential-free.
 - **`atlas-lib`** — collectors + projectors for AWS, GCP, Azure and Cloudflare;
   69 `Node` kinds and 8 `Edge` kinds, with exhaustiveness guards that fail until
   a new variant has a projector *and* fixture data.
+- **Generic pivots are canonical** — `Node::ip` / `Node::hostname` are the only
+  way a `GenericIpAddress`/`GenericHostname` is built, normalizing through
+  `util::canonical_address` (`IpAddr` round-trip, `::ffff:` unmapping, CIDR
+  prefix re-based) and `util::canonical_hostname` (ASCII-lowercase, trailing dot
+  stripped). Unparseable values pass through untouched. Three fixture seams are
+  deliberately spelled differently on each side so the guards have teeth.
 - **Tier 3 (reconciliation)** — `atlas::patch::diff` over a persistent graph.
   `CollectionReport` keeps "could not read" distinguishable from "is gone", and
   `carry_forward` + `Retention` hold an unreadable source's resources for a
@@ -38,9 +44,9 @@ the whole stack runs credential-free.
 
 | Suite | Command | Count |
 |---|---|---|
-| Root workspace | `cargo nextest run --all-targets` | **225** (atlas-lib 181, atlas-server 44) |
+| Root workspace | `cargo nextest run --all-targets` | **232** (atlas-lib 188, atlas-server 44) |
 | Render workspace | `cargo nextest run --all-targets` in `atlas-render/` | **21** |
-| Frontend unit | `bun test src/lib` | **38** |
+| Frontend unit | `bun test src/lib` | **40** |
 | Frontend e2e | `bun run test:e2e` | **14** |
 
 Collector coverage (HTTP → struct, by replay): AWS 12 in
@@ -55,7 +61,7 @@ succeeded.
 `c060864` server → `cbf43cf` shake fix → `6a8616d` svelte migration →
 `d381806` collector tests → `eb2944a` `atlas::collection` contract →
 `65ada32` failure handling by enum kind → `429d832`/`5f25cc4` network flows
-(Tier 2) → `452b969` current.
+(Tier 2) → `56351df` → generic-pivot canonicalisation, current.
 
 ## Next up (in priority order)
 
@@ -63,18 +69,18 @@ succeeded.
    `change_monitoring_design.md`): GCP Cloud Asset Inventory feeds → Pub/Sub,
    Azure Event Grid, GCP/Azure flow logs into the same `FlowObservation`.
    Cloudflare stays on fast polling — it has no good push story.
-2. **Generic-node canonicalisation** (open question in
-   `change_monitoring_design.md` §10). `GenericIpAddress` identity is byte-exact,
-   so `2001:db8::1` and `2001:0db8:0000:…` are two different pivots and the
-   cross-cloud seam silently fails to stitch. Fix at the single construction
-   site, leaving anything that will not parse untouched.
-3. **CIDR containment for inferred reachability.** A security-group rule projects
+2. **CIDR containment for inferred reachability.** A security-group rule projects
    `GenericIpAddress("198.51.100.0/24")`; a flow log projects
    `GenericIpAddress("198.51.100.10")`. Exact matching keeps them apart, so
    "observed traffic confirms an inferred edge" does not actually work yet.
-   Needs a prefix trie per scan, plus a decision on what edge kind owns the link.
-4. **Rendering Phase 3 remainder**: metadata tooltips and per-node drill-down.
-   Phase 4 (search) is untouched.
+   Needs a prefix trie per scan, plus a decision on what edge kind owns the link
+   and which tier may expire it. Both sides are now canonically spelled, so
+   containment is the only thing left to build.
+3. **Rendering Phase 3 remainder**: metadata tooltips and per-node drill-down.
+   Phase 4 (search) is untouched. The Tier-2 overlay ships richer data than the
+   UI can currently show — `observations` carries `last_seen`/`packets`/`bytes`/
+   `status` per key and the only way to read it is inferring from halo intensity
+   and bead density.
 
 ### Backlog (flagged during audits, not yet done)
 

@@ -319,6 +319,15 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
 - `GraphBuilder::add_edge` deduplicates identical edges automatically, and `GraphBuilder::merge(&graph)` is the single definition of folding one graph into another by node identity — `patch::carry_forward` is a thin policy wrapper over it, so never hand-roll a node/edge dedup pass. `GraphBuilder::remove_node` is the matching removal: it reports every edge that died with the node (the patch needs to name them) and repairs `node_map` after petgraph's swap-remove, which silently moves the last node onto the removed index. Never call `graph.remove_node` directly on a builder-owned graph.
 - Event adapters: `atlas::event::ChangeEvent` is the normalized shape every provider's live feed translates into, and `EventApplier` is the only thing that applies one (idempotency + ordering live there, not at the call sites). A new adapter builds its `context` subgraph with the *projector's* own functions — see `projector::aws::project_instance` and `InstanceFacts` — so it cannot emit a shape the full scan would disagree with.
 - Flow adapters: `atlas::flow::FlowObservation` is the Tier-2 equivalent, and `FlowIndex` is the only thing that stores one — the admission rule (which endpoints may become nodes), expiry and the capacity bound all live there, not at the call sites.
+- Cross-cloud pivots: `Node::ip(value)` / `Node::hostname(value)` are the only
+  way to build a `GenericIpAddress`/`GenericHostname` — never name the variant
+  at a producer. They canonicalise through `atlas::util::canonical_address` and
+  `canonical_hostname`, because these nodes resolve by exact value through
+  `GraphBuilder`'s `HashMap<Node, NodeIndex>`: without one spelling,
+  `2001:0db8:0000:…:0010` from a flow-log writer and `2001:db8::10` from a DNS
+  API are two pivots and the seam silently fails to stitch, with no error
+  anywhere. A value that will not parse (an AWS prefix-list id, a service tag)
+  is passed through untouched rather than guessed at.
 - `patch::merge_additions` is the single definition of "fold this subgraph into the live graph and report only what was genuinely new". Both live tiers use it; novelty has to be measured before the merge, since `GraphBuilder::merge` dedups silently.
 
 `docs/audit_findings.md` records resolved audit findings — patterns to avoid reintroducing. The live tiers' entries are the sharpest of them: a flow-log notification is deleted only once its objects were actually *read* (Tier 1 can delete unconditionally, Tier 2 cannot — it has a network fetch in that gap), the between-scans merge context is bounded by what `FlowIndex` retained rather than by the batch that arrived, eviction cuts on a tie without collapsing the index, and an interface whose subnet the event did not report attaches to nothing rather than to a guess.

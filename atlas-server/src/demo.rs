@@ -12,8 +12,8 @@ const FLOW_TTL_TICKS: u32 = 3;
 pub fn graph(tick: u64) -> GraphBuilder {
     let mut builder = fixtures::topology();
     if tick % 2 == 1 {
-        let host = builder.get_or_add_node(Node::GenericHostname(SENTINEL_HOSTNAME.into()));
-        let ip = builder.get_or_add_node(Node::GenericIpAddress(SENTINEL_ADDRESS.into()));
+        let host = builder.get_or_add_node(Node::hostname(SENTINEL_HOSTNAME));
+        let ip = builder.get_or_add_node(Node::ip(SENTINEL_ADDRESS));
         builder.add_edge(host, ip, Edge::ResolvesTo);
     }
     builder

@@ -1,5 +1,7 @@
 use crate::atlas::collection::CollectionSource;
+use crate::atlas::util::{canonical_address, canonical_hostname};
 use std::fmt;
+use std::sync::Arc;
 
 macro_rules! kinds {
     ($ty:ident, $($variant:ident),* $(,)?) => {
@@ -144,6 +146,23 @@ nodes!(
         CloudflareD1Database(id) => "Cloudflare::D1Database({id})",
     ],
 );
+
+// The cross-cloud pivots resolve by exact value through `GraphBuilder`'s
+// `HashMap<Node, NodeIndex>`, so every producer must spell one address the same
+// way. Build them here, never by naming the variant.
+impl Node {
+    pub fn ip(value: &str) -> Node {
+        Node::GenericIpAddress(intern(canonical_address(value), value))
+    }
+
+    pub fn hostname(value: &str) -> Node {
+        Node::GenericHostname(intern(canonical_hostname(value), value))
+    }
+}
+
+fn intern(canonical: Option<String>, original: &str) -> Arc<str> {
+    canonical.map_or_else(|| Arc::from(original), Arc::from)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Edge {

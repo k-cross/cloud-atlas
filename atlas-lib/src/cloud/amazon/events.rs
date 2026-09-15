@@ -344,11 +344,7 @@ fn typed_context(
         "AWS::EC2::EIP" => {
             let config: EipConfiguration = item.configuration().unwrap_or_default();
             match config.public_ip {
-                Some(ip) => linked(
-                    node.clone(),
-                    Node::GenericIpAddress(ip.as_str().into()),
-                    Edge::ConnectsTo,
-                ),
+                Some(ip) => linked(node.clone(), Node::ip(&ip), Edge::ConnectsTo),
                 None => solo(node.clone()),
             }
         }

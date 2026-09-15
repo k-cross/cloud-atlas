@@ -377,21 +377,22 @@ pushes deltas. This is the server the user asked about.
   delivery lag. Too short marks healthy resources dark for pipeline reasons;
   too long claims a decommissioned host is still talking. The right value is
   probably per-provider, since GCP and Azure aggregate differently.
-- **Generic-node identity is byte-exact, with no normalization.** Every
-  cross-cloud merge in this design — and now every flow-log endpoint — resolves
-  by a `HashMap<Node, NodeIndex>` lookup on the typed value, so
-  `GenericIpAddress("10.10.1.10")` matches only that exact string.
-  `010.010.001.010`, `2001:db8::1` against `2001:0db8:0000:...`, an
-  IPv4-mapped IPv6 form, or a hostname differing only in a trailing dot are all
-  *different nodes*. The graph then holds two pivots for one address and the
-  seam silently fails to stitch. This predates Tier 2 (the fixtures document
-  their seams as "identical strings on purpose"), but flow logs widen the
-  exposure, since AWS formats addresses in the flow-log writer rather than in
-  the EC2 API. The fix is to canonicalise at the one place a `GenericIpAddress`
-  or `GenericHostname` is constructed — parse to `IpAddr` and re-`Display`,
-  lowercase and strip the trailing dot on hostnames — rather than at each of the
-  ~dozen call sites, and to leave anything that will not parse untouched instead
-  of guessing.
+- ~~**Generic-node identity is byte-exact, with no normalization.**~~ —
+  settled. Every cross-cloud merge in this design, and every flow-log endpoint,
+  resolves by a `HashMap<Node, NodeIndex>` lookup on the typed value, so
+  `2001:0db8:0000:...:0010` and `2001:db8::10`, an IPv4-mapped form, an
+  uppercase or trailing-dot hostname were all *different nodes* and the seam
+  silently failed to stitch. `Node::ip` / `Node::hostname`
+  (`definition.rs`) are now the only way a pivot is built: they canonicalise
+  through `util::canonical_address` (parse to `IpAddr` and re-`Display`,
+  unmapping `::ffff:` forms, preserving and re-basing a CIDR prefix) and
+  `util::canonical_hostname` (ASCII-lowercase, strip trailing dots). A value
+  that will not parse — an AWS prefix-list id, a service tag — is left exactly
+  as it came, never guessed at. The fixtures now spell three seams
+  *differently* on each side (the v6 flow-log endpoint, the v6 egress CIDR, the
+  Route 53 FQDN's trailing dot) so the guard tests fail if a producer goes
+  around the constructors.
+
 - **Observed traffic does not confirm inferred reachability.** §4 lists
   "confirming inferred edges" as one of the things flow logs are genuinely good
   for — a security-group rule says traffic *could* flow, a flow record proves it

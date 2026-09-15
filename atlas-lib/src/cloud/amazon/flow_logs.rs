@@ -201,8 +201,8 @@ fn record(layout: &Layout, line: &str, scope: &str) -> Result<FlowObservation, S
     Ok(FlowObservation {
         source: SOURCE,
         scope: scope.to_owned(),
-        src: Node::GenericIpAddress(src.into()),
-        dst: Node::GenericIpAddress(dst.into()),
+        src: Node::ip(src),
+        dst: Node::ip(dst),
         resources,
         packets: number(layout.packets),
         bytes: number(layout.bytes),

@@ -64,8 +64,8 @@ pub fn flows() -> Vec<FlowObservation> {
     let flow = |src: &str, dst: &str, resources: Vec<Node>, packets: u64, action| FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
-        src: Node::GenericIpAddress(src.into()),
-        dst: Node::GenericIpAddress(dst.into()),
+        src: Node::ip(src),
+        dst: Node::ip(dst),
         resources,
         packets,
         bytes: packets.saturating_mul(AVERAGE_PACKET_BYTES),
@@ -122,7 +122,7 @@ pub fn flows() -> Vec<FlowObservation> {
             Some(FlowAction::Accepted),
         ),
         flow(
-            "2001:db8::10",
+            "2001:0db8:0000:0000:0000:0000:0000:0010",
             "198.51.100.10",
             Vec::new(),
             7_400,
@@ -149,8 +149,8 @@ pub fn burst_flow() -> FlowObservation {
     FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
-        src: Node::GenericIpAddress("192.0.2.99".into()),
-        dst: Node::GenericIpAddress("10.10.1.10".into()),
+        src: Node::ip("192.0.2.99"),
+        dst: Node::ip("10.10.1.10"),
         resources: vec![
             Node::AwsEc2Instance("i-globex-web-01".into()),
             Node::AwsEc2Eni("eni-globex-web-01a".into()),
@@ -300,7 +300,7 @@ pub fn aws() -> Provider {
         .r#type(aws_sdk_route53::types::RrType::Cname)
         .resource_records(
             aws_sdk_route53::types::ResourceRecord::builder()
-                .value("app-globex.azurewebsites.net")
+                .value("app-globex.azurewebsites.net.")
                 .build()
                 .unwrap(),
         )
@@ -403,7 +403,11 @@ pub fn aws() -> Provider {
         .ip_permissions_egress(
             IpPermission::builder()
                 .ip_ranges(IpRange::builder().cidr_ip("192.0.2.44/32").build())
-                .ipv6_ranges(Ipv6Range::builder().cidr_ipv6("2001:db8::44/128").build())
+                .ipv6_ranges(
+                    Ipv6Range::builder()
+                        .cidr_ipv6("2001:0DB8:0000:0000:0000:0000:0000:0044/128")
+                        .build(),
+                )
                 .build(),
         )
         .build();

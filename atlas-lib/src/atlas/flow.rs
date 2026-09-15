@@ -348,7 +348,7 @@ mod tests {
     const MINUTE: i64 = 60 * 1_000;
 
     fn ip(addr: &str) -> Node {
-        Node::GenericIpAddress(addr.into())
+        Node::ip(addr)
     }
 
     fn flow(src: &str, dst: &str, at: i64) -> FlowObservation {

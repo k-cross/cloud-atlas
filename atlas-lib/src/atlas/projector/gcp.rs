@@ -70,11 +70,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                     {
                         for range in ranges {
                             if !is_large_cidr(range) {
-                                builder.link_to(
-                                    idx,
-                                    Node::GenericIpAddress(range.as_str().into()),
-                                    Edge::RoutesTo,
-                                );
+                                builder.link_to(idx, Node::ip(range), Edge::RoutesTo);
                             }
                         }
                     }
@@ -89,11 +85,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                     if let Some(ips) = &sql.ip_addresses {
                         for ip in ips {
                             if let Some(ip_addr) = &ip.ip_address {
-                                builder.link_to(
-                                    idx,
-                                    Node::GenericIpAddress(ip_addr.as_str().into()),
-                                    Edge::ConnectsTo,
-                                );
+                                builder.link_to(idx, Node::ip(ip_addr), Edge::ConnectsTo);
                             }
                         }
                     }
@@ -153,11 +145,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         let hostname = uri
                             .trim_start_matches("https://")
                             .trim_start_matches("http://");
-                        builder.link_from(
-                            s_idx,
-                            Node::GenericHostname(hostname.into()),
-                            Edge::RoutesTo,
-                        );
+                        builder.link_from(s_idx, Node::hostname(hostname), Edge::RoutesTo);
                     }
                 }
             }
@@ -188,11 +176,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         builder.get_or_add_node(Node::GcpComputeForwardingRule(id.as_str().into()));
 
                     if let Some(ip) = &rule.ip_address {
-                        builder.link_to(
-                            idx,
-                            Node::GenericIpAddress(ip.as_str().into()),
-                            Edge::ConnectsTo,
-                        );
+                        builder.link_to(idx, Node::ip(ip), Edge::ConnectsTo);
                     }
                 }
             }
