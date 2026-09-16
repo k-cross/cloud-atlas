@@ -11,7 +11,7 @@ Discovers cloud configuration and keeps a live, in-memory property graph of the 
 - **Service topology**: derived `Edge::Serves` links collapse load balancer → interface → address → instance paths into one edge, `inferred` from wiring and `confirmed` by traffic. See [`docs/service_topology_design.md`](docs/service_topology_design.md).
 - **Interactive rendering** (`atlas-render/`): a WebAssembly force-directed layout feeding a Sigma.js WebGL frontend. See [`atlas-render/README.md`](atlas-render/README.md).
 
-Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together, e.g. Route 53 resolving to an Azure App Service or GCP Cloud Run.
+Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together, e.g. Route 53 resolving to an Azure App Service or GCP Cloud Run. DNS from every provider reads `name -ResolvesTo-> record -ResolvesTo-> target`, so records for the same name in different providers meet at one node.
 
 ## Goals
 
@@ -29,7 +29,7 @@ Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together, e.
 
 ## Providers
 
-- **AWS** — standard credential chain; `--regions`. Resources that don't map to a region live under a `global` scope. S3 buckets are global. Route 53 zones and record sets are global, and record sets `ResolvesTo` their IPs and alias targets.
+- **AWS** — standard credential chain; `--regions`. Resources that don't map to a region live under a `global` scope. S3 buckets are global. Route 53 zones and record sets are global.
 - **GCP** — lightweight REST clients; local gcloud auth or a browser OAuth flow; `--gcp-projects`. Compute, firewalls, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, networking.
 - **Cloudflare** — `CLOUDFLARE_API_TOKEN`; `--cloudflare`. Zones, DNS records, Workers, Durable Objects, KV, R2, D1.
 - **Azure** — Azure Resource Graph, cross-subscription; `az login`; `--azure-subscriptions`. VMs, AKS, App Services, Function Apps, VNets, subnets, NSGs, public IPs, DNS zones, CDN profiles, Storage, SQL, Cosmos DB, Service Bus, Event Grid.

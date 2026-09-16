@@ -15,8 +15,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                     Edge::Contains,
                 );
 
-                let hostname_node =
-                    builder.link_to(record_node, Node::hostname(&record.name), Edge::RoutesTo);
+                builder.link_from(record_node, Node::hostname(&record.name), Edge::ResolvesTo);
 
                 let target = match &record.content {
                     DnsContent::A { content } => Some(Node::ip(&content.to_string())),
@@ -25,7 +24,7 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                     _ => None,
                 };
                 if let Some(target) = target {
-                    builder.link_to(hostname_node, target, Edge::ResolvesTo);
+                    builder.link_to(record_node, target, Edge::ResolvesTo);
                 }
             }
         }

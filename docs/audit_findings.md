@@ -53,3 +53,9 @@ Test: `pruning_keeps_a_batch_that_shares_one_timestamp`.
 `carry_forward` kept an edge if *either* endpoint was held, and ownerless pivots count as held whenever anything references them. So a healthy provider's stale edge into a shared pivot came back every tick while another provider was down. An edge is now carried only when every endpoint that has an owner is held.
 
 Test: `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.
+
+### No projected edge may join two ownerless pivots
+
+The owner rule above passes vacuously for an edge with no owned endpoint, and such an edge anchors its own endpoints. Cloudflare projected `hostname -ResolvesTo-> target`, so while *any* provider was unreadable a healthy zone's repointed or deleted records kept their old answers. DNS now reads `hostname -ResolvesTo-> record -ResolvesTo-> target` for Cloudflare and Route 53 alike (the record-to-name edge was also `RoutesTo`, which means traffic).
+
+Tests: `every_projected_edge_has_an_owned_endpoint`, `carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records`.

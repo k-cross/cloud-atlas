@@ -4,7 +4,9 @@ How separately scanned clouds are joined into one graph, and how observed traffi
 
 ## 1. Universal pivot nodes
 
-`GenericIpAddress` and `GenericHostname` are the shared vocabulary between clouds. Producers build them only through `Node::ip`/`Node::hostname`, which canonicalise spelling (`util::canonical_address`: `IpAddr` round-trip, `::ffff:` unmapping, CIDR re-basing; `util::canonical_hostname`: lowercase, no trailing dot). Unparseable values pass through untouched. Because `GraphBuilder` dedups by value, an AWS interface that `ConnectsTo` an address and a Cloudflare record that `ResolvesTo` it meet at the same node with no API-level correlation. The fixtures spell three seams differently on each side so the guard tests catch a producer that bypasses the constructors.
+`GenericIpAddress` and `GenericHostname` are the shared vocabulary between clouds. Producers build them only through `Node::ip`/`Node::hostname`, which canonicalise spelling (`util::canonical_address`: `IpAddr` round-trip, `::ffff:` unmapping, CIDR re-basing; `util::canonical_hostname`: lowercase, no trailing dot). Unparseable values pass through untouched. Because `GraphBuilder` dedups by value, an AWS interface that `ConnectsTo` an address and a Cloudflare record that `ResolvesTo` it meet at the same node with no API-level correlation.
+
+DNS always takes one shape, `GenericHostname(name) -ResolvesTo-> record -ResolvesTo-> target`, so a CNAME in one provider chains through a name another provider defines. The record sits between the two pivots because an edge joining two ownerless nodes belongs to no provider, and `carry_forward` would keep it through any provider's outage. The fixtures spell three seams differently on each side so the guard tests catch a producer that bypasses the constructors.
 
 ## 2. Inferring external services
 

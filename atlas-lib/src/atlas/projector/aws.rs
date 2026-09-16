@@ -351,6 +351,7 @@ fn project_amazon_collection(
                     Node::AwsRoute53RecordSet(rs.name().into()),
                     Edge::Contains,
                 );
+                builder.link_from(rs_idx, Node::hostname(rs.name()), Edge::ResolvesTo);
 
                 let is_ip = rs.r#type() == &aws_sdk_route53::types::RrType::A
                     || rs.r#type() == &aws_sdk_route53::types::RrType::Aaaa;

@@ -27,7 +27,7 @@ All four clouds collect; all three change-detection tiers exist for AWS; the who
 - **Retention granularity** — per provider today, so a long outage releases the whole estate at once; also needs provenance.
 - **Backpressure** — a change burst must not stall the push hub; may need per-client coalescing.
 - **`cargo xtask dev`** doesn't forward live-feed flags; run `atlas-server` directly.
-- **Cloudflare DNS** — the projector links a record to its own name with `RoutesTo`; rule 5 reserves that for traffic.
+- **Route 53 record-set identity** — keyed by name alone, so an A and a TXT record for one name, or split-horizon zones, collapse into one node.
 
 ## Resume
 

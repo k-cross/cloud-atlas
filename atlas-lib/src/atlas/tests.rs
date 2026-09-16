@@ -8,6 +8,7 @@ mod tests {
     use crate::atlas::util::{canonical_address, canonical_hostname, is_large_cidr};
     use crate::fixtures;
     use crate::{Settings, fixtures::azure_id};
+    use petgraph::visit::EdgeRef;
 
     fn assert_edge(builder: &GraphBuilder, a: &Node, b: &Node, edge: &Edge) {
         let a_idx = builder
@@ -38,6 +39,11 @@ mod tests {
         );
     }
 
+    fn assert_resolves(builder: &GraphBuilder, name: &str, record: &Node, target: &Node) {
+        assert_edge(builder, &Node::hostname(name), record, &Edge::ResolvesTo);
+        assert_edge(builder, record, target, &Edge::ResolvesTo);
+    }
+
     #[test]
     fn every_node_kind_appears_in_fixture_graph() {
         let builder = fixtures::build_graph();
@@ -53,6 +59,31 @@ mod tests {
             "Node kinds never projected from fixtures: {:?}. \
              Add fixture data (src/fixtures.rs) and a projector mapping for them.",
             missing
+        );
+    }
+
+    // carry_forward scopes an edge by its owned endpoints, so an edge between
+    // two ownerless pivots belongs to every source at once and survives any
+    // provider's outage, however stale it is.
+    #[test]
+    fn every_projected_edge_has_an_owned_endpoint() {
+        let graph = fixtures::topology().graph;
+        let unowned: Vec<String> = graph
+            .edge_references()
+            .filter(|e| e.weight().is_projected())
+            .filter(|e| graph[e.source()].owner().is_none() && graph[e.target()].owner().is_none())
+            .map(|e| {
+                format!(
+                    "{} -{}-> {}",
+                    graph[e.source()],
+                    e.weight(),
+                    graph[e.target()]
+                )
+            })
+            .collect();
+        assert!(
+            unowned.is_empty(),
+            "projected edges no provider owns: {unowned:?}"
         );
     }
 
@@ -133,17 +164,17 @@ mod tests {
             &Edge::RoutesTo,
         );
 
-        assert_edge(
+        assert_resolves(
             &builder,
+            "origin.globex.io",
             &Node::AwsRoute53RecordSet("origin.globex.io.".into()),
-            &Node::GenericIpAddress("203.0.113.10".into()),
-            &Edge::ResolvesTo,
+            &Node::ip("203.0.113.10"),
         );
-        assert_edge(
+        assert_resolves(
             &builder,
+            "app.globex.io",
             &Node::AwsRoute53RecordSet("app.globex.io.".into()),
-            &Node::GenericHostname("app-globex.azurewebsites.net".into()),
-            &Edge::ResolvesTo,
+            &Node::hostname("app-globex.azurewebsites.net"),
         );
 
         let s3 = Node::AwsConfigResource {
@@ -419,36 +450,30 @@ mod tests {
             &Node::CloudflareDnsRecord("rec-app".into()),
             &Edge::Contains,
         );
-        assert_edge(
+        let record = |id: &str| Node::CloudflareDnsRecord(id.into());
+        assert_resolves(
             &builder,
-            &Node::CloudflareDnsRecord("rec-app".into()),
-            &Node::GenericHostname("app.globex.io".into()),
-            &Edge::RoutesTo,
+            "app.globex.io",
+            &record("rec-app"),
+            &Node::hostname("app-globex.azurewebsites.net"),
         );
-
-        assert_edge(
+        assert_resolves(
             &builder,
-            &Node::GenericHostname("app.globex.io".into()),
-            &Node::GenericHostname("app-globex.azurewebsites.net".into()),
-            &Edge::ResolvesTo,
+            "data.globex.io",
+            &record("rec-data"),
+            &Node::hostname("run.globex.app"),
         );
-        assert_edge(
+        assert_resolves(
             &builder,
-            &Node::GenericHostname("data.globex.io".into()),
-            &Node::GenericHostname("run.globex.app".into()),
-            &Edge::ResolvesTo,
+            "db.globex.io",
+            &record("rec-db"),
+            &Node::ip("198.51.100.10"),
         );
-        assert_edge(
+        assert_resolves(
             &builder,
-            &Node::GenericHostname("db.globex.io".into()),
-            &Node::GenericIpAddress("198.51.100.10".into()),
-            &Edge::ResolvesTo,
-        );
-        assert_edge(
-            &builder,
-            &Node::GenericHostname("v6.globex.io".into()),
-            &Node::GenericIpAddress("2001:db8::10".into()),
-            &Edge::ResolvesTo,
+            "v6.globex.io",
+            &record("rec-v6"),
+            &Node::ip("2001:db8::10"),
         );
 
         assert_edge(
@@ -487,18 +512,16 @@ mod tests {
     fn multi_cloud_seams_merge() {
         let builder = fixtures::build_graph();
 
-        let cf_hostname = Node::GenericHostname("app.globex.io".into());
         let azure_hostname = Node::GenericHostname("app-globex.azurewebsites.net".into());
         let app = Node::AzureAppService(azure_id("Microsoft.Web/sites/app-globex").as_str().into());
-        assert_edge(&builder, &cf_hostname, &azure_hostname, &Edge::ResolvesTo);
         assert_edge(&builder, &azure_hostname, &app, &Edge::RoutesTo);
 
-        assert_edge(
-            &builder,
-            &Node::AwsRoute53RecordSet("app.globex.io.".into()),
-            &azure_hostname,
-            &Edge::ResolvesTo,
-        );
+        for record in [
+            Node::CloudflareDnsRecord("rec-app".into()),
+            Node::AwsRoute53RecordSet("app.globex.io.".into()),
+        ] {
+            assert_resolves(&builder, "app.globex.io", &record, &azure_hostname);
+        }
 
         let shared_ip = Node::GenericIpAddress("10.20.0.5".into());
         assert_edge(
@@ -519,11 +542,11 @@ mod tests {
         );
 
         let public_ip = Node::GenericIpAddress("198.51.100.10".into());
-        assert_edge(
+        assert_resolves(
             &builder,
-            &Node::GenericHostname("db.globex.io".into()),
+            "db.globex.io",
+            &Node::CloudflareDnsRecord("rec-db".into()),
             &public_ip,
-            &Edge::ResolvesTo,
         );
         assert_edge(
             &builder,
@@ -536,11 +559,11 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
-        assert_edge(
+        assert_resolves(
             &builder,
-            &Node::GenericHostname("data.globex.io".into()),
-            &Node::GenericHostname("run.globex.app".into()),
-            &Edge::ResolvesTo,
+            "data.globex.io",
+            &Node::CloudflareDnsRecord("rec-data".into()),
+            &Node::hostname("run.globex.app"),
         );
     }
 
@@ -921,11 +944,11 @@ mod tests {
         let builder = fixtures::build_graph();
 
         let v6 = Node::ip("2001:db8::10");
-        assert_edge(
+        assert_resolves(
             &builder,
-            &Node::hostname("v6.globex.io"),
+            "v6.globex.io",
+            &Node::CloudflareDnsRecord("rec-v6".into()),
             &v6,
-            &Edge::ResolvesTo,
         );
         assert_edge(
             &builder,
@@ -1331,6 +1354,50 @@ mod tests {
         assert!(
             !next.has_edge(&zone, &host, &Edge::ResolvesTo),
             "a healthy source's deleted edge must not be resurrected by the pivot it shares"
+        );
+    }
+
+    #[test]
+    fn carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records() {
+        use crate::atlas::patch::carry_forward;
+
+        let repointed = Node::CloudflareDnsRecord("rec-app".into());
+        let deleted = Node::CloudflareDnsRecord("rec-gone".into());
+        let (old_ip, new_ip) = (Node::ip("192.0.2.1"), Node::ip("192.0.2.2"));
+
+        let mut live = GraphBuilder::new();
+        for (record, name) in [
+            (&repointed, "app.example.com"),
+            (&deleted, "gone.example.com"),
+        ] {
+            let idx = live.get_or_add_node(record.clone());
+            live.link_from(idx, Node::hostname(name), Edge::ResolvesTo);
+            live.link_to(idx, old_ip.clone(), Edge::ResolvesTo);
+        }
+
+        let mut next = GraphBuilder::new();
+        let idx = next.get_or_add_node(repointed.clone());
+        next.link_from(idx, Node::hostname("app.example.com"), Edge::ResolvesTo);
+        next.link_to(idx, new_ip.clone(), Edge::ResolvesTo);
+
+        carry_forward(
+            &mut next,
+            &live.graph,
+            &std::collections::HashSet::from([CollectionSource::Aws]),
+        );
+
+        assert!(!next.has_edge(&repointed, &old_ip, &Edge::ResolvesTo));
+        assert!(!next.has_edge(
+            &Node::hostname("gone.example.com"),
+            &deleted,
+            &Edge::ResolvesTo
+        ));
+        assert!(
+            !next
+                .graph
+                .edge_references()
+                .any(|e| next.graph[e.target()] == old_ip),
+            "an unreadable AWS scan must not keep a healthy Cloudflare zone's old answer"
         );
     }
 
