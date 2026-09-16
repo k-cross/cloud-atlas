@@ -1,134 +1,55 @@
 # Audit findings
 
-Resolved findings, kept as patterns to avoid reintroducing. Each one is pinned
-by a test; the test name is the fastest way back to the reasoning.
+Resolved findings, kept as patterns not to reintroduce. Each is pinned by the named test.
 
 ## Tier 2 (flow logs)
 
-### A notification is only deleted when its objects were actually read
+### Delete a notification only after its objects were read
 
-`FlowLogQueue::receive` used to push every message's receipt handle onto the
-delete list regardless of what happened in between, so a transient S3 failure
-(503, throttle, reset) recorded `Unavailable`, returned no observations, and
-*still* deleted the message — losing that flow-log object permanently, because
-SQS has already forgotten it.
+`FlowLogQueue::receive` deleted every message even when the S3 read failed transiently, losing the object for good. Tier 1 can delete unconditionally because only a local parse sits between receive and delete; Tier 2 has a network fetch there. `read_object` returns `Option`: `None` leaves the message queued, `Some` deletes it — including unparseable content (`Malformed`), which would only fail again.
 
-Tier 1 can delete unconditionally: the only step between receiving and deleting
-is a local parse, which cannot fail transiently. Tier 2 puts a network fetch in
-that gap, so it needs the stronger rule. `read_object` therefore returns
-`Option`: `None` means "could not read, leave it on the queue", `Some` means
-"read it" — including when the content was unusable. A `Malformed` object is
-still deleted, because redelivering something that will not parse just replays
-the failure.
+Exception: a 404/410 object is gone, not retryable, and retrying would re-observe its siblings forever and inflate their counters. It is reported `Malformed` and the message released. Auth failures still retry.
 
-The cost is that a message naming several objects, one of which fails, is
-redelivered whole and the successful objects are observed twice. Flow
-observations are keyed by endpoint pair, so only the volume counters
-double-count, and those reset when the entry lapses. Losing the object outright
-is worse.
+Trade-off: a partially failed message is redelivered whole, so the objects that did read are double-counted until their entries lapse. That beats losing data.
 
-The exception is an object that is *gone*. A 404/410 is not a read that might
-succeed later, so leaving the message on the queue pins it forever: SQS
-redelivers after every visibility timeout, and each redelivery re-observes the
-siblings that did read, inflating their volume counters without bound. A missing
-object is reported as `Malformed` — the same treatment as content that will not
-parse — and the message is released. Auth failures keep the retry, since those
-are the ones a human can fix.
+Tests: `an_object_that_could_not_be_read_leaves_its_notification_on_the_queue`, `an_object_that_was_read_but_makes_no_sense_is_deleted_anyway`, `an_object_that_is_gone_releases_its_notification`.
 
-Pinned by `an_object_that_could_not_be_read_leaves_its_notification_on_the_queue`,
-`an_object_that_was_read_but_makes_no_sense_is_deleted_anyway` and
-`an_object_that_is_gone_releases_its_notification`.
+### Bound the merge context by what the index kept
 
-### The merge context is bounded by what the index kept, not by the batch
+`ingest_flows` built its merge subgraph from every arriving record, although `FlowIndex` had already evicted some. One object (`MAX_RECORDS` = 100,000) against `DEFAULT_CAPACITY` (10,000) could write ten times the budget into the live graph. `FlowIndex::context` now filters by what the index holds.
 
-`ingest_flows` built its merge subgraph from `batch.observations` — every record
-that arrived — while `FlowIndex` had already evicted the oldest of them on the
-way in. One flow-log object can carry `MAX_RECORDS` (100,000) records against a
-`DEFAULT_CAPACITY` of 10,000, so a single busy object wrote up to ten times the
-budget in `GenericIpAddress` nodes and `TrafficFlow` edges into the live graph,
-broadcast them to every connected client, and left them there until the next
-reconciliation swept them.
+Test: `the_merge_context_never_exceeds_what_the_index_kept`.
 
-That contradicts the ceiling `atlas::flow` claims for itself: capacity is meant
-to bound how far the overlay can inflate the twin. `FlowIndex::context` is now a
-method on `&self` and filters the batch by what the index still holds.
+### Evict on a tie without emptying the index
 
-Pinned by `the_merge_context_never_exceeds_what_the_index_kept`.
+`evict` kept `last_seen > cutoff`, dropping every entry *at* the cutoff. Flow records have one-second precision, so ties are normal, and a single-second batch wiped the whole index. `eviction_cut` returns the cutoff plus a budget for entries at it.
 
-### Eviction cuts on a tie without collapsing the whole index
+Test: `eviction_survives_a_batch_that_shares_one_timestamp`.
 
-`evict` retained on `stats.last_seen > cutoff`, which drops *every* entry
-sharing the cutoff timestamp. Flow-log records carry whole-second precision, so
-ties are the normal case rather than a corner one, and in the degenerate case —
-a batch whose records all share one second — the cutoff equals every entry's
-`last_seen` and the entire index is wiped, emitting a lapse for traffic observed
-a moment earlier.
+### Truncate on a character boundary
 
-`eviction_cut` now returns the cutoff *and* a budget for entries at it, so
-eviction lands on the low-water mark instead of undershooting it by however many
-entries happened to share a second.
+`read_to_string` + `String::truncate(limit)` rejected or panicked when the limit fell inside a multi-byte character. `decompress` now reads bytes, cuts at a boundary, then decodes.
 
-Pinned by `eviction_survives_a_batch_that_shares_one_timestamp`.
-
-### Truncation cuts on a character boundary
-
-`decompress` read a gzipped object with `read_to_string` and then
-`String::truncate(limit)`. Both fail when `limit` falls inside a multi-byte
-character: `read_to_string` rejects the whole object as invalid UTF-8, and
-`truncate` panics — in a daemon. It now reads bytes, cuts at the boundary at or
-below the limit, and decodes, so only genuinely non-text content is rejected.
-
-Pinned by `a_cut_that_lands_inside_a_character_still_yields_the_part_before_it`.
+Test: `a_cut_that_lands_inside_a_character_still_yields_the_part_before_it`.
 
 ## Tier 1 (event feed)
 
 ### An interface with no reported subnet attaches to nothing
 
-When a Config item carries no `configuration.networkInterfaces`, the adapter
-falls back to the relationships list, which gives interface *ids* and no
-subnets. `project_instance` used to read that missing subnet as "use the
-instance's own", which is wrong exactly where it matters: a second ENI is
-usually placed in a *different* subnet on purpose, so the event produced
-`ENI -> AttachedTo -> subnet-a` while the full scan read `subnet-b` off the
-interface itself. That is the Tier-1 rule-1 flap — reconciliation deletes the
-event's edge, the next event puts it back, forever.
+With no `configuration.networkInterfaces`, the adapter reads interface ids from relationships, which carry no subnet. `project_instance` used to assume the instance's subnet, which is wrong for secondary ENIs and made event and scan disagree forever. `EniFacts { subnet_id: None }` now yields no `AttachedTo`; the scan supplies it. A missing edge heals, a wrong one flaps.
 
-`EniFacts { subnet_id: None }` now yields no `AttachedTo` edge at all. The ENI
-node and its `HasIp` edge still land, because the scan produces those too, and
-Tier 3 supplies the attachment within a poll interval. A missing edge is
-self-healing; a wrong one never settles.
+Tests: `an_eni_from_relationships_alone_attaches_to_no_subnet`, `an_instance_event_produces_only_what_a_full_scan_would`.
 
-Pinned by `an_eni_from_relationships_alone_attaches_to_no_subnet` and, for the
-containment rule generally, `an_instance_event_produces_only_what_a_full_scan_would`.
+### Prune ordering on a tie without emptying the table
 
-### Ordering is pruned on a tie without emptying the table
+`EventApplier::prune` had the same strict-cutoff bug as `evict`; an emptied table let a redelivered create resurrect a deleted resource. `prune` now shares `eviction_cut`/`survives` with the flow index.
 
-`EventApplier::prune` had the bug `FlowIndex::evict` was already fixed for one
-file over: a strict `at > cutoff` with no budget for entries *at* the cutoff. A
-Config batch stamped with one millisecond makes the cutoff equal every entry's
-time, so the table empties instead of trimming to the low-water mark. An empty
-ordering table means `is_stale` no longer recognises a redelivered create as
-stale, and it resurrects a resource a later delete removed — the exact failure
-Tier-1 rule 3 exists to prevent. `prune` now shares `eviction_cut`/`survives`
-with the flow index rather than re-deriving the cut.
-
-Pinned by `pruning_keeps_a_batch_that_shares_one_timestamp`.
+Test: `pruning_keeps_a_batch_that_shares_one_timestamp`.
 
 ## Tier 3 (reconciliation)
 
-### An edge is carried forward by its owner, not by the pivot it touches
+### Carry an edge by its owner, not by the pivot it touches
 
-`carry_forward` kept an edge when *either* endpoint was held. Ownerless nodes
-(`GenericIpAddress`, `GenericHostname`) count as held whenever anything still
-points at them, and those are the cross-cloud stitching points every projector
-emits — so a healthy provider's edge into one was carried forward for as long as
-some *other* provider was unreadable. Repoint a GCP DNS record away from a
-hostname while AWS is throttled and the stale `ResolvesTo` edge came back on
-every tick, with the differ never emitting its removal.
+`carry_forward` kept an edge if *either* endpoint was held, and ownerless pivots count as held whenever anything references them. So a healthy provider's stale edge into a shared pivot came back every tick while another provider was down. An edge is now carried only when every endpoint that has an owner is held.
 
-An edge is now carried only when every endpoint that *has* an owner is held, so
-the retention stays inside the failed provider's territory the way the node rule
-always did. `merge_selected`'s edge predicate takes the endpoints for this
-reason; there is no separate "either endpoint" rule left.
-
-Pinned by `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.
+Test: `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.

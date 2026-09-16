@@ -1,40 +1,25 @@
 # Graph Rendering Design
 
-**Interactive Multi-Cloud Infrastructure Visualization**
+Replace static `.dot` output with an interactive web view that stays responsive on large multi-cloud estates.
 
-## 1. Executive Summary
+## Approach
 
-The objective is to transition from static, snapshot-based `.dot` graphs to a native, interactive web visualization capable of rendering massive multi-cloud topologies. Designed for complex B2B SaaS environments scaling into multi-million ARR workloads, this architecture leverages a hybrid approach: using WebAssembly (compiled from Rust) for heavy computational physics and WebGL (via Sigma.js) for high-performance rendering.
+Layout and drawing are decoupled so physics never blocks the UI.
 
-## 2. Architectural Approach: Hybrid WASM & WebGL
+- **Computation — Rust/WebAssembly.** ForceAtlas2 (Barnes-Hut) runs in a wasm module and exposes positions as a flat `Float32Array`. The kernel is lock-free by construction, so native builds parallelize with rayon; browser threading is deferred.
+- **Rendering — Sigma.js (WebGL).** Positions are copied into graphology each frame and drawn by WebGL shaders, bypassing the DOM.
 
-To prevent UI freezing during large-scale network layouts, computation and rendering are strictly decoupled.
+## UX principles
 
-### Computation Layer: Rust / WebAssembly
+- **Context over raw connections.** Edges should say what is happening, not just what is wired. Metrics never live on the edge itself — `Node`/`Edge` are identity types — so they travel beside the graph as the snapshot's `observations` (see `change_monitoring_design.md`, Tier 2).
+- **Hierarchical drill-down.** Group Global → Provider → Region → VPC → Node to avoid a hairball.
+- **Filterable.** Views that hide what is not relevant (the service view is the first).
 
-The force-directed layout algorithms (like ForceAtlas2) will be executed entirely within a Rust-compiled WASM module. By utilizing thread-safe, lock-free concurrency models, the engine minimizes tail latency during continuous physics recalculations. Data synchronization between the Rust WASM module and the JavaScript runtime will utilize highly optimized array queues. To maximize cache coherence and minimize the memory footprint in these concurrent structures, the implementation will calculate capacity inline dynamically rather than storing separate capacity variables in memory.
+## Phases
 
-### Rendering Layer: Sigma.js (WebGL)
-
-Once the layout coordinates are computed, a flat `Float32Array` buffer is passed back across the WASM boundary to Sigma.js. By bypassing the browser DOM entirely and rendering directly via WebGL shaders, the tool can seamlessly maintain 60 FPS while rendering tens of thousands of VPCs, subnets, and individual instances.
-
-## 3. UX & Data Design: Lessons from Industry Leaders
-
-Drawing inspiration from leading operational tools (such as Netflix's Vizceral and Salp), rendering a massive graph is only useful if it provides actionable engineering context. The following principles will guide the UI and data integration:
-
-* **Context Over Raw Connections:** Edges in the graph must represent more than structural topology. By overlaying real-time IPC metrics, latency distributions, and health statuses onto the edges, the graph becomes a live diagnostic tool. *(Built, with one correction: the metrics do not live **on** the edge. `Node`/`Edge` are the graph's identity types, so volume and freshness travel beside the graph in `FlowIndex` and reach the frontend as the snapshot's `observations` list, keyed by the same stable key — see `docs/change_monitoring_design.md` §9, Tier 2.)* This visibility directly supports chaos engineering programs, allowing teams to instantly visually identify blast radiuses and remove organizational resiliency blind spots.
-* **Hierarchical Drill-Down:** A flat representation of thousands of nodes is visually overwhelming and creates a "hairball" effect. The graph will feature interactive semantic zooming—grouping elements hierarchically (Global → Cloud Provider → Region → VPC → Node).
-* **Actionable Discoverability:** The visualization must be highly filterable.
-
-## 4. Phased Implementation Plan
-
-| Phase | Focus Area | Deliverable | Status |
-| --- | --- | --- | --- |
-| **Phase 1** | Rust WASM Bridge | Lock-free layout computation engine compiled to WASM. | Done — `atlas-render/atlas-layout` + `atlas-layout-wasm` |
-| **Phase 2** | WebGL Render Setup | Sigma.js integration to ingest coordinate buffers and render base nodes. | Done — `atlas-render/atlas-web` (bun + Sigma.js, provider-colored nodes, live physics loop) |
-| **Phase 3** | Contextual Data | Edge styling for error rates, node health status overlays, and metadata tooltips. | Mostly done — the Tier-2 liveness overlay (`observations` on snapshot v3) is rendered: flow edges colored by verdict and log-scaled by packet count, a pulsing freshness halo on every node heard from, animated packets on a separate `canvas.traffic-layer`, and an observed-traffic panel (`atlas-web/src/lib/{traffic,TrafficLayer,style}.ts`). Metadata tooltips and per-node drill-down remain. |
-| **Phase 4** | Search Integration | Implementation of the Neo4j Graph RAG backend for the UI search bars. | Upcoming |
-
----
-
-**Strategic Goal:** By marrying Rust's computational efficiency with WebGL's rendering scale, this tool moves beyond a simple topology visualization into a living, interactive map of infrastructure resiliency.
+| Phase | Deliverable | Status |
+|---|---|---|
+| 1 | wasm layout engine | Done — `atlas-layout`, `atlas-layout-wasm` |
+| 2 | Sigma.js frontend | Done — `atlas-web` |
+| 3 | Contextual data | Mostly done — flow edges by verdict and volume, freshness halos, packet animation, traffic panel, `Serves` status styling and service view. Remaining: metadata tooltips, per-node drill-down, a way to read raw `last_seen`/`packets`/`bytes`. |
+| 4 | Search | Not started |
