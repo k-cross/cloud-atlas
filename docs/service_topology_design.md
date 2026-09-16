@@ -114,7 +114,7 @@ documented:
 | `nat_gateway` | `Interface for NAT Gateway nat-…` | `AwsEc2NatGateway` |
 | `vpc_endpoint` | `VPC Endpoint Interface vpce-…` | (no node kind yet) |
 | `lambda` | `AWS Lambda VPC ENI-<function>-…` | `AwsLambdaFunction` |
-| `interface` | `RDSNetworkInterface` | `AwsRdsDbInstance` — by subnet + security group, not by name |
+| `interface` | `RDSNetworkInterface` | **nothing** — left unowned on purpose (§7); the DB is reached through its DNS endpoint instead |
 
 Where the description does not name an owner unambiguously, the ENI is still a
 node with its addresses; it simply has no owner edge. That is strictly better
@@ -157,13 +157,113 @@ Both are smaller:
   was always pointing at. `microsoft.network/loadbalancers` needs a new node kind
   as well as a type-list entry.
 
-### 3.3 What Phase 1 alone buys
+### 3.3 As built (1a)
+
+`cloud/amazon/network_interface.rs` paginates `DescribeNetworkInterfaces`;
+`AmazonCollection::AmazonNetworkInterfaces` carries the result, and the
+projector arm gives each interface its addresses (every
+`private_ip_addresses[]` entry and its association, the top-level private and
+public address, and every `ipv6_addresses[]` entry), its subnet and VPC, its
+security groups, and its instance attachment — the same
+`Instance -HasIp-> Eni -AttachedTo-> Subnet` shape `project_instance` already
+built, so the two collections merge on identity rather than disagreeing.
+
+Owner stitching landed for the two cases a description names unambiguously:
+
+- **NAT gateway** in the projector arm, since `Interface for NAT Gateway nat-…`
+  yields the id `Node::AwsEc2NatGateway` is already keyed by.
+- **Load balancer** in `link_interface_owners`, which runs *after*
+  `project_parallel`. This edge cannot be built inside the parallel pass:
+  projection runs each collection into its own `GraphBuilder`, so the interface
+  arm cannot see the balancer nodes, and neither collection carries the other's
+  key. The pass builds `app/<name>/<id>` → ARN from the balancer collection and
+  matches interface descriptions against it, emitting nothing when there is no
+  match. Reconstructing the ARN from region + `owner_id` was the alternative and
+  was rejected: it guesses the partition, and a wrong guess creates a second,
+  fictional balancer node.
+
+The **attached instance** edge turned out to belong in that same pass, for a
+different reason, and a review caught it after 1a landed. `DescribeInstances` is
+filtered to running/pending; `DescribeNetworkInterfaces` is not, and a *stopped*
+instance keeps its interfaces attached with `attachment.instanceId` populated.
+Drawing the edge from the attachment alone therefore called `get_or_add_node` on
+an instance the scan deliberately excluded — creating a node with no AZ, tags or
+security groups that is nevertheless the same `kind()` as a live one, and which
+Tier 3 would then keep confirming rather than collecting. (`events.rs` maps every
+non-terminated state change to `Created`, so the stopped instance had a live feed
+re-asserting it too.) The edge now requires the instance to be in the scan's own
+instance collection, which costs nothing: a running instance reports its
+interfaces and `project_instance` has already drawn the same edge. The residual
+case it still buys — a described instance that reports no interfaces — is pinned
+by `an_interface_owns_its_attachment_once_the_scan_confirms_the_instance`, and
+the invention by
+`an_interface_attached_to_an_instance_the_scan_dropped_invents_no_instance`.
+
+Lambda, VPC endpoint and RDS interfaces are **left unowned** — Lambda's
+description embeds a function name that cannot be split from its UUID suffix
+without assuming the format, VPC endpoints have no node kind, and RDS was decided
+against in §7. All three are still nodes carrying their addresses, which is what
+the flow overlay needs.
+
+`Node::ip` doing the canonicalising means the ENI arm and the instance arm can
+both assert the same address without producing two pivots, and `add_edge`'s dedup
+absorbs the overlap — no explicit reconciliation between the two collections.
+
+### 3.4 What Phase 1 alone buys
 
 Flow endpoints resolve. The demo's `alb -> instance` traffic attributes to the
 load balancer. Node freshness lands on every network participant rather than only
 on instances. **No new edge kind, no wire change.** Phase 2 is optional on top,
 and worth doing separately so the address work can land and be verified on its
 own.
+
+### 3.5 As built (1b)
+
+The RDS projector arm now reads `endpoint.address` and emits
+`AwsRdsDbInstance -ConnectsTo-> GenericHostname(endpoint)`, the linkage §7
+settled on in place of stitching an `RDSNetworkInterface` to its database by
+subnet and security group. The collector already returned the endpoint
+(`collector_tests.rs::rds_db_instances` asserts it deserializes); nothing
+consumed it.
+
+`Node::hostname` is what makes the seam close: the Route 53 record set that
+points at the endpoint and the database itself both canonicalise to the same
+pivot, so `RecordSet -ConnectsTo-> GenericHostname <-ConnectsTo- DbInstance`
+falls out of `GraphBuilder`'s node identity with no reconciliation pass. The
+Globex fixture carries a `db.globex.io` CNAME to the endpoint so that seam is
+exercised credential-free, and
+`a_database_is_reached_through_its_endpoint_hostname` pins both halves.
+
+The RDS interface stays unowned, as §7 requires — 1a's
+`an_interface_names_the_owner_its_description_actually_identifies` still asserts
+no database points at `eni-globex-rds-1a`, and the IP path keeps working through
+that interface's own address for the NLB-fronted case DNS cannot see.
+
+### 3.6 As built (1c)
+
+The Tier-1 Config arm §3.1 left closed is open: `AWS::EC2::NetworkInterface`
+maps to `Node::AwsEc2Eni`, and its context goes through the projector's own
+`project_interface`, now sharing an `InterfaceFacts` seam with the SDK path
+exactly as `project_instance`/`InstanceFacts` does. The precondition was the
+whole reason it was closed — a Config item for a NAT gateway's ENI used to be a
+node no full scan produced, and 1a made the scan produce it.
+
+`use_aws_resource` already filters `AWS::EC2::NetworkInterface` out of the
+catch-all, so the typed node is the entire event rather than a duplicate beside
+an `AwsConfigResource`.
+
+Both edges `link_interface_owners` defers are held back here too, under Tier-1
+rule 1 and for the same reason: each needs a collection the event path does not
+have. A balancer ARN cannot be rebuilt from `ELB app/<name>/<id>` without
+guessing the partition, and an attachment cannot be trusted without the scan's
+own running/pending instance list — a stopped instance's Config item would
+otherwise invent the instance node through the live feed instead of the scan.
+The interface still arrives with its addresses, subnet, security groups and
+NAT-gateway owner; the rest is added by the next reconciliation.
+`a_balancer_interface_event_does_not_invent_the_balancer` pins that, and
+`an_interface_event_produces_only_what_a_full_scan_would` pins the containment
+rule by projecting the same interface both ways — which is also what keeps the
+two paths from drifting apart again.
 
 ## 4. Phase 2 — `Edge::Serves`
 
@@ -265,13 +365,13 @@ Two inputs, one pass, both O(V + E):
 pivots to the typed resources that claim them, by scanning edges once. An address
 legitimately has more than one owner — an Azure public IP is claimed by
 `AzurePublicIpAddress` *and* reachable through the load balancer that fronts it —
-so this is a `Vec`, and derivation fans out across owners. A pivot with an
-implausible number of owners (an anycast or shared address) is skipped rather
-than producing a combinatorial burst; the cap belongs in the module, not at the
-call sites.
+so this is a `Vec`, and derivation fans out across owners. Fan-out is deliberately
+uncapped (§7): a shared address producing many `Serves` edges is a real
+observation about the estate, and the map should be instrumented and measured
+before anything is trimmed.
 
 **Observed pairs.** For each `TrafficFlow` edge, look up both endpoints'
-owners and emit `Serves` for each resolved pair. An endpoint that resolves to
+owners and emit `Serves` for every resolved pair, with no cap on fan-out (§7). An endpoint that resolves to
 nothing produces nothing — the external side of a flow is a `GenericIpAddress`
 with no owner by design (Tier-2 rule 2), so internet traffic yields no `Serves`
 edge, and a NAT gateway talking to ten thousand external addresses produces zero.
@@ -342,35 +442,55 @@ No wire change, so the frontend work is small and additive:
   derived edges, not another derived edge. Materialising transitive closure would
   explode with estate size for no information the graph does not already hold.
 
-## 7. Open questions
+## 7. Decisions
 
-- **Naming and direction.** `Serves`, source → target, in the direction traffic
-  moves. It reads best for the load-balancer case (`ALB -Serves-> Instance`) and
-  acceptably for a dependency (`Instance -Serves-> RdsDbInstance` = "the database
-  serves the instance"). `Reaches` was the alternative and is more neutral but
-  says less. Worth one more look before the variant is added, since it is the
-  cheapest thing to change now and the most expensive later.
-- **RDS ENI ownership.** `RDSNetworkInterface` descriptions do not name the
-  instance, so the ENI stitches to its database by subnet and security group —
-  which is a heuristic, not an identity. It may be better to leave RDS ENIs
-  unowned and let the DNS endpoint carry the relationship instead.
-- **Secondary and IPv6 addresses.** An ENI can hold many. Each becomes a pivot,
-  and a resource with several addresses fans out ownership. Probably fine;
-  should be measured on a real estate before assuming so.
-- **Per-provider path patterns for GCP and Azure** need node kinds that do not
-  exist yet (backend service, backend pool). Until those land, only the AWS
-  control-plane row is real, and GCP/Azure `Serves` edges come from observed
-  traffic alone — which is honest, but asymmetric.
-- **Cost on a large estate.** The derivation is O(V + E) per pass, but it runs on
-  every reconciliation. The address-ownership map is the part to watch.
+All five questions this document opened are settled.
+
+- **Naming and direction — `Serves`, source → target, in the direction traffic
+  moves.** `ALB -Serves-> Instance`; `Instance -Serves-> RdsDbInstance` reads as
+  "the database serves the instance". `Reaches` was the more neutral alternative
+  and was not chosen; it says less.
+- **RDS ENIs stay unowned; the DNS endpoint carries the relationship.** A
+  `RDSNetworkInterface` description does not name its database, so stitching by
+  subnet and security group would be a heuristic dressed as an identity. Instead
+  the projector gains
+  `AwsRdsDbInstance -ConnectsTo-> GenericHostname(endpoint.address)` — which it
+  does not build today at all — and the ENI remains a node carrying its
+  addresses, with no owner edge.
+
+  **The IP path must keep working regardless**, because DNS does not cover every
+  case. Cross-region and cross-VPC access to RDS is commonly fronted by an NLB
+  targeting IPs, and there the client resolves the *balancer's* name, never the
+  database's: the flow records read client → NLB ENI and NLB ENI → RDS ENI, with
+  the database's own endpoint appearing nowhere. Because the RDS ENI is still a
+  node with its addresses, that second hop attributes to a real interface even
+  though it cannot be attributed to the database. DNS is the better primary
+  linkage, not the only one, and nothing in Phase 1 may assume otherwise.
+- **Secondary and IPv6 addresses: take them all, then measure.** Every address on
+  an ENI becomes a pivot and a resource with several fans out ownership. Do not
+  pre-emptively trim; instrument the address-ownership map and measure on a real
+  estate before deciding whether fan-out is a problem.
+- **AWS first, across clouds second.** Getting AWS relationships right is worth
+  more than breadth, so Phase 1b (GCP `network_ip`/`nat_ip`, Azure NICs and load
+  balancers) waits. Only the AWS control-plane path pattern is real until then,
+  and GCP/Azure `Serves` edges — where their resources have addresses at all —
+  come from observed traffic alone. Asymmetric on purpose.
+- **Data first; optimise later.** The derivation is O(V + E) and runs on every
+  reconciliation. Build it to record everything it finds, measure it, and only
+  then decide what to bound. Concretely this removes the proposed cap on how many
+  owners one address pivot may fan out to: a shared or anycast address producing
+  a burst of `Serves` edges is a real observation about the estate, and dropping
+  it to protect a budget nobody has measured would be losing data to solve a
+  problem we have not confirmed exists.
 
 ## 8. Phased plan
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| **1a** | AWS `DescribeNetworkInterfaces` collector; `AwsEc2Eni` carries its addresses, `interface_type` and owner edges; instance private IP moves to the ENI with an instance-level fallback | Planned |
-| **1b** | GCP `network_ip`/`nat_ip`; Azure `networkinterfaces` + `loadbalancers` | Planned |
-| **1c** | Tier-1 Config ENI arm opened, now that the scan produces the node | Planned |
+| **1a** | AWS `DescribeNetworkInterfaces` collector; `AwsEc2Eni` carries its addresses and owner edges; instance private IP moved to the ENI with an instance-level fallback | **Done** — `cloud/amazon/network_interface.rs`, the `AmazonNetworkInterfaces` projector arm, and `link_load_balancer_interfaces` |
+| **1b** | AWS `AwsRdsDbInstance -ConnectsTo-> GenericHostname(endpoint)` — not built today, and the primary way the database is reached | **Done** — the `AmazonRds` projector arm, §3.5 |
+| **1c** | Tier-1 Config ENI arm opened, now that the scan produces the node | **Done** — `AWS::EC2::NetworkInterface` in `events.rs`, via `project_interface`/`InterfaceFacts`, §3.6 |
+| **1d** | GCP `network_ip`/`nat_ip`; Azure `networkinterfaces` + `loadbalancers` — deferred behind AWS (§7) | Deferred |
 | **2a** | `atlas::derive` — one entry point, `containment` moved behind it | Planned |
 | **2b** | `Edge::Serves` from observed traffic; status on the observation channel | Planned |
 | **2c** | Control-plane path patterns; `inferred` → `confirmed` promotion | Planned |

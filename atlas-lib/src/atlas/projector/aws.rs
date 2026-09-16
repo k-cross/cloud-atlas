@@ -4,7 +4,9 @@ use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection};
+use aws_sdk_ec2::types::NetworkInterface;
 use petgraph::graph::NodeIndex;
+use std::collections::{HashMap, HashSet};
 
 pub fn aws_projector(
     builder: &mut GraphBuilder,
@@ -14,6 +16,68 @@ pub fn aws_projector(
     project_parallel(builder, aws_data, |local, (region, collection)| {
         project_amazon_collection(local, region, collection, opts)
     });
+    link_interface_owners(builder, aws_data);
+}
+
+// The two owner edges an interface cannot decide on its own, because each needs
+// another collection and projection runs every collection into its own builder.
+//
+// The balancer: an interface names it as "ELB app/<name>/<id>" and the ARN ends
+// with that same triple, but neither collection carries the other's key.
+//
+// The instance: an attachment names one even when the scan deliberately left it
+// out, since DescribeInstances is filtered to running/pending and a *stopped*
+// instance keeps its interfaces attached. Taking the attachment at face value
+// would add an instance node the scan does not produce — with no AZ, tags or
+// security groups, and indistinguishable in kind from a live one. So the edge
+// is emitted only for an instance the scan actually returned; a running one
+// reports its own interfaces and project_instance has already drawn it.
+fn link_interface_owners(builder: &mut GraphBuilder, aws_data: &[(String, AmazonCollection)]) {
+    let mut balancers: HashMap<&str, &str> = HashMap::new();
+    let mut scanned_instances: HashSet<&str> = HashSet::new();
+    for (_, collection) in aws_data {
+        match collection {
+            AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing { load_balancers, .. }) => {
+                for arn in load_balancers
+                    .iter()
+                    .filter_map(|lb| lb.load_balancer_arn())
+                {
+                    if let Some((_, suffix)) = arn.split_once("loadbalancer/") {
+                        balancers.insert(suffix, arn);
+                    }
+                }
+            }
+            AmazonCollection::AmazonInstances(instances) => {
+                scanned_instances.extend(instances.iter().filter_map(|i| i.instance_id()));
+            }
+            _ => {}
+        }
+    }
+
+    for (_, collection) in aws_data {
+        if let AmazonCollection::AmazonNetworkInterfaces(interfaces) = collection {
+            for eni in interfaces {
+                let Some(eni_id) = eni.network_interface_id() else {
+                    continue;
+                };
+
+                if let Some(suffix) = eni.description().and_then(|d| d.strip_prefix("ELB "))
+                    && let Some(arn) = balancers.get(suffix)
+                {
+                    let lb_idx = builder.get_or_add_node(Node::AwsElbLoadBalancer((*arn).into()));
+                    builder.link_to(lb_idx, Node::AwsEc2Eni(eni_id.into()), Edge::HasIp);
+                }
+
+                if let Some(instance_id) = eni.attachment().and_then(|a| a.instance_id())
+                    && scanned_instances.contains(instance_id)
+                {
+                    let inst_idx =
+                        builder.get_or_add_node(Node::AwsEc2Instance(instance_id.into()));
+                    builder.link_to(inst_idx, Node::AwsEc2Eni(eni_id.into()), Edge::HasIp);
+                }
+            }
+        }
+    }
 }
 
 fn project_amazon_collection(
@@ -60,6 +124,7 @@ fn project_amazon_collection(
                                 Some(EniFacts {
                                     id: eni.network_interface_id()?,
                                     subnet_id: eni.subnet_id(),
+                                    private_ip: eni.private_ip_address(),
                                 })
                             })
                             .collect(),
@@ -280,6 +345,10 @@ fn project_amazon_collection(
                         Edge::Contains,
                     );
 
+                    if let Some(address) = db.endpoint().and_then(|e| e.address()) {
+                        builder.link_to(idx, Node::hostname(address), Edge::ConnectsTo);
+                    }
+
                     for sg in db.vpc_security_groups() {
                         if let Some(sg_id) = sg.vpc_security_group_id() {
                             builder.link_to(
@@ -329,6 +398,11 @@ fn project_amazon_collection(
                     Node::AwsCloudFrontDistribution(d.id().into()),
                     Edge::Contains,
                 );
+            }
+        }
+        AmazonCollection::AmazonNetworkInterfaces(interfaces) => {
+            for eni in interfaces {
+                project_network_interface(builder, region_idx, eni);
             }
         }
         AmazonCollection::AmazonNetworking(AWSNetworking {
@@ -477,6 +551,91 @@ pub(crate) struct InstanceFacts<'a> {
 pub(crate) struct EniFacts<'a> {
     pub id: &'a str,
     pub subnet_id: Option<&'a str>,
+    pub private_ip: Option<&'a str>,
+}
+
+pub(crate) struct InterfaceFacts<'a> {
+    pub id: &'a str,
+    pub vpc_id: Option<&'a str>,
+    pub subnet_id: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub addresses: Vec<&'a str>,
+    pub security_group_ids: Vec<&'a str>,
+}
+
+fn interface_addresses(eni: &NetworkInterface) -> Vec<&str> {
+    let mut addresses = Vec::new();
+    for ip in eni.private_ip_addresses() {
+        addresses.extend(ip.private_ip_address());
+        addresses.extend(ip.association().and_then(|a| a.public_ip()));
+    }
+    addresses.extend(eni.private_ip_address());
+    addresses.extend(eni.association().and_then(|a| a.public_ip()));
+    addresses.extend(eni.ipv6_addresses().iter().filter_map(|a| a.ipv6_address()));
+    addresses
+}
+
+// The only owner an interface names unambiguously in its own description. ELB
+// needs the balancer collection too (see link_load_balancer_interfaces), and
+// Lambda, VPC endpoint and RDS interfaces are left unowned rather than guessed.
+fn nat_gateway_of(description: Option<&str>) -> Option<&str> {
+    let id = description?.strip_prefix("Interface for NAT Gateway ")?;
+    id.starts_with("nat-").then_some(id)
+}
+
+fn project_network_interface(
+    builder: &mut GraphBuilder,
+    region_idx: NodeIndex,
+    eni: &NetworkInterface,
+) {
+    let Some(id) = eni.network_interface_id() else {
+        return;
+    };
+    project_interface(
+        builder,
+        region_idx,
+        &InterfaceFacts {
+            id,
+            vpc_id: eni.vpc_id(),
+            subnet_id: eni.subnet_id(),
+            description: eni.description(),
+            addresses: interface_addresses(eni),
+            security_group_ids: eni.groups().iter().filter_map(|g| g.group_id()).collect(),
+        },
+    );
+}
+
+pub(crate) fn project_interface(
+    builder: &mut GraphBuilder,
+    region_idx: NodeIndex,
+    facts: &InterfaceFacts<'_>,
+) {
+    let eni_idx = builder.get_or_add_node(Node::AwsEc2Eni(facts.id.into()));
+
+    if let Some(subnet_id) = facts.subnet_id {
+        let parent = facts.vpc_id.map(|vpc_id| {
+            builder.link_to(region_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains)
+        });
+        let subnet_idx =
+            builder.link_to(parent, Node::AwsEc2Subnet(subnet_id.into()), Edge::Contains);
+        builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
+    }
+
+    for address in &facts.addresses {
+        builder.link_to(eni_idx, Node::ip(address), Edge::ConnectsTo);
+    }
+
+    for group_id in &facts.security_group_ids {
+        builder.link_to(
+            eni_idx,
+            Node::AwsEc2SecurityGroup((*group_id).into()),
+            Edge::ConnectsTo,
+        );
+    }
+
+    if let Some(nat_id) = nat_gateway_of(facts.description) {
+        builder.link_from(eni_idx, Node::AwsEc2NatGateway(nat_id.into()), Edge::HasIp);
+    }
 }
 
 pub(crate) fn project_instance(
@@ -516,6 +675,9 @@ pub(crate) fn project_instance(
             if let Some(subnet_idx) = attached {
                 builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
             }
+            if let Some(private_ip) = eni.private_ip {
+                builder.link_to(eni_idx, Node::ip(private_ip), Edge::ConnectsTo);
+            }
         }
     }
 
@@ -527,7 +689,9 @@ pub(crate) fn project_instance(
         );
     }
 
-    if let Some(private_ip) = facts.private_ip {
+    if facts.network_interfaces.is_empty()
+        && let Some(private_ip) = facts.private_ip
+    {
         builder.link_to(inst_idx, Node::ip(private_ip), Edge::ConnectsTo);
     }
 

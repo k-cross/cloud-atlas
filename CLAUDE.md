@@ -171,16 +171,21 @@ tiers start undoing each other:
    the next event, forever. EC2 instances therefore go through the projector's
    own `projector::aws::project_instance` (shared with the SDK path via
    `InstanceFacts` — three wire shapes, one definition of how an instance
-   attaches), and the Config catch-all node reuses the scan's own
-   `use_aws_resource`/`use_global` filters. A resource type whose identity the
-   graph keys differently from Config is deliberately **not** mapped rather than
-   mapped approximately: ENIs (keyed correctly, but the full scan only learns
-   about interfaces attached to a described *instance*, so a Config item for a
-   NAT gateway's ENI would be a node no scan produces — this arm opens up once a
-   `DescribeNetworkInterfaces` collector exists), Route 53 hosted zones
-   (`/hostedzone/` prefix), SQS queues (keyed by URL). The
-   `an_instance_event_produces_only_what_a_full_scan_would` test pins this by
-   projecting the same instance both ways and asserting containment.
+   attaches), ENIs through `project_interface`/`InterfaceFacts` the same way, and
+   the Config catch-all node reuses the scan's own `use_aws_resource`/`use_global`
+   filters. A resource type whose identity the graph keys differently from Config
+   is deliberately **not** mapped rather than mapped approximately: Route 53
+   hosted zones (`/hostedzone/` prefix), SQS queues (keyed by URL). Individual
+   *edges* are held back on the same rule: an ENI event carries its addresses,
+   subnet, security groups and the NAT gateway its description names, but neither
+   owner edge that `link_interface_owners` defers, since each needs a collection
+   the event path does not have — a balancer ARN cannot be rebuilt without
+   guessing a partition, and an attachment cannot be trusted without the scan's
+   own running/pending instance list. The next reconciliation adds whichever is
+   real. The
+   `an_instance_event_produces_only_what_a_full_scan_would` and
+   `an_interface_event_produces_only_what_a_full_scan_would` tests pin this by
+   projecting the same resource both ways and asserting containment.
 2. **Events add; only Tier 3 garbage-collects.** A create/modify never removes
    an edge it did not mention, and a delete removes only the node it named. That
    asymmetry is what makes an at-least-once, out-of-order feed safe to apply.
@@ -317,8 +322,30 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
 - Projectors: `projector::project_parallel` is the single definition of the per-scope fan-out — hand it the slice and a closure and it projects each item into its own `GraphBuilder` across rayon, then merges them back in order. AWS, GCP and Azure all go through it; Cloudflare has one collection and does not. `project_leaf!` macro in `projector/mod.rs` (shared by all four projectors — `use super::project_leaf;`) for resources that only add a node. Two forms: `(builder, items, field, Node::Variant)` reads a struct field and adds a standalone node (GCP/Azure serde models), `(builder, items, accessor(), Node::Variant, parent, edge)` calls an accessor and links to a parent (AWS SDK models).
 - Projector edge idiom: `GraphBuilder::link_to(from, node, edge)` / `link_from(node, to, edge)` are the one-call form of "get-or-add this node and connect it", and are what projectors should use — they replaced the ~177 hand-written `get_or_add_node` + `add_edge` pairs. Reach for `get_or_add_node`/`get_or_add_ref` directly only when you need the `NodeIndex` for more than one edge.
 - `GraphBuilder::add_edge` deduplicates identical edges automatically, and `GraphBuilder::merge(&graph)` is the single definition of folding one graph into another by node identity — `patch::carry_forward` is a thin policy wrapper over it, so never hand-roll a node/edge dedup pass. `GraphBuilder::remove_node` is the matching removal: it reports every edge that died with the node (the patch needs to name them) and repairs `node_map` after petgraph's swap-remove, which silently moves the last node onto the removed index. Never call `graph.remove_node` directly on a builder-owned graph.
-- Event adapters: `atlas::event::ChangeEvent` is the normalized shape every provider's live feed translates into, and `EventApplier` is the only thing that applies one (idempotency + ordering live there, not at the call sites). A new adapter builds its `context` subgraph with the *projector's* own functions — see `projector::aws::project_instance` and `InstanceFacts` — so it cannot emit a shape the full scan would disagree with.
+- Event adapters: `atlas::event::ChangeEvent` is the normalized shape every provider's live feed translates into, and `EventApplier` is the only thing that applies one (idempotency + ordering live there, not at the call sites). A new adapter builds its `context` subgraph with the *projector's* own functions — see `projector::aws::project_instance`/`InstanceFacts` and `project_interface`/`InterfaceFacts` — so it cannot emit a shape the full scan would disagree with.
 - Flow adapters: `atlas::flow::FlowObservation` is the Tier-2 equivalent, and `FlowIndex` is the only thing that stores one — the admission rule (which endpoints may become nodes), expiry and the capacity bound all live there, not at the call sites.
+- AWS interfaces: `DescribeNetworkInterfaces` (`cloud/amazon/network_interface.rs`)
+  is what makes every ENI a node, not just the ones hanging off a described
+  instance. A private IP belongs to the **interface** that holds it, never to the
+  instance — `project_instance` only falls back to `facts.private_ip` when the
+  instance reported no interfaces at all. Owner edges come from the interface
+  description and only where it names one unambiguously (NAT gateway in the
+  projector arm). Lambda, VPC endpoint and RDS interfaces are deliberately left
+  unowned rather than parsed on a guess — an unowned ENI with a real address is
+  what the flow overlay needs anyway.
+
+  The two owners an interface cannot settle alone live in
+  `link_interface_owners`, which must run after `project_parallel` because each
+  collection is projected into its own builder and neither side carries the
+  other's key. The **load balancer** needs the balancer collection to turn
+  `ELB app/<name>/<id>` into an ARN. The **attached instance** needs the instance
+  collection as a filter, not a lookup: `DescribeInstances` is filtered to
+  running/pending and a stopped instance keeps its interfaces attached, so
+  trusting `attachment.instanceId` on its own would add an instance node the scan
+  does not produce — no AZ, no tags, no security groups, and the same `kind()` as
+  a live one. The edge is drawn only for an instance the scan returned, which
+  costs nothing: a running instance reports its own interfaces and
+  `project_instance` has already drawn it.
 - Derived edges: `atlas::containment::link(&mut builder)` links every
   `GenericIpAddress` that is a bare address into every one that is a CIDR range
   covering it (`Edge::Covers`) — the thing that lets a flow record confirm the

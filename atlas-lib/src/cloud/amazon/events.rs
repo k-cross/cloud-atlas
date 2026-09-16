@@ -3,7 +3,8 @@ use crate::atlas::definition::{Edge, Node};
 use crate::atlas::event::{ChangeEvent, ChangeOp};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector::aws::{
-    EniFacts, InstanceFacts, project_instance, use_aws_resource, use_global,
+    EniFacts, InstanceFacts, InterfaceFacts, project_instance, project_interface, use_aws_resource,
+    use_global,
 };
 use crate::cloud::amazon::sqs::feed::unwrap_sns;
 use aws_smithy_types::date_time::{DateTime, Format};
@@ -161,6 +162,8 @@ struct NetworkInterfaceRef {
     network_interface_id: Option<String>,
     #[serde(rename = "subnetId")]
     subnet_id: Option<String>,
+    #[serde(rename = "privateIpAddress")]
+    private_ip_address: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +182,42 @@ struct GroupRef {
 struct TagPair {
     key: Option<String>,
     value: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct InterfaceConfiguration {
+    #[serde(rename = "vpcId")]
+    vpc_id: Option<String>,
+    #[serde(rename = "subnetId")]
+    subnet_id: Option<String>,
+    description: Option<String>,
+    #[serde(rename = "privateIpAddress")]
+    private_ip_address: Option<String>,
+    #[serde(rename = "privateIpAddresses")]
+    private_ip_addresses: Option<Vec<PrivateIpRef>>,
+    #[serde(rename = "ipv6Addresses")]
+    ipv6_addresses: Option<Vec<Ipv6Ref>>,
+    groups: Option<Vec<GroupRef>>,
+    association: Option<AssociationRef>,
+}
+
+#[derive(Deserialize)]
+struct PrivateIpRef {
+    #[serde(rename = "privateIpAddress")]
+    private_ip_address: Option<String>,
+    association: Option<AssociationRef>,
+}
+
+#[derive(Deserialize)]
+struct AssociationRef {
+    #[serde(rename = "publicIp")]
+    public_ip: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Ipv6Ref {
+    #[serde(rename = "ipv6Address")]
+    ipv6_address: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -272,6 +311,7 @@ fn typed_node(item: &ConfigurationItem, resource_type: &str) -> Option<Node> {
         "AWS::EC2::RouteTable" => Node::AwsEc2RouteTable(id?.into()),
         "AWS::EC2::InternetGateway" => Node::AwsEc2InternetGateway(id?.into()),
         "AWS::EC2::NatGateway" => Node::AwsEc2NatGateway(id?.into()),
+        "AWS::EC2::NetworkInterface" => Node::AwsEc2Eni(id?.into()),
         "AWS::EC2::EIP" => Node::AwsEc2Eip(id?.into()),
         "AWS::Lambda::Function" => Node::AwsLambdaFunction(name?.into()),
         "AWS::ECS::Cluster" => Node::AwsEcsCluster(arn?.into()),
@@ -301,6 +341,7 @@ fn typed_context(
 
     match resource_type {
         "AWS::EC2::Instance" => instance_context(item, region),
+        "AWS::EC2::NetworkInterface" => interface_context(item, region, node),
 
         "AWS::EC2::VPC"
         | "AWS::EC2::SecurityGroup"
@@ -384,6 +425,7 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
             Some(EniFacts {
                 id: eni.network_interface_id.as_deref()?,
                 subnet_id: eni.subnet_id.as_deref(),
+                private_ip: eni.private_ip_address.as_deref(),
             })
         })
         .collect();
@@ -394,6 +436,7 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
             .map(|id| EniFacts {
                 id,
                 subnet_id: None,
+                private_ip: None,
             })
             .collect();
     }
@@ -422,6 +465,74 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
                 .iter()
                 .filter_map(|tag| tag.key.as_deref().zip(tag.value.as_deref()))
                 .collect(),
+        },
+    );
+    builder.graph
+}
+
+// Both owner edges an interface could name here are deliberately absent, for
+// the same reason the scan defers them to link_interface_owners: each needs a
+// collection the event path does not have. The balancer would mean guessing a
+// partition to rebuild an ARN, and the attachment would mean trusting that the
+// instance is one the scan keeps — DescribeInstances is running/pending only,
+// so a stopped instance's interface would invent the node. The next
+// reconciliation adds whichever edge is real.
+fn interface_context(item: &ConfigurationItem, region: &str, node: &Node) -> Graph<Node, Edge> {
+    let Some(id) = item.resource_id.as_deref() else {
+        return solo(node.clone());
+    };
+    let config: InterfaceConfiguration = item.configuration().unwrap_or_default();
+
+    let mut addresses: Vec<&str> = Vec::new();
+    for ip in config.private_ip_addresses.as_deref().unwrap_or_default() {
+        addresses.extend(ip.private_ip_address.as_deref());
+        addresses.extend(ip.association.as_ref().and_then(|a| a.public_ip.as_deref()));
+    }
+    addresses.extend(config.private_ip_address.as_deref());
+    addresses.extend(
+        config
+            .association
+            .as_ref()
+            .and_then(|a| a.public_ip.as_deref()),
+    );
+    addresses.extend(
+        config
+            .ipv6_addresses
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|a| a.ipv6_address.as_deref()),
+    );
+
+    let mut security_group_ids: Vec<&str> = config
+        .groups
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|group| group.group_id.as_deref())
+        .collect();
+    if security_group_ids.is_empty() {
+        security_group_ids = item.related_all("AWS::EC2::SecurityGroup");
+    }
+
+    let mut builder = GraphBuilder::new();
+    let region_idx = builder.get_or_add_node(Node::AwsRegion(region.into()));
+    project_interface(
+        &mut builder,
+        region_idx,
+        &InterfaceFacts {
+            id,
+            vpc_id: config
+                .vpc_id
+                .as_deref()
+                .or_else(|| item.related("AWS::EC2::VPC")),
+            subnet_id: config
+                .subnet_id
+                .as_deref()
+                .or_else(|| item.related("AWS::EC2::Subnet")),
+            description: config.description.as_deref(),
+            addresses,
+            security_group_ids,
         },
     );
     builder.graph
@@ -686,6 +797,7 @@ fn launched_instances(
                             Some(EniFacts {
                                 id: eni.network_interface_id.as_deref()?,
                                 subnet_id: eni.subnet_id.as_deref(),
+                                private_ip: eni.private_ip_address.as_deref(),
                             })
                         })
                         .collect(),

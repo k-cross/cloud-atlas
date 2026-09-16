@@ -10,6 +10,14 @@ the whole stack runs credential-free.
 - **`atlas-lib`** — collectors + projectors for AWS, GCP, Azure and Cloudflare;
   70 `Node` kinds and 9 `Edge` kinds, with exhaustiveness guards that fail until
   a new variant has a projector *and* fixture data.
+- **Every AWS interface carries its address** — `DescribeNetworkInterfaces`
+  (`cloud/amazon/network_interface.rs`) collects every ENI, not just the ones
+  attached to a described instance, so load balancer, NAT gateway and RDS
+  interfaces are real nodes with real addresses. A flow record's endpoint now
+  resolves to infrastructure: `ALB -HasIp-> Eni -ConnectsTo-> ip -TrafficFlow->
+  ip <-ConnectsTo- Eni <-HasIp- Instance`. The private IP lives on the interface
+  that holds it; the instance-level field is a fallback for an instance that
+  reports no interfaces.
 - **Containment** — `atlas::containment` links every generic address into the
   CIDR ranges that cover it (`Edge::Covers`), so a flow record confirms the
   security-group rule that permitted it. Derived, not owned: recomputed at every
@@ -50,7 +58,7 @@ the whole stack runs credential-free.
 
 | Suite | Command | Count |
 |---|---|---|
-| Root workspace | `cargo nextest run --all-targets` | **244** (atlas-lib 197, atlas-server 47) |
+| Root workspace | `cargo nextest run --all-targets` | **251** (atlas-lib 204, atlas-server 47) |
 | Render workspace | `cargo nextest run --all-targets` in `atlas-render/` | **21** |
 | Frontend unit | `bun test src/lib` | **40** |
 | Frontend e2e | `bun run test:e2e` | **13** |
@@ -76,15 +84,16 @@ current.
    `change_monitoring_design.md`): GCP Cloud Asset Inventory feeds → Pub/Sub,
    Azure Event Grid, GCP/Azure flow logs into the same `FlowObservation`.
    Cloudflare stays on fast polling — it has no good push story.
-2. **Service topology** (`docs/service_topology_design.md`, written this
-   session, nothing built). Flow logs cannot yet say *which resources* are
+2. **Service topology** (`docs/service_topology_design.md`; Phase 1a built). Flow logs cannot yet say *which resources* are
    talking, because only EC2 instances carry an address — an ALB's traffic rides
    ENIs the scan never sees, and GCP instances drop `network_ip` outright. Phase
-   1 is address coverage (AWS `DescribeNetworkInterfaces` is the keystone, and
-   also unblocks the Tier-1 Config ENI arm); Phase 2 is the derived
-   `Edge::Serves`, `inferred` from the control-plane chain and `confirmed` by
-   observed traffic, with the status beside the graph on the existing
-   observation channel — no `SNAPSHOT_VERSION` bump.
+   1a landed the AWS `DescribeNetworkInterfaces` collector, so every interface
+   now carries its addresses and the ALB path resolves end to end. Next is 1b
+   (RDS DNS endpoint), then 1c (the Tier-1 Config ENI arm, now unblocked), then
+   Phase 2's derived `Edge::Serves` — `inferred` from the control-plane chain,
+   `confirmed` by observed traffic, status beside the graph on the existing
+   observation channel, no `SNAPSHOT_VERSION` bump. GCP/Azure address coverage
+   is deliberately deferred behind getting AWS right.
 3. **Rendering Phase 3 remainder**: metadata tooltips and per-node drill-down.
    Phase 4 (search) is untouched. The Tier-2 overlay ships richer data than the
    UI can currently show — `observations` carries `last_seen`/`packets`/`bytes`/

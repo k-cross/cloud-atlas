@@ -68,6 +68,7 @@ pub enum AmazonCollection {
     AmazonCloudFront(Vec<aws_sdk_cloudfront::types::DistributionSummary>),
     AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),
     AmazonNetworking(AWSNetworking),
+    AmazonNetworkInterfaces(Vec<aws_sdk_ec2::types::NetworkInterface>),
 }
 
 #[derive(Debug)]

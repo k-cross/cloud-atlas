@@ -48,7 +48,8 @@ fn instance_config_item(status: &str) -> String {
                 "placement": {{ "availabilityZone": "us-east-1a" }},
                 "securityGroups": [{{ "groupId": "sg-globex", "groupName": "web" }}],
                 "networkInterfaces": [
-                  {{ "networkInterfaceId": "eni-0abc123a", "subnetId": "subnet-globex" }}
+                  {{ "networkInterfaceId": "eni-0abc123a", "subnetId": "subnet-globex",
+                     "privateIpAddress": "10.0.1.20" }}
                 ],
                 "tags": [{{ "key": "env", "value": "prod" }}]
               }}
@@ -56,6 +57,91 @@ fn instance_config_item(status: &str) -> String {
           }}
         }}"#
     )
+}
+
+fn interface_config_item(status: &str, description: &str) -> String {
+    format!(
+        r#"{{
+          "version": "0",
+          "id": "cfg-event-eni",
+          "detail-type": "Config Configuration Item Change Notification",
+          "source": "aws.config",
+          "account": "111111111111",
+          "time": "2026-09-03T12:00:00Z",
+          "region": "us-east-1",
+          "detail": {{
+            "messageType": "ConfigurationItemChangeNotification",
+            "configurationItem": {{
+              "configurationItemStatus": "{status}",
+              "configurationItemCaptureTime": "2026-09-03T12:00:00.000Z",
+              "resourceType": "AWS::EC2::NetworkInterface",
+              "resourceId": "eni-0nat00001",
+              "awsRegion": "us-east-1",
+              "availabilityZone": "us-east-1a",
+              "relationships": [
+                {{ "resourceType": "AWS::EC2::VPC", "resourceId": "vpc-globex" }},
+                {{ "resourceType": "AWS::EC2::Subnet", "resourceId": "subnet-globex" }}
+              ],
+              "configuration": {{
+                "networkInterfaceId": "eni-0nat00001",
+                "vpcId": "vpc-globex",
+                "subnetId": "subnet-globex",
+                "description": "{description}",
+                "interfaceType": "nat_gateway",
+                "privateIpAddress": "10.0.1.60",
+                "privateIpAddresses": [
+                  {{ "privateIpAddress": "10.0.1.60", "primary": true,
+                     "association": {{ "publicIp": "203.0.113.60" }} }}
+                ],
+                "ipv6Addresses": [{{ "ipv6Address": "2001:db8::60" }}],
+                "groups": [{{ "groupId": "sg-globex", "groupName": "web" }}]
+              }}
+            }}
+          }}
+        }}"#
+    )
+}
+
+fn scanned_interface_graph(description: &str) -> Graph<Node, Edge> {
+    use aws_sdk_ec2::types::{
+        GroupIdentifier, NetworkInterface, NetworkInterfaceAssociation, NetworkInterfaceIpv6Address,
+        NetworkInterfacePrivateIpAddress,
+    };
+
+    let interface = NetworkInterface::builder()
+        .network_interface_id("eni-0nat00001")
+        .vpc_id("vpc-globex")
+        .subnet_id("subnet-globex")
+        .description(description)
+        .private_ip_address("10.0.1.60")
+        .private_ip_addresses(
+            NetworkInterfacePrivateIpAddress::builder()
+                .private_ip_address("10.0.1.60")
+                .association(
+                    NetworkInterfaceAssociation::builder()
+                        .public_ip("203.0.113.60")
+                        .build(),
+                )
+                .build(),
+        )
+        .ipv6_addresses(
+            NetworkInterfaceIpv6Address::builder()
+                .ipv6_address("2001:db8::60")
+                .build(),
+        )
+        .groups(GroupIdentifier::builder().group_id("sg-globex").build())
+        .build();
+
+    let mut builder = GraphBuilder::new();
+    projector::build(
+        &mut builder,
+        &Provider::AWS(vec![(
+            "us-east-1".to_owned(),
+            AmazonCollection::AmazonNetworkInterfaces(vec![interface]),
+        )]),
+        &Settings::default(),
+    );
+    builder.graph
 }
 
 fn parse_ok(body: &str) -> Vec<ChangeEvent> {
@@ -77,6 +163,7 @@ fn scanned_instance_graph() -> Graph<Node, Edge> {
             InstanceNetworkInterface::builder()
                 .network_interface_id("eni-0abc123a")
                 .subnet_id("subnet-globex")
+                .private_ip_address("10.0.1.20")
                 .build(),
         )
         .build();
@@ -140,6 +227,86 @@ fn an_instance_event_produces_only_what_a_full_scan_would() {
 }
 
 #[test]
+fn an_interface_event_produces_only_what_a_full_scan_would() {
+    let description = "Interface for NAT Gateway nat-0globex";
+    let events = parse_ok(&interface_config_item("OK", description));
+    let typed = events
+        .iter()
+        .find(|e| matches!(e.node, Node::AwsEc2Eni(_)))
+        .expect("the typed interface event");
+
+    let scanned = scanned_interface_graph(description);
+
+    let extra_nodes: Vec<_> = node_keys(&typed.context)
+        .difference(&node_keys(&scanned))
+        .cloned()
+        .collect();
+    assert!(
+        extra_nodes.is_empty(),
+        "event path invented nodes the full scan does not produce: {extra_nodes:?}"
+    );
+
+    let extra_edges: Vec<_> = edge_keys(&typed.context)
+        .difference(&edge_keys(&scanned))
+        .cloned()
+        .collect();
+    assert!(
+        extra_edges.is_empty(),
+        "event path invented edges the full scan does not produce: {extra_edges:?}"
+    );
+}
+
+#[test]
+fn an_interface_event_carries_every_address_and_its_owner() {
+    let events = parse_ok(&interface_config_item(
+        "ResourceDiscovered",
+        "Interface for NAT Gateway nat-0globex",
+    ));
+    let typed = events
+        .iter()
+        .find(|e| matches!(e.node, Node::AwsEc2Eni(_)))
+        .expect("the typed interface event");
+
+    assert_eq!(typed.op, ChangeOp::Created);
+    let keys = node_keys(&typed.context);
+    for expected in [
+        Node::AwsEc2Eni("eni-0nat00001".into()),
+        Node::AwsEc2Subnet("subnet-globex".into()),
+        Node::AwsEc2Vpc("vpc-globex".into()),
+        Node::AwsEc2SecurityGroup("sg-globex".into()),
+        Node::AwsEc2NatGateway("nat-0globex".into()),
+        Node::ip("10.0.1.60"),
+        Node::ip("203.0.113.60"),
+        Node::ip("2001:db8::60"),
+    ] {
+        assert!(keys.contains(&node_key(&expected)), "missing {expected}");
+    }
+}
+
+// The interface's own description names its balancer, but turning that into an
+// ARN needs the load balancer collection the event path does not have.
+#[test]
+fn a_balancer_interface_event_does_not_invent_the_balancer() {
+    let events = parse_ok(&interface_config_item("OK", "ELB app/globex/1"));
+    let typed = events
+        .iter()
+        .find(|e| matches!(e.node, Node::AwsEc2Eni(_)))
+        .expect("the typed interface event");
+
+    assert!(
+        !typed
+            .context
+            .node_weights()
+            .any(|n| matches!(n, Node::AwsElbLoadBalancer(_))),
+        "an ARN reconstructed here would guess the partition and invent a balancer"
+    );
+    assert!(
+        node_keys(&typed.context).contains(&node_key(&Node::AwsEc2Eni("eni-0nat00001".into()))),
+        "the interface itself is still a node carrying its addresses"
+    );
+}
+
+#[test]
 fn an_instance_event_carries_the_eni_pivot() {
     let events = parse_ok(&instance_config_item("ResourceDiscovered"));
     let typed = events
@@ -164,6 +331,14 @@ fn an_instance_event_carries_the_eni_pivot() {
     ] {
         assert!(keys.contains(&node_key(&expected)), "missing {expected}");
     }
+    assert!(
+        typed.context.edge_references().any(|e| {
+            typed.context[e.source()] == Node::AwsEc2Eni("eni-0abc123a".into())
+                && typed.context[e.target()] == Node::ip("10.0.1.20")
+                && e.weight() == &Edge::ConnectsTo
+        }),
+        "the address belongs to the interface that holds it, not to the instance"
+    );
     assert!(
         typed.context.edge_references().any(|e| {
             typed.context[e.source()] == Node::AwsEc2Eni("eni-0abc123a".into())
@@ -258,22 +433,22 @@ fn a_resource_type_the_scan_skips_produces_no_catch_all_node() {
 }
 
 #[test]
-fn an_eni_item_produces_no_typed_node() {
-    let body = instance_config_item("OK")
-        .replace(
-            r#""resourceType": "AWS::EC2::Instance""#,
-            r#""resourceType": "AWS::EC2::NetworkInterface""#,
-        )
-        .replace(
-            r#""resourceId": "i-0abc123""#,
-            r#""resourceId": "eni-0abc""#,
-        );
+fn a_deleted_interface_names_only_itself() {
+    let events = parse_ok(&interface_config_item(
+        "ResourceDeleted",
+        "Interface for NAT Gateway nat-0globex",
+    ));
+    let typed = events
+        .iter()
+        .find(|e| matches!(e.node, Node::AwsEc2Eni(_)))
+        .expect("the typed interface event");
 
-    let events = parse(&body, INCLUDE_UNKNOWN).expect("readable");
-
-    assert!(
-        !events.iter().any(|e| matches!(e.node, Node::AwsEc2Eni(_))),
-        "an ENI keyed by its own id would never match what the projector builds"
+    assert_eq!(typed.op, ChangeOp::Deleted);
+    assert_eq!(typed.node, Node::AwsEc2Eni("eni-0nat00001".into()));
+    assert_eq!(
+        events.len(),
+        1,
+        "an interface is filtered out of the catch-all, so the typed node is the whole event"
     );
 }
 

@@ -545,6 +545,250 @@ mod tests {
     }
 
     #[test]
+    fn every_interface_carries_its_address_not_just_the_instance_attached_ones() {
+        let builder = fixtures::build_graph();
+
+        for (eni, address) in [
+            ("eni-globex-web-01a", "10.10.1.10"),
+            ("eni-globex-web-01b", "10.10.2.20"),
+            ("eni-globex-web-02a", "10.10.1.11"),
+            ("eni-globex-alb-1a", "10.10.1.50"),
+            ("eni-globex-nat-1a", "10.10.1.60"),
+            ("eni-globex-rds-1a", "10.10.2.30"),
+        ] {
+            assert_edge(
+                &builder,
+                &Node::AwsEc2Eni(eni.into()),
+                &Node::ip(address),
+                &Edge::ConnectsTo,
+            );
+        }
+    }
+
+    #[test]
+    fn an_instance_reporting_no_interfaces_keeps_its_own_address() {
+        use aws_sdk_ec2::types::Instance;
+
+        let instance = Instance::builder()
+            .instance_id("i-lonely")
+            .private_ip_address("10.0.9.9")
+            .build();
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &crate::cloud::definition::Provider::AWS(vec![(
+                "us-east-1".to_owned(),
+                crate::cloud::definition::AmazonCollection::AmazonInstances(vec![instance]),
+            )]),
+            &Settings::default(),
+        );
+
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Instance("i-lonely".into()),
+            &Node::ip("10.0.9.9"),
+            &Edge::ConnectsTo,
+        );
+    }
+
+    #[test]
+    fn an_instance_with_interfaces_puts_the_address_on_the_interface() {
+        let builder = fixtures::build_graph();
+        let instance = Node::AwsEc2Instance("i-globex-web-01".into());
+
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Eni("eni-globex-web-01a".into()),
+            &Node::ip("10.10.1.10"),
+            &Edge::ConnectsTo,
+        );
+        assert!(
+            !builder.has_edge(&instance, &Node::ip("10.10.1.10"), &Edge::ConnectsTo),
+            "the instance-level address is a fallback, not a duplicate assertion"
+        );
+    }
+
+    #[test]
+    fn a_database_is_reached_through_its_endpoint_hostname() {
+        let builder = fixtures::build_graph();
+        let endpoint =
+            Node::hostname("globex-orders-db.cluster-abc123.us-east-1.rds.amazonaws.com");
+
+        assert_edge(
+            &builder,
+            &Node::AwsRdsDbInstance("globex-orders-db".into()),
+            &endpoint,
+            &Edge::ConnectsTo,
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsRoute53RecordSet("db.globex.io.".into()),
+            &endpoint,
+            &Edge::ConnectsTo,
+        );
+    }
+
+    fn project_aws(collections: Vec<crate::cloud::definition::AmazonCollection>) -> GraphBuilder {
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &crate::cloud::definition::Provider::AWS(
+                collections
+                    .into_iter()
+                    .map(|c| ("us-east-1".to_owned(), c))
+                    .collect(),
+            ),
+            &Settings::default(),
+        );
+        builder
+    }
+
+    fn attached_interface(id: &str, instance_id: &str) -> aws_sdk_ec2::types::NetworkInterface {
+        use aws_sdk_ec2::types::{NetworkInterface, NetworkInterfaceAttachment};
+
+        NetworkInterface::builder()
+            .network_interface_id(id)
+            .subnet_id("subnet-globex")
+            .vpc_id("vpc-globex")
+            .private_ip_address("10.0.5.5")
+            .attachment(
+                NetworkInterfaceAttachment::builder()
+                    .instance_id(instance_id)
+                    .build(),
+            )
+            .build()
+    }
+
+    // DescribeInstances is filtered to running/pending, but a stopped instance
+    // keeps its interfaces attached, so the attachment still names it.
+    #[test]
+    fn an_interface_attached_to_an_instance_the_scan_dropped_invents_no_instance() {
+        use crate::cloud::definition::AmazonCollection;
+
+        let builder = project_aws(vec![
+            AmazonCollection::AmazonNetworkInterfaces(vec![attached_interface(
+                "eni-stopped", "i-stopped",
+            )]),
+            AmazonCollection::AmazonInstances(Vec::new()),
+        ]);
+
+        assert!(
+            builder
+                .index_of(&Node::AwsEc2Instance("i-stopped".into()))
+                .is_none(),
+            "an attachment is not evidence the scan kept the instance"
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Eni("eni-stopped".into()),
+            &Node::ip("10.0.5.5"),
+            &Edge::ConnectsTo,
+        );
+    }
+
+    #[test]
+    fn an_interface_owns_its_attachment_once_the_scan_confirms_the_instance() {
+        use crate::cloud::definition::AmazonCollection;
+
+        let instance = aws_sdk_ec2::types::Instance::builder()
+            .instance_id("i-running")
+            .build();
+        let builder = project_aws(vec![
+            AmazonCollection::AmazonNetworkInterfaces(vec![attached_interface(
+                "eni-running",
+                "i-running",
+            )]),
+            AmazonCollection::AmazonInstances(vec![instance]),
+        ]);
+
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Instance("i-running".into()),
+            &Node::AwsEc2Eni("eni-running".into()),
+            &Edge::HasIp,
+        );
+    }
+
+    #[test]
+    fn an_interface_names_the_owner_its_description_actually_identifies() {
+        let builder = fixtures::build_graph();
+
+        assert_edge(
+            &builder,
+            &Node::AwsElbLoadBalancer(
+                "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),
+            ),
+            &Node::AwsEc2Eni("eni-globex-alb-1a".into()),
+            &Edge::HasIp,
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsEc2NatGateway("nat-globex".into()),
+            &Node::AwsEc2Eni("eni-globex-nat-1a".into()),
+            &Edge::HasIp,
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Instance("i-globex-web-01".into()),
+            &Node::AwsEc2Eni("eni-globex-web-01b".into()),
+            &Edge::HasIp,
+        );
+
+        let rds = builder
+            .index_of(&Node::AwsEc2Eni("eni-globex-rds-1a".into()))
+            .expect("the RDS interface is still a node with its address");
+        assert!(
+            !builder
+                .graph
+                .neighbors_directed(rds, petgraph::Direction::Incoming)
+                .any(|n| matches!(builder.graph[n], Node::AwsRdsDbInstance(_))),
+            "an RDSNetworkInterface does not name its database; guessing one would be invention"
+        );
+    }
+
+    #[test]
+    fn observed_traffic_reaches_a_load_balancers_targets() {
+        let builder = fixtures::build_graph();
+        let alb = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),
+        );
+
+        for (eni, instance) in [
+            ("eni-globex-web-01a", "i-globex-web-01"),
+            ("eni-globex-web-02a", "i-globex-web-02"),
+        ] {
+            let target_ip = builder
+                .graph
+                .neighbors_directed(
+                    builder.index_of(&Node::AwsEc2Eni(eni.into())).unwrap(),
+                    petgraph::Direction::Outgoing,
+                )
+                .find(|n| matches!(builder.graph[*n], Node::GenericIpAddress(_)))
+                .map(|n| builder.graph[n].clone())
+                .expect("the target interface has an address");
+
+            assert_edge(
+                &builder,
+                &alb,
+                &Node::AwsEc2Eni("eni-globex-alb-1a".into()),
+                &Edge::HasIp,
+            );
+            assert_edge(
+                &builder,
+                &Node::ip("10.10.1.50"),
+                &target_ip,
+                &Edge::TrafficFlow,
+            );
+            assert_edge(
+                &builder,
+                &Node::AwsEc2Instance(instance.into()),
+                &Node::AwsEc2Eni(eni.into()),
+                &Edge::HasIp,
+            );
+        }
+    }
+
+    #[test]
     fn differently_spelled_addresses_land_on_one_pivot() {
         let builder = fixtures::build_graph();
 

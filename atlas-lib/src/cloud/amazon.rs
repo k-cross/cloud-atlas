@@ -9,6 +9,7 @@ pub mod flow_logs;
 pub mod instance;
 pub mod lambda;
 pub mod load_balancer;
+pub mod network_interface;
 pub mod networking;
 pub mod provider;
 pub mod rds;

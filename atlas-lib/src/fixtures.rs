@@ -86,8 +86,31 @@ pub fn flows() -> Vec<FlowObservation> {
             Node::AwsEc2Eni("eni-globex-web-02a".into()),
         ]
     };
+    let alb = || vec![Node::AwsEc2Eni("eni-globex-alb-1a".into())];
+    let nat = || vec![Node::AwsEc2Eni("eni-globex-nat-1a".into())];
 
     vec![
+        flow(
+            "10.10.1.50",
+            "10.10.1.10",
+            alb(),
+            210_000,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "10.10.1.50",
+            "10.10.1.11",
+            alb(),
+            198_400,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            "10.10.2.20",
+            "10.10.2.30",
+            vec![Node::AwsEc2Eni("eni-globex-web-01b".into())],
+            58_600,
+            Some(FlowAction::Accepted),
+        ),
         flow(
             "10.10.1.10",
             "198.51.100.10",
@@ -140,7 +163,7 @@ pub fn flows() -> Vec<FlowObservation> {
         flow(
             "203.0.113.50",
             "10.10.1.11",
-            Vec::new(),
+            nat(),
             310,
             Some(FlowAction::Rejected),
         ),
@@ -175,8 +198,9 @@ pub fn aws() -> Provider {
     use aws_sdk_ec2::types::{
         Address, GroupIdentifier, InstanceNetworkInterface, InternetGateway,
         InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway, NatGatewayAddress,
-        Placement, Route, RouteTable, RouteTableAssociation, SecurityGroup, Tag, UserIdGroupPair,
-        builders::InstanceBuilder,
+        NetworkInterface, NetworkInterfaceAssociation, NetworkInterfaceAttachment,
+        NetworkInterfacePrivateIpAddress, NetworkInterfaceType, Placement, Route, RouteTable,
+        RouteTableAssociation, SecurityGroup, Tag, UserIdGroupPair, builders::InstanceBuilder,
     };
 
     let sg_web = GroupIdentifier::builder()
@@ -309,6 +333,18 @@ pub fn aws() -> Provider {
         .build()
         .unwrap();
 
+    let record_db_cname = aws_sdk_route53::types::ResourceRecordSet::builder()
+        .name("db.globex.io.")
+        .r#type(aws_sdk_route53::types::RrType::Cname)
+        .resource_records(
+            aws_sdk_route53::types::ResourceRecord::builder()
+                .value("globex-orders-db.cluster-abc123.us-east-1.rds.amazonaws.com.")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
     let eks = aws_sdk_eks::types::Cluster::builder()
         .name("globex-k8s")
         .resources_vpc_config(
@@ -325,6 +361,12 @@ pub fn aws() -> Provider {
 
     let rds = aws_sdk_rds::types::DbInstance::builder()
         .db_instance_identifier("globex-orders-db")
+        .endpoint(
+            aws_sdk_rds::types::Endpoint::builder()
+                .address("globex-orders-db.cluster-abc123.us-east-1.rds.amazonaws.com")
+                .port(5432)
+                .build(),
+        )
         .db_subnet_group(
             aws_sdk_rds::types::DbSubnetGroup::builder()
                 .vpc_id("vpc-globex")
@@ -474,8 +516,71 @@ pub fn aws() -> Provider {
         )
         .build();
 
+    let interface = |id: &str, subnet: &str, ip: &str| {
+        NetworkInterface::builder()
+            .network_interface_id(id)
+            .subnet_id(subnet)
+            .vpc_id("vpc-globex")
+            .groups(GroupIdentifier::builder().group_id("sg-web").build())
+            .private_ip_addresses(
+                NetworkInterfacePrivateIpAddress::builder()
+                    .private_ip_address(ip)
+                    .build(),
+            )
+    };
+    let attached = |id: &str, subnet: &str, ip: &str, instance: &str| {
+        interface(id, subnet, ip)
+            .interface_type(NetworkInterfaceType::Interface)
+            .attachment(
+                NetworkInterfaceAttachment::builder()
+                    .instance_id(instance)
+                    .build(),
+            )
+            .build()
+    };
+    let interfaces = vec![
+        attached(
+            "eni-globex-web-01a",
+            "subnet-public-1a",
+            "10.10.1.10",
+            "i-globex-web-01",
+        ),
+        attached(
+            "eni-globex-web-01b",
+            "subnet-private-1a",
+            "10.10.2.20",
+            "i-globex-web-01",
+        ),
+        attached(
+            "eni-globex-web-02a",
+            "subnet-public-1a",
+            "10.10.1.11",
+            "i-globex-web-02",
+        ),
+        interface("eni-globex-alb-1a", "subnet-public-1a", "10.10.1.50")
+            .interface_type(NetworkInterfaceType::NetworkLoadBalancer)
+            .description("ELB app/globex/1")
+            .build(),
+        interface("eni-globex-nat-1a", "subnet-public-1a", "10.10.1.60")
+            .interface_type(NetworkInterfaceType::NatGateway)
+            .description("Interface for NAT Gateway nat-globex")
+            .association(
+                NetworkInterfaceAssociation::builder()
+                    .public_ip("203.0.113.50")
+                    .build(),
+            )
+            .build(),
+        interface("eni-globex-rds-1a", "subnet-private-1a", "10.10.2.30")
+            .description("RDSNetworkInterface")
+            .build(),
+    ];
+
     let r = REGION.to_owned();
     Provider::AWS(vec![
+        (
+            r.clone(),
+            AmazonCollection::AmazonNetworkInterfaces(interfaces),
+        ),
         (r.clone(), AmazonCollection::AmazonInstances(vec![i1, i2])),
         (r.clone(), AmazonCollection::AmazonClusters(vec![ecs])),
         (r.clone(), AmazonCollection::AmazonLambdas(vec![lambda])),
@@ -494,7 +599,7 @@ pub fn aws() -> Provider {
             r.clone(),
             AmazonCollection::AmazonRoute53(AWSRoute53 {
                 hosted_zones: vec![hosted_zone],
-                record_sets: vec![record_a, record_cname],
+                record_sets: vec![record_a, record_cname, record_db_cname],
             }),
         ),
         (r.clone(), AmazonCollection::AmazonEks(vec![eks])),

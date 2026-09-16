@@ -238,3 +238,69 @@ async fn elbv2_load_balancers_and_target_groups() {
     assert_eq!(load_balancers[0].load_balancer_name(), Some("my-lb"));
     assert_eq!(target_groups[0].target_group_name(), Some("my-tg"));
 }
+
+#[tokio::test]
+async fn network_interfaces() {
+    let body = r#"<DescribeNetworkInterfacesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+      <networkInterfaceSet>
+        <item>
+          <networkInterfaceId>eni-alb-1a</networkInterfaceId>
+          <subnetId>subnet-public-1a</subnetId>
+          <vpcId>vpc-1</vpcId>
+          <description>ELB app/globex/1</description>
+          <interfaceType>network_load_balancer</interfaceType>
+          <privateIpAddressesSet>
+            <item><privateIpAddress>10.10.1.50</privateIpAddress></item>
+          </privateIpAddressesSet>
+          <groupSet>
+            <item><groupId>sg-web</groupId></item>
+          </groupSet>
+        </item>
+      </networkInterfaceSet>
+    </DescribeNetworkInterfacesResponse>"#;
+    let cfg = replay_config(&[(XML, body)]).await;
+    let interfaces = super::network_interface::collector::runner(&cfg)
+        .await
+        .unwrap();
+
+    let eni = &interfaces[0];
+    assert_eq!(eni.network_interface_id(), Some("eni-alb-1a"));
+    assert_eq!(eni.subnet_id(), Some("subnet-public-1a"));
+    assert_eq!(eni.vpc_id(), Some("vpc-1"));
+    assert_eq!(
+        eni.description(),
+        Some("ELB app/globex/1"),
+        "the description is the only thing that names the owning balancer"
+    );
+    assert_eq!(
+        eni.private_ip_addresses()[0].private_ip_address(),
+        Some("10.10.1.50"),
+        "the address is the whole point; a flow record resolves through it"
+    );
+    assert_eq!(eni.groups()[0].group_id(), Some("sg-web"));
+}
+
+#[tokio::test]
+async fn network_interfaces_follow_pagination_past_the_first_page() {
+    let first = r#"<DescribeNetworkInterfacesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+      <networkInterfaceSet>
+        <item><networkInterfaceId>eni-1</networkInterfaceId></item>
+      </networkInterfaceSet>
+      <nextToken>page-2</nextToken>
+    </DescribeNetworkInterfacesResponse>"#;
+    let second = r#"<DescribeNetworkInterfacesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+      <networkInterfaceSet>
+        <item><networkInterfaceId>eni-2</networkInterfaceId></item>
+      </networkInterfaceSet>
+    </DescribeNetworkInterfacesResponse>"#;
+    let cfg = replay_config(&[(XML, first), (XML, second)]).await;
+    let interfaces = super::network_interface::collector::runner(&cfg)
+        .await
+        .unwrap();
+
+    let ids: Vec<_> = interfaces
+        .iter()
+        .filter_map(|e| e.network_interface_id())
+        .collect();
+    assert_eq!(ids, vec!["eni-1", "eni-2"]);
+}
