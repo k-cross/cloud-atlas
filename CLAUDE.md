@@ -12,7 +12,7 @@ Cloud Atlas builds a **continuous live property graph** of multi-cloud infrastru
 2. **ENI is the core networking pivot.** Semantic paths start from the Elastic Network Interface: `Instance -> HasIp -> ENI -> AttachedTo -> Subnet`. `Node::AwsEc2Eni` is keyed by the interface's own `eni-` id — the identity every source that mentions an interface actually carries (`DescribeInstances`' `networkInterfaces`, Config items, flow logs' `interface-id`). The owning instance is the `HasIp` edge, never part of the key: an ENI can be reattached elsewhere, an instance can be multi-homed across subnets, and most ENIs (NAT gateways, load balancer nodes, RDS, in-VPC Lambda) belong to no instance at all. An instance that reports no interfaces therefore gets no ENI and no path to its subnet — substituting a direct `Instance -> Subnet` edge would be a shape no other producer emits.
 3. **`Display` is required on every new type.** Every new `Node` or `Edge` variant must implement `std::fmt::Display` for clean `.dot` output. Follow the existing `Type::SubType(id)` format pattern.
 4. **Never let a failure look like an absence.** This is a live graph, so "we could not read it" and "it is gone" must stay distinguishable all the way to the differ — see the `CollectionReport` contract under Live Server.
-5. **Cross-cloud stitching via generic nodes.** Use `Node::GenericIpAddress` and `Node::GenericHostname` as cross-cloud integration points. Connect to them with `Edge::RoutesTo` (traffic) or `Edge::ResolvesTo` (DNS). Graph deduplication is automatic — `GraphBuilder` merges identical generic nodes from different clouds via its `HashMap<Node, NodeIndex>`.
+5. **Cross-cloud stitching via generic nodes.** Use `Node::GenericIpAddress` and `Node::GenericHostname` as cross-cloud integration points. Connect to them with `Edge::RoutesTo` (traffic), `Edge::ResolvesTo` (DNS) or `Edge::ConnectsTo` (the resource *holds* this address). That last distinction is load-bearing now that `derive::service` reads it: `ConnectsTo` to a pivot means ownership and makes the resource a `Serves` endpoint, so every DNS producer must use `ResolvesTo` — a record set names an address, it does not send packets from one. Graph deduplication is automatic — `GraphBuilder` merges identical generic nodes from different clouds via its `HashMap<Node, NodeIndex>`.
 6. **`Node` and `Edge` carry identity, never mutable state.** Both are `Hash + Eq` and that *is* their identity: `GraphBuilder` dedups on it, `patch::diff` compares on it, and `node_key`/`edge_key` derive the wire id from it. A field that changes while the resource stays the same — a packet counter, a `last_seen` — would make every update a different value: duplicates past `add_edge`'s dedup, and a remove-then-add of the same key out of every diff. Such properties go beside the graph, keyed by the stable key. `atlas::flow::FlowIndex` is the one instance, and the reason `Edge::TrafficFlow` is payload-free.
 
 ## Testing Without Cloud Credentials
@@ -281,6 +281,24 @@ leaves every flow at one bead. That canvas is excluded
 from the "settled graph is rock-still" e2e regression on purpose — its motion
 is the feature, and a second test asserts it *does* change frame to frame.
 
+A derived `Edge::Serves` is styled from its *status* rather than from volume it
+does not have (`SERVES_STATUS_COLORS`, `servesColor`/`servesSize` in `style.ts`):
+`confirmed` is saturated and wide enough to read as a path, `inferred` recedes
+into the plumbing it summarises. An edge whose observation has not arrived yet
+— or whose observation expired — takes the `inferred` styling, never the
+confirmed one, since not-yet-confirmed is the honest reading. The traffic canvas
+keys off `FLOW_KIND` and so never animates beads along a `Serves` edge, which
+carries no packets; `never_animates_packets_along_a_derived_edge` holds it there
+now that both kinds carry an observation.
+
+**Service view** (`GraphController::setServiceView`) hides every edge that is not
+`Serves` and every node no `Serves` edge touches, through Sigma's node/edge
+reducers. Hiding rather than dimming is the point: one derived edge stands in
+for five hops, and leaving those hops drawn underneath is exactly the picture it
+was meant to replace. The traffic canvas follows for free — it already skips any
+endpoint Sigma reports as `hidden`, so the beads stop with the flow edges they
+belong to, and `TrafficLayer` needed no change.
+
 - `GET /snapshot.json` — full current snapshot (v3: nodes, edges, and the flow overlay's `observations`). `GET /collection.json` — `complete` (did the scan lose anything at all), `unreadable` (which sources could not be read, and so are suspending removals), `failures` (each attributed to its source/scope and stamped with its `kind`), `stream` (the Tier-1 feed's own health) and `flows` (the Tier-2 feed's, plus how many flows are currently observed) — the last two deliberately separate, see above. This is the only way a client can tell "this provider holds nothing" from "this provider could not be reached" from "we read it but dropped a row" — it matters most at start-up, when an outage makes the first partial collection the baseline. `GET /ws` — WebSocket hub.
 - WS is **bidirectional**: server pushes `snapshot` then `patch`es; the client can pull `get_snapshot` / `get_neighbors` on demand.
 - Point the frontend at it: run `bun dev` in `atlas-render/atlas-web/` (assets on :4680) which connects by default to `ws://<host>:4681/ws`; override with `?server=ws://…` or force offline with `?static`.
@@ -334,6 +352,24 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
   unowned rather than parsed on a guess — an unowned ENI with a real address is
   what the flow overlay needs anyway.
 
+  An associated Elastic IP is held by its interface (`Eni -HasIp-> Eip`, from
+  `Address::network_interface_id`), never by `instance_id`: a stopped instance
+  keeps its association and the scan does not keep the instance. Target-group
+  targets are projected by `target_type`: `ip` → `RoutesTo` a pivot (never
+  `ConnectsTo`, which would make the group an address holder), Lambda/ALB targets
+  are skipped rather than turned into a fictional instance, and `instance`
+  targets are linked in `link_instance_targets`, after the parallel pass.
+
+  **Every edge built from someone else's mention of an instance is gated on
+  `scanned_instances`.** `DescribeInstances` is filtered to running/pending, but a
+  stopped instance is still named by its attached interfaces and by its
+  target-group registrations, and `link_to` would quietly create the node the
+  scan left out — no AZ, tags or security groups, the same `kind()` as a live
+  one, and a `Serves` edge to it through `CHAINS`. Both
+  `link_interface_owners` and `link_instance_targets` take the set, which is
+  computed once in `aws_projector`. A new edge that names an instance by id from
+  another collection belongs there too.
+
   The two owners an interface cannot settle alone live in
   `link_interface_owners`, which must run after `project_parallel` because each
   collection is projected into its own builder and neither side carries the
@@ -346,18 +382,93 @@ Uses **jj (Jujutsu)** on top of git. Typical workflow: `jj describe` → `jj new
   a live one. The edge is drawn only for an instance the scan returned, which
   costs nothing: a running instance reports its own interfaces and
   `project_instance` has already drawn it.
-- Derived edges: `atlas::containment::link(&mut builder)` links every
-  `GenericIpAddress` that is a bare address into every one that is a CIDR range
-  covering it (`Edge::Covers`) — the thing that lets a flow record confirm the
-  security-group rule that permitted it. Call it at every point a graph is
-  finalized, **after** `patch::carry_forward` and `FlowIndex::overlay`
+- Derived edges: `atlas::derive::all(&mut builder, &flows)` is the **only** entry
+  point, and it runs every derivation in a fixed order. It takes the flow index
+  because a flow's *orientation* lives there (below); a caller with no flow feed —
+  the CLI's `AtlasEngine::install` — passes `FlowIndex::default()`, which matches
+  a graph that holds no traffic anyway. Call it at every point a graph
+  is finalized, **after** `patch::carry_forward` and `FlowIndex::overlay`
   (`poll::reconcile`, `AtlasEngine::install`, `fixtures::build_graph`,
-  `examples/demo.rs`). It is *derived*, not observed: a pure function of which
-  pivots are present, so it holds no state, needs no TTL, and every lifecycle
-  falls out of the ordinary differ. The matching corollary is that
-  `carry_forward` must not hold it — `Edge::is_projected()` is the exhaustive
-  match that says which edge kinds are a scan's own evidence (`TrafficFlow` and
-  `Covers` are not), and a new `Edge` variant has to declare its side.
+  `examples/demo.rs`). Each pass lives in a private module under `derive/`, so
+  the compiler refuses a direct call from anywhere else: the earlier shape —
+  one `pub` pass called from four places — meant a new finalisation point could
+  quietly get three of them, which is exactly how one was missed before. Add a
+  new pass to `derive::all`, never a second call at the call sites.
+
+  `derive::containment` links every `GenericIpAddress` that is a bare address
+  into every one that is a CIDR range covering it (`Edge::Covers`) — the thing
+  that lets a flow record confirm the security-group rule that permitted it.
+
+  `derive::service` collapses a path into one `Edge::Serves` between typed
+  resources, in the direction traffic moves — `ALB -Serves-> Instance` instead of
+  five hops through two interfaces and two address pivots. It has **two
+  provenances and deliberately one edge kind**: a control-plane chain means the
+  wiring exists (status `inferred`), and observed traffic between the same two
+  resources means it is used (`confirmed`). One kind is what makes the
+  interesting transition expressible — a flow that lapses drops a still-registered
+  target back to `inferred` instead of deleting it, and "wired up and receiving
+  nothing" is a more useful statement than "gone". With two kinds it would read
+  as a deletion.
+
+  **Direction comes from ports, not packets.** A flow log writes a request and
+  its reply as two records with the addresses swapped, so reading `Serves` off
+  packet direction drew every relationship both ways. `FlowObservation` carries
+  `src_port`/`dst_port`, `flow::orientation` decides which end is the service
+  (one ephemeral port → the other end; neither → the lower port, which is what a
+  NAT gateway's 1024–65535 source ports need; two high ports, equal ports, ICMP's
+  zeros or a format without ports → `None`, falling back to packet direction),
+  and `FlowStats` keeps a majority per pair. `TrafficFlow` edges keep packet
+  direction — beads still animate both ways — only the derived edge is oriented.
+  **Confirmation is read from the index, not the edge**: between scans an
+  evicted flow's edge outlives its record, and an edge alone would report
+  "confirmed, never seen".
+
+  Chains are a table of `Node::kind()` sequences (`CHAINS`), the one
+  provider-specific thing in the pass; the matcher knows no cloud, walks only
+  *projected* edges so the pass cannot feed on its own output, and a test holds
+  every named kind to `Node::ALL_KINDS`. Only the AWS row
+  (`AwsElbLoadBalancer → AwsElbTargetGroup → AwsEc2Instance`) is real until GCP
+  and Azure grow the node kinds theirs need.
+
+  Its other piece of real machinery is the **address-ownership map**: a pivot is
+  owned by the typed resource that `ConnectsTo` it, resolved *transitively* up
+  through `HasIp` to whatever ultimately holds it — otherwise every edge would
+  read `Eni -Serves-> Eni`, and an associated Elastic IP would stand beside its
+  instance as a second "service". Holders stack (`Instance -HasIp-> Eni -HasIp->
+  Eip`), so one hop is not enough; a visited set makes a cycle a no-op. An
+  interface nothing holds (Lambda, VPC endpoint, RDS) stays its own owner,
+  which is the point of those still being nodes with addresses. Typed vs pivot
+  is `Node::owner()`, so the pass stays provider-agnostic. Two consequences
+  worth keeping: ownership means *holding* an address, so DNS reaches a pivot by
+  `ResolvesTo` and never confers it (a record set must not appear to send
+  packets), and an endpoint no resource holds yields nothing at all, which is
+  what keeps internet traffic and a NAT gateway's ten thousand peers from
+  producing edges.
+
+  Both are *derived*, not observed: a pure function of the graph and flow index
+  they are handed, so they hold no state, need no TTL, are idempotent, and every
+  lifecycle falls out of the ordinary differ. The matching corollary is that
+  `carry_forward` must not hold them — `Edge::is_projected()` is the exhaustive
+  match that says which edge kinds are a scan's own evidence (`TrafficFlow`,
+  `Covers` and `Serves` are not), and a new `Edge` variant has to declare its
+  side. A carried-forward graph therefore has to be re-derived, not patched up.
+
+  A derived edge's status rides the **observation channel**, never the edge
+  itself (architecture rule 6 — a status field would make every transition a
+  different edge, and a remove-then-add in every patch). `derive::observations`
+  is what a snapshot reader calls instead of `FlowIndex::observations`, so a
+  derived edge cannot reach a client with no status. A patch uses
+  `derive::DerivedObservations::changed`, which the reconcile loop owns and which
+  sends only what moved since the last tick: resending the whole derived set
+  made every idle poll a patch to every client, since an `inferred` edge never
+  changes on its own. It compares values rather than gating on whether flows
+  drained, because flows ingested between scans move `last_seen` without leaving
+  a trace the reconcile tick could see. A `Serves` observation
+  carries `last_seen` and a status and deliberately **no** `packets`/`bytes`:
+  one edge summarises however many flows confirmed it, and summing theirs would
+  report the same traffic more than once. `last_seen` survives that because it
+  composes as a maximum, and is `0` on an `inferred` edge — never observed, and
+  it must not claim otherwise.
 - Cross-cloud pivots: `Node::ip(value)` / `Node::hostname(value)` are the only
   way to build a `GenericIpAddress`/`GenericHostname` — never name the variant
   at a producer. They canonicalise through `atlas::util::canonical_address` and

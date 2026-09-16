@@ -1,4 +1,5 @@
 import Graph from "graphology";
+import { SERVES_KIND } from "./service";
 import {
 	DEFAULT_EDGE_COLOR,
 	EDGE_COLORS,
@@ -7,6 +8,8 @@ import {
 	nodeSize,
 	PROVIDER_COLORS,
 	providerOf,
+	servesColor,
+	servesSize,
 } from "./style";
 import { FLOW_KIND } from "./traffic";
 
@@ -71,6 +74,10 @@ function edgeColor(kind: string): string {
 	return EDGE_COLORS[kind] ?? DEFAULT_EDGE_COLOR;
 }
 
+function edgeSize(kind: string): number {
+	return kind === SERVES_KIND ? servesSize(undefined) : 1;
+}
+
 function addNode(graph: Graph, node: SnapshotNode, x = 0, y = 0) {
 	if (graph.hasNode(node.key)) return;
 	graph.addNode(node.key, {
@@ -90,7 +97,7 @@ function addEdge(graph: Graph, edge: SnapshotEdge) {
 	graph.addEdgeWithKey(edge.key, edge.source_key, edge.target_key, {
 		kind: edge.kind,
 		color: edgeColor(edge.kind),
-		size: 1,
+		size: edgeSize(edge.kind),
 	});
 }
 
@@ -113,9 +120,13 @@ function observe(graph: Graph, observations: SnapshotObservation[]) {
 		if (graph.hasNode(o.key)) {
 			graph.mergeNodeAttributes(o.key, attrs);
 		} else if (graph.hasEdge(o.key)) {
-			if (graph.getEdgeAttribute(o.key, "kind") === FLOW_KIND) {
+			const kind = graph.getEdgeAttribute(o.key, "kind") as string;
+			if (kind === FLOW_KIND) {
 				attrs.color = flowColor(o.status);
 				attrs.size = flowSize(o.packets);
+			} else if (kind === SERVES_KIND) {
+				attrs.color = servesColor(o.status);
+				attrs.size = servesSize(o.status);
 			}
 			graph.mergeEdgeAttributes(o.key, attrs);
 		}
@@ -134,7 +145,11 @@ function clearObservations(graph: Graph, keys: string[]) {
 			graph.mergeNodeAttributes(key, attrs);
 		} else if (graph.hasEdge(key)) {
 			const kind = graph.getEdgeAttribute(key, "kind") as string;
-			graph.mergeEdgeAttributes(key, { ...attrs, color: edgeColor(kind), size: 1 });
+			graph.mergeEdgeAttributes(key, {
+				...attrs,
+				color: edgeColor(kind),
+				size: edgeSize(kind),
+			});
 		}
 	}
 }

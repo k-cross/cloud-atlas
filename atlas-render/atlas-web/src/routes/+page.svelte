@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { GraphController, type LegendCount } from '$lib/GraphController';
-  import { FLOW_STATUS_COLORS } from '$lib/style';
+  import { CONFIRMED, INFERRED, type ServiceSummary } from '$lib/service';
+  import { FLOW_STATUS_COLORS, SERVES_STATUS_COLORS } from '$lib/style';
   import { formatAge, formatBytes, type TrafficSummary } from '$lib/traffic';
 
   let container: HTMLElement;
@@ -11,6 +12,9 @@
   let legendCounts = $state<LegendCount[]>([]);
   let errorMsg = $state<string | null>(null);
   let traffic = $state<TrafficSummary | null>(null);
+  let service = $state<ServiceSummary | null>(null);
+  let serviceView = $state(false);
+  let derivedEdges = $derived((service?.confirmed ?? 0) + (service?.inferred ?? 0));
   let now = $state(Date.now());
 
   const statusOrder = ['accepted', 'rejected', 'mixed', 'observed'];
@@ -33,6 +37,9 @@
         traffic = summary;
         now = Date.now();
       },
+      onServiceChange: (summary) => {
+        service = summary;
+      },
       onError: (err) => {
         errorMsg = err;
       }
@@ -46,6 +53,11 @@
       controller.destroy();
     }
   });
+
+  function handleServiceView(event: Event) {
+    serviceView = (event.currentTarget as HTMLInputElement).checked;
+    controller?.setServiceView(serviceView);
+  }
 
   function handleReheat() {
     if (controller) {
@@ -91,6 +103,35 @@
         {/each}
       </div>
       <div class="muted">last seen {formatAge(now - traffic.newest)}</div>
+    </div>
+  {/if}
+
+  <!-- Stays while the view is on, even with nothing derived: a patch that
+       removes the last Serves edge must not take the only way back with it. -->
+  {#if serviceView || derivedEdges > 0}
+    <div class="service">
+      <h2>Service topology</h2>
+      <div class="statuses">
+        <span class="chip" style="--chip: {SERVES_STATUS_COLORS[CONFIRMED]}"
+          >{CONFIRMED} {service?.confirmed ?? 0}</span
+        >
+        <span class="chip" style="--chip: {SERVES_STATUS_COLORS[INFERRED]}"
+          >{INFERRED} {service?.inferred ?? 0}</span
+        >
+      </div>
+      <label class="toggle">
+        <input type="checkbox" checked={serviceView} onchange={handleServiceView} />
+        <span>Service view</span>
+      </label>
+      <div class="muted">
+        {#if serviceView && derivedEdges === 0}
+          nothing derived yet — the view is empty
+        {:else if serviceView}
+          plumbing hidden
+        {:else}
+          wired vs. used
+        {/if}
+      </div>
     </div>
   {/if}
 
@@ -163,7 +204,8 @@
     color: var(--muted);
   }
 
-  .traffic {
+  .traffic,
+  .service {
     margin-bottom: 16px;
     padding-top: 12px;
     border-top: 1px solid rgba(255, 255, 255, 0.08);
@@ -190,6 +232,15 @@
     flex-wrap: wrap;
     gap: 4px;
     margin: 8px 0 6px;
+  }
+
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    margin-bottom: 4px;
+    cursor: pointer;
   }
 
   .chip {

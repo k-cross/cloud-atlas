@@ -31,7 +31,27 @@ export const EDGE_COLORS: Record<string, string> = {
 
 	TrafficFlow: "#3f8f6f",
 	Covers: "#3d4f60",
+
+	// An edge with no observation yet has not been confirmed by anything, and
+	// the dimmer of the two readings is the honest default.
+	Serves: "#6a5a39",
 };
+
+// Wired versus used is the entire point of a Serves edge, so the two have to be
+// told apart at a glance: confirmed is saturated and wide enough to read as a
+// path, inferred recedes into the plumbing it describes.
+export const SERVES_STATUS_COLORS: Record<string, string> = {
+	confirmed: "#e8a33c",
+	inferred: "#6a5a39",
+};
+
+export function servesColor(status: string | undefined): string {
+	return (status && SERVES_STATUS_COLORS[status]) || SERVES_STATUS_COLORS.inferred;
+}
+
+export function servesSize(status: string | undefined): number {
+	return status === "confirmed" ? 2.6 : 1.1;
+}
 
 export const FLOW_STATUS_COLORS: Record<string, string> = {
 	accepted: "#3fbf87",

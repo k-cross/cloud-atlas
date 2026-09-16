@@ -25,6 +25,8 @@ const DEFAULT_FIELDS: &[&str] = &[
 pub struct Layout {
     src: Option<usize>,
     dst: Option<usize>,
+    src_port: Option<usize>,
+    dst_port: Option<usize>,
     packets: Option<usize>,
     bytes: Option<usize>,
     end: Option<usize>,
@@ -53,6 +55,8 @@ impl Layout {
         let mut layout = Self {
             src: None,
             dst: None,
+            src_port: None,
+            dst_port: None,
             packets: None,
             bytes: None,
             end: None,
@@ -67,6 +71,8 @@ impl Layout {
             let slot = match field {
                 "srcaddr" => &mut layout.src,
                 "dstaddr" => &mut layout.dst,
+                "srcport" => &mut layout.src_port,
+                "dstport" => &mut layout.dst_port,
                 "packets" => &mut layout.packets,
                 "bytes" => &mut layout.bytes,
                 "end" => &mut layout.end,
@@ -184,6 +190,11 @@ fn record(layout: &Layout, line: &str, scope: &str) -> Result<FlowObservation, S
             .unwrap_or_default()
     };
 
+    let port = |slot: Option<usize>| {
+        slot.and_then(|at| value(&columns, at))
+            .and_then(|s| s.parse::<u16>().ok())
+    };
+
     let action = match layout.action.and_then(|at| value(&columns, at)) {
         Some("ACCEPT") => Some(FlowAction::Accepted),
         Some("REJECT") => Some(FlowAction::Rejected),
@@ -203,6 +214,8 @@ fn record(layout: &Layout, line: &str, scope: &str) -> Result<FlowObservation, S
         scope: scope.to_owned(),
         src: Node::ip(src),
         dst: Node::ip(dst),
+        src_port: port(layout.src_port),
+        dst_port: port(layout.dst_port),
         resources,
         packets: number(layout.packets),
         bytes: number(layout.bytes),

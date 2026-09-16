@@ -2,8 +2,8 @@ use crate::demo;
 use crate::state::AppState;
 use crate::stream;
 use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-use atlas_lib::atlas::containment;
 use atlas_lib::atlas::definition::{Edge, Node};
+use atlas_lib::atlas::derive::{self, DerivedObservations};
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
 use atlas_lib::atlas::flow::{FlowIndex, FlowObservation};
@@ -60,7 +60,7 @@ fn reconcile(
         carry_forward(next, live, held);
     }
     flows.overlay(next);
-    containment::link(next);
+    derive::all(next, flows);
     diff(live, &next.graph)
 }
 
@@ -120,6 +120,7 @@ pub async fn run(
     retention: Retention,
 ) {
     let mut retention = retention;
+    let mut derived = DerivedObservations::default();
     let mut applier = EventApplier::new();
     let mut backoff = stream::Backoff::new();
     let mut flow_backoff = stream::Backoff::new();
@@ -143,7 +144,7 @@ pub async fn run(
         tokio::select! {
             _ = ticker.tick() => {
                 tick += 1;
-                reconcile_tick(&state, &source, &mut retention, tick).await;
+                reconcile_tick(&state, &source, &mut retention, &mut derived, tick).await;
             }
             batch = &mut drain => {
                 backoff.record(healthy(&batch.report));
@@ -163,7 +164,13 @@ fn healthy(report: &CollectionReport) -> bool {
     report.unreadable_sources().is_empty()
 }
 
-async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Retention, tick: u64) {
+async fn reconcile_tick(
+    state: &AppState,
+    source: &Source,
+    retention: &mut Retention,
+    derived: &mut DerivedObservations,
+    tick: u64,
+) {
     let (mut next, report) = source.scan(tick).await;
     let held = retention.hold(&report);
 
@@ -207,6 +214,9 @@ async fn reconcile_tick(state: &AppState, source: &Source, retention: &mut Reten
     {
         let mut flows = state.flows.write().await;
         patch.observations = flows.drain_observations();
+        patch
+            .observations
+            .extend(derived.changed(derive::derived_observations(&next.graph, &flows)));
         patch.expired = flows.drain_lapsed();
     }
 
@@ -315,8 +325,8 @@ mod tests {
 
     // A graph a previous reconcile produced already carries its derived edges;
     // a hand-built baseline has to say so or the next diff reads them as new.
-    fn settled(mut builder: GraphBuilder) -> GraphBuilder {
-        containment::link(&mut builder);
+    fn settled(mut builder: GraphBuilder, flows: &FlowIndex) -> GraphBuilder {
+        derive::all(&mut builder, flows);
         builder
     }
 
@@ -525,7 +535,7 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_still_applies_additions() {
-        let live = settled(demo::graph(2)).graph;
+        let live = settled(demo::graph(2), &no_flows()).graph;
         let mut next = without_kind(&demo::graph(3).graph, "AwsEc2Instance");
 
         let patch = reconcile(&live, &mut next, &holding_aws(), &no_flows());
@@ -541,9 +551,9 @@ mod tests {
 
     #[test]
     fn a_complete_scan_is_unaffected_by_carry_forward() {
-        let live = settled(demo::graph(2)).graph;
+        let live = settled(demo::graph(2), &no_flows()).graph;
         let mut next = demo::graph(3);
-        let same = settled(demo::graph(3));
+        let same = settled(demo::graph(3), &no_flows());
 
         let with_policy = reconcile(&live, &mut next, &nothing_held(), &no_flows());
         let plain = diff(&live, &same.graph);
@@ -580,8 +590,9 @@ mod tests {
             FlowIndex::new(ttl, FlowIndex::DEFAULT_CAPACITY),
         );
         let mut retention = Retention::new(Retention::DEFAULT_BUDGET);
+        let mut derived = DerivedObservations::default();
 
-        reconcile_tick(&state, &Source::Demo, &mut retention, 1).await;
+        reconcile_tick(&state, &Source::Demo, &mut retention, &mut derived, 1).await;
 
         let steady: HashSet<Node> = demo::observations(2).into_iter().map(|o| o.src).collect();
         let burst = demo::observations(1)
@@ -595,10 +606,48 @@ mod tests {
         );
 
         tokio::time::sleep(ttl * 2).await;
-        reconcile_tick(&state, &Source::Demo, &mut retention, 2).await;
+        reconcile_tick(&state, &Source::Demo, &mut retention, &mut derived, 2).await;
         assert!(
             !state.live.read().await.node_map.contains_key(&burst),
             "a lapsed flow should be removed by the ordinary differ"
+        );
+    }
+
+    // An inferred edge's status never moves on its own. Resending it every tick
+    // is what turned every idle poll into a patch to every client.
+    #[tokio::test]
+    async fn an_unchanged_derived_edge_is_not_resent() {
+        let state = AppState::new(
+            demo::graph(1),
+            CollectionReport::default(),
+            FlowIndex::default(),
+        );
+        let mut retention = Retention::default();
+        let mut derived = DerivedObservations::default();
+        let mut patches = state.patches.subscribe();
+        let wired = edge_key(
+            &node_key(&Node::AwsElbLoadBalancer(
+                "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),
+            )),
+            &node_key(&Node::AwsEc2Instance("i-globex-web-03".into())),
+            &Edge::Serves,
+        );
+        let carries = |patch: &GraphPatch| patch.observations.iter().any(|o| o.key == wired);
+
+        reconcile_tick(&state, &Source::Demo, &mut retention, &mut derived, 2).await;
+        let first = patches.try_recv().expect("the first tick publishes");
+        assert!(
+            carries(&first),
+            "a client first learns the status from a patch"
+        );
+
+        reconcile_tick(&state, &Source::Demo, &mut retention, &mut derived, 4).await;
+        let second = patches
+            .try_recv()
+            .expect("the demo's own traffic still moves, so the tick still publishes");
+        assert!(
+            !carries(&second),
+            "an inferred edge that did not change is not news"
         );
     }
 
@@ -669,6 +718,8 @@ mod tests {
             scope: "us-east-1".to_owned(),
             src: Node::GenericIpAddress(src.into()),
             dst: Node::GenericIpAddress(dst.into()),
+            src_port: None,
+            dst_port: None,
             resources: Vec::new(),
             packets: 12,
             bytes: 900,
@@ -698,6 +749,58 @@ mod tests {
             &Node::ip("203.0.113.77"),
             &Edge::Covers
         ));
+    }
+
+    #[test]
+    // The wiring outlives the traffic, so the edge survives a lapse that the
+    // containment edge above does not: only its status may move.
+    fn a_lapsed_flow_leaves_the_wiring_behind() {
+        use atlas_lib::atlas::derive;
+
+        let scan = atlas_lib::fixtures::topology;
+        let served = edge_key(
+            &node_key(&Node::AwsElbLoadBalancer(
+                "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),
+            )),
+            &node_key(&Node::AwsEc2Instance("i-globex-web-01".into())),
+            &Edge::Serves,
+        );
+
+        let mut flows = FlowIndex::new(Duration::from_millis(50), FlowIndex::DEFAULT_CAPACITY);
+        flows.observe(&observed("10.10.1.50", "10.10.1.10", now_millis()));
+        let mut live = scan();
+        reconcile(
+            &GraphBuilder::new().graph,
+            &mut live,
+            &HashSet::new(),
+            &flows,
+        );
+        assert_eq!(
+            derive::derived_observations(&live.graph, &flows)
+                .iter()
+                .find(|o| o.key == served)
+                .expect("traffic confirms the registered target")
+                .status,
+            "confirmed"
+        );
+
+        flows.expire(now_millis() + 100);
+        let mut next = scan();
+        let patch = reconcile(&live.graph, &mut next, &HashSet::new(), &flows);
+
+        assert!(
+            !patch.removed_edges.contains(&served),
+            "the target is still registered, so the relationship still exists"
+        );
+        assert_eq!(
+            derive::derived_observations(&next.graph, &flows)
+                .iter()
+                .find(|o| o.key == served)
+                .expect("the edge outlives the flow that confirmed it")
+                .status,
+            "inferred",
+            "a lapse drops the edge to wired-but-unused, it does not delete it"
+        );
     }
 
     #[test]
@@ -901,7 +1004,7 @@ mod tests {
 
         let mut live = demo::graph(2);
         flows.overlay(&mut live);
-        let live = settled(live);
+        let live = settled(live, &flows);
         let mut next = demo::graph(2);
 
         let patch = reconcile(&live.graph, &mut next, &nothing_held(), &flows);

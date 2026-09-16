@@ -175,11 +175,13 @@ pub enum Edge {
     ResolvesTo,
     TrafficFlow,
     Covers,
+    Serves,
 }
 
 // Only a scan's own edges are evidence of what exists. `TrafficFlow` is
-// observed and `Covers` is derived from whatever nodes survived the pass, so
-// `patch::carry_forward` must not hold either as if a provider had reported it.
+// observed, and `Covers` and `Serves` are derived from whatever nodes survived
+// the pass, so `patch::carry_forward` must not hold any of them as if a
+// provider had reported it.
 impl Edge {
     pub fn is_projected(&self) -> bool {
         match self {
@@ -190,7 +192,7 @@ impl Edge {
             | Edge::HasIp
             | Edge::RoutesTo
             | Edge::ResolvesTo => true,
-            Edge::TrafficFlow | Edge::Covers => false,
+            Edge::TrafficFlow | Edge::Covers | Edge::Serves => false,
         }
     }
 }
@@ -212,4 +214,5 @@ kinds!(
     ResolvesTo,
     TrafficFlow,
     Covers,
+    Serves,
 );

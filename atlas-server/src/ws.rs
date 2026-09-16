@@ -1,5 +1,6 @@
 use crate::state::AppState;
 use atlas_lib::atlas::definition::{Edge, Node};
+use atlas_lib::atlas::derive;
 use atlas_lib::atlas::export::{
     RenderEdge, RenderNode, SNAPSHOT_VERSION, node_key, render_snapshot_with,
 };
@@ -101,7 +102,7 @@ async fn send_snapshot(
     let value = {
         let live = state.live.read().await;
         let flows = state.flows.read().await;
-        let snapshot = render_snapshot_with(&live.graph, flows.observations());
+        let snapshot = render_snapshot_with(&live.graph, derive::observations(&live.graph, &flows));
         let mut v = serde_json::to_value(snapshot).unwrap_or_else(|_| json!({}));
         v["type"] = json!("snapshot");
         v

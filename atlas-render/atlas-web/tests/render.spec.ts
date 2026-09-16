@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
 
 function fixture(): {
 	nodes: unknown[];
@@ -23,6 +23,34 @@ function fixtureCounts(): { nodes: number; edges: number } {
 
 function fixtureFlows(): number {
 	return (fixture().observations ?? []).filter((o) => o.packets !== undefined).length;
+}
+
+function servesKeys(): string[] {
+	return (fixture().edges as { key: string; kind: string }[])
+		.filter((e) => e.kind === "Serves")
+		.map((e) => e.key);
+}
+
+function fixtureServes(): number {
+	return servesKeys().length;
+}
+
+function visibleEdges(page: Page): Promise<number> {
+	return page.evaluate(() => {
+		const atlas = (
+			window as unknown as {
+				atlas: {
+					graph: { edges: () => string[] };
+					renderer: {
+						getEdgeDisplayData: (key: string) => { hidden?: boolean } | undefined;
+					};
+				};
+			}
+		).atlas;
+		return atlas.graph
+			.edges()
+			.filter((key) => atlas.renderer.getEdgeDisplayData(key)?.hidden !== true).length;
+	});
 }
 
 const STATUS = ".status";
@@ -137,6 +165,27 @@ test.describe("render pipeline (static)", () => {
 		expect(moved).toBeGreaterThan(0);
 	});
 
+	test("shows the derived service topology with both provenances", async ({ page }) => {
+		await page.goto(STATIC);
+		await expect(page.locator(".service")).toBeVisible({ timeout: 15_000 });
+		await expect(page.locator(".service")).toContainText("confirmed");
+		await expect(page.locator(".service")).toContainText("inferred");
+	});
+
+	test("service view hides the plumbing the derived edges summarise", async ({ page }) => {
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
+
+		const before = await visibleEdges(page);
+		await page.locator(".service input[type=checkbox]").check();
+		await expect.poll(() => visibleEdges(page)).toBe(fixtureServes());
+
+		expect(before).toBeGreaterThan(fixtureServes());
+
+		await page.locator(".service input[type=checkbox]").uncheck();
+		await expect.poll(() => visibleEdges(page)).toBe(before);
+	});
+
 	test("shows the error overlay on a snapshot version mismatch", async ({ page }) => {
 		await page.route("**/snapshot.json", (route) =>
 			route.fulfill({
@@ -222,6 +271,51 @@ test.describe("render pipeline (static)", () => {
 				}),
 		);
 		expect(worstDiff).toBeLessThan(0.5);
+	});
+});
+
+test.describe("service view (mocked backend)", () => {
+	const MOCK = "ws://mock.invalid/ws";
+
+	// The toggle used to live inside the "anything derived?" guard, so a patch
+	// that removed the last Serves edge hid every node *and* the only control
+	// that could bring them back.
+	test("stays reachable after the last derived edge is removed", async ({ page }) => {
+		const snapshot = fixture() as unknown as Record<string, unknown> & { version: number };
+		let server: WebSocketRoute | undefined;
+		await page.routeWebSocket(MOCK, (ws) => {
+			server = ws;
+			ws.onMessage((message) => {
+				if (JSON.parse(String(message)).type === "subscribe") {
+					ws.send(JSON.stringify({ ...snapshot, type: "snapshot" }));
+				}
+			});
+		});
+
+		await page.goto(`/?server=${MOCK}`);
+		const toggle = page.locator(".service input[type=checkbox]");
+		await toggle.check({ timeout: 15_000 });
+		await expect.poll(() => visibleEdges(page)).toBe(fixtureServes());
+
+		server?.send(
+			JSON.stringify({
+				type: "patch",
+				version: snapshot.version,
+				added_nodes: [],
+				removed_nodes: [],
+				added_edges: [],
+				removed_edges: servesKeys(),
+			}),
+		);
+
+		await expect(page.locator(".service")).toContainText("nothing derived yet");
+		await expect(toggle).toBeVisible();
+
+		// Turning the view off with nothing derived takes the panel away again,
+		// so the checkbox is gone before its state could be read back.
+		await toggle.click();
+		await expect(page.locator(".service")).toHaveCount(0);
+		await expect.poll(() => visibleEdges(page)).toBeGreaterThan(0);
 	});
 });
 

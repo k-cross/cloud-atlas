@@ -10,6 +10,7 @@ import {
 	type Snapshot,
 	snapshotFromGraph,
 } from "./graph";
+import { SERVES_KIND, type ServiceSummary, serviceEndpoints, serviceSummary } from "./service";
 import { PROVIDER_COLORS, type Provider, providerOf } from "./style";
 import { TrafficLayer } from "./TrafficLayer";
 import type { TrafficSummary } from "./traffic";
@@ -60,6 +61,7 @@ export interface GraphControllerOptions {
 	onStatusChange: (statusText: string) => void;
 	onLegendChange: (legend: LegendCount[]) => void;
 	onTrafficChange: (traffic: TrafficSummary) => void;
+	onServiceChange: (service: ServiceSummary) => void;
 	onError: (error: string) => void;
 }
 
@@ -75,6 +77,7 @@ export class GraphController {
 	private options: GraphControllerOptions;
 	private socket: WebSocket | null = null;
 	private traffic: TrafficLayer | null = null;
+	private serviceOnly: Set<string> | null = null;
 
 	constructor(options: GraphControllerOptions) {
 		this.options = options;
@@ -85,6 +88,10 @@ export class GraphController {
 			minCameraRatio: 0.05,
 			maxCameraRatio: 20,
 			allowInvalidContainer: true,
+			nodeReducer: (key, data) =>
+				this.hiddenInServiceView(key) ? { ...data, hidden: true } : data,
+			edgeReducer: (_key, data) =>
+				this.serviceOnly && data.kind !== SERVES_KIND ? { ...data, hidden: true } : data,
 		});
 	}
 
@@ -119,7 +126,24 @@ export class GraphController {
 		this.options.onStatusChange(text);
 	}
 
+	// Hiding the plumbing rather than dimming it is what makes the path legible:
+	// a Serves edge summarises five hops, and drawing those hops underneath it
+	// is the picture the derived edge was meant to replace. The traffic canvas
+	// follows for free — it skips any endpoint Sigma reports as hidden, so the
+	// packet beads stop with the flow edges they belong to.
+	public setServiceView(on: boolean) {
+		this.serviceOnly = on ? serviceEndpoints(this.graph) : null;
+		this.renderer.refresh();
+	}
+
+	private hiddenInServiceView(key: string): boolean {
+		return this.serviceOnly !== null && !this.serviceOnly.has(key);
+	}
+
 	private renderLegend() {
+		if (this.serviceOnly !== null) this.serviceOnly = serviceEndpoints(this.graph);
+		this.options.onServiceChange(serviceSummary(this.graph));
+
 		const counts = new Map<Provider, number>();
 		this.graph.forEachNode((_key, attrs) => {
 			const provider = providerOf(attrs.kind as string);

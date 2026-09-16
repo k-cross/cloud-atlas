@@ -1,7 +1,7 @@
 use crate::Settings;
 use crate::atlas::collection::CollectionSource;
-use crate::atlas::containment;
 use crate::atlas::definition::Node;
+use crate::atlas::derive;
 use crate::atlas::flow::{FlowAction, FlowIndex, FlowObservation};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
@@ -39,8 +39,9 @@ pub fn all() -> Vec<Provider> {
 
 pub fn build_graph() -> GraphBuilder {
     let mut builder = topology();
-    observed().overlay(&mut builder);
-    containment::link(&mut builder);
+    let flows = observed();
+    flows.overlay(&mut builder);
+    derive::all(&mut builder, &flows);
     builder
 }
 
@@ -63,11 +64,17 @@ pub fn observed() -> FlowIndex {
 
 pub fn flows() -> Vec<FlowObservation> {
     let now = now_millis();
-    let flow = |src: &str, dst: &str, resources: Vec<Node>, packets: u64, action| FlowObservation {
+    let flow = |(src, src_port): (&str, u16),
+                (dst, dst_port): (&str, u16),
+                resources: Vec<Node>,
+                packets: u64,
+                action| FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
         src: Node::ip(src),
         dst: Node::ip(dst),
+        src_port: Some(src_port),
+        dst_port: Some(dst_port),
         resources,
         packets,
         bytes: packets.saturating_mul(AVERAGE_PACKET_BYTES),
@@ -91,81 +98,107 @@ pub fn flows() -> Vec<FlowObservation> {
 
     vec![
         flow(
-            "10.10.1.50",
-            "10.10.1.10",
+            ("10.10.1.50", 43122),
+            ("10.10.1.10", 8080),
             alb(),
             210_000,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "10.10.1.50",
-            "10.10.1.11",
+            ("10.10.1.50", 43188),
+            ("10.10.1.11", 8080),
             alb(),
             198_400,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "10.10.2.20",
-            "10.10.2.30",
+            ("10.10.2.20", 51544),
+            ("10.10.2.30", 5432),
             vec![Node::AwsEc2Eni("eni-globex-web-01b".into())],
             58_600,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "10.10.1.10",
-            "198.51.100.10",
+            ("10.10.1.10", 38001),
+            ("198.51.100.10", 443),
             web01(),
             184_000,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "10.10.1.11",
-            "10.20.0.5",
+            ("10.10.1.11", 39002),
+            ("10.20.0.5", 5432),
             web02(),
             96_400,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "192.0.2.55",
-            "10.10.1.10",
+            ("192.0.2.55", 55123),
+            ("10.10.1.10", 443),
             web01(),
             61_200,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "10.10.1.11",
-            "203.0.113.77",
+            ("10.10.1.11", 40100),
+            ("203.0.113.77", 443),
             web02(),
             42_800,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "203.0.113.10",
-            "34.120.0.9",
+            ("203.0.113.10", 44000),
+            ("34.120.0.9", 443),
             Vec::new(),
             12_500,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "2001:0db8:0000:0000:0000:0000:0000:0010",
-            "198.51.100.10",
+            ("2001:0db8:0000:0000:0000:0000:0000:0010", 45000),
+            ("198.51.100.10", 443),
             Vec::new(),
             7_400,
             Some(FlowAction::Accepted),
         ),
         flow(
-            "10.10.1.11",
-            "203.0.113.77",
+            ("10.10.1.11", 40200),
+            ("203.0.113.77", 8443),
             Vec::new(),
             940,
             Some(FlowAction::Rejected),
         ),
         flow(
-            "203.0.113.50",
-            "10.10.1.11",
+            ("203.0.113.50", 61000),
+            ("10.10.1.11", 22),
             nat(),
             310,
             Some(FlowAction::Rejected),
+        ),
+        // Replies. A flow log writes each as its own record with the addresses
+        // swapped, and taken at packet direction every one of them would draw
+        // its relationship backwards beside the forwards one.
+        flow(
+            ("10.10.1.10", 8080),
+            ("10.10.1.50", 43122),
+            web01(),
+            206_500,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            ("10.10.2.30", 5432),
+            ("10.10.2.20", 51544),
+            vec![Node::AwsEc2Eni("eni-globex-rds-1a".into())],
+            57_900,
+            Some(FlowAction::Accepted),
+        ),
+        // A request to an Elastic IP associated with web-02: the address object
+        // must resolve to the instance behind it, not stand in for it.
+        flow(
+            ("10.10.1.10", 40500),
+            ("198.51.100.40", 443),
+            web01(),
+            3_100,
+            Some(FlowAction::Accepted),
         ),
     ]
 }
@@ -176,6 +209,8 @@ pub fn burst_flow() -> FlowObservation {
         scope: REGION.to_owned(),
         src: Node::ip("192.0.2.99"),
         dst: Node::ip("10.10.1.10"),
+        src_port: Some(58000),
+        dst_port: Some(22),
         resources: vec![
             Node::AwsEc2Instance("i-globex-web-01".into()),
             Node::AwsEc2Eni("eni-globex-web-01a".into()),
@@ -239,8 +274,21 @@ pub fn aws() -> Provider {
         .set_placement(Some(
             Placement::builder().availability_zone("us-east-1a").build(),
         ))
-        .set_security_groups(Some(vec![sg_web]))
+        .set_security_groups(Some(vec![sg_web.clone()]))
         .set_network_interfaces(Some(vec![eni("eni-globex-web-02a", "subnet-public-1a")]))
+        .build();
+    // Registered behind the balancer and receiving nothing: the state that only
+    // an `inferred` Serves edge can express.
+    let i3 = InstanceBuilder::default()
+        .set_instance_id(Some("i-globex-web-03".to_owned()))
+        .set_vpc_id(Some("vpc-globex".to_owned()))
+        .set_subnet_id(Some("subnet-public-1a".to_owned()))
+        .set_private_ip_address(Some("10.10.1.12".to_owned()))
+        .set_placement(Some(
+            Placement::builder().availability_zone("us-east-1a").build(),
+        ))
+        .set_security_groups(Some(vec![sg_web]))
+        .set_network_interfaces(Some(vec![eni("eni-globex-web-03a", "subnet-public-1a")]))
         .build();
 
     let ecs = aws_sdk_ecs::types::Cluster::builder()
@@ -277,6 +325,7 @@ pub fn aws() -> Provider {
         .build();
     let tg = aws_sdk_elasticloadbalancingv2::types::TargetGroup::builder()
         .target_group_arn("arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-web/1")
+        .target_type(aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum::Instance)
         .vpc_id("vpc-globex")
         .build();
     let listener = aws_sdk_elasticloadbalancingv2::types::Listener::builder()
@@ -297,6 +346,13 @@ pub fn aws() -> Provider {
                 .target(
                     aws_sdk_elasticloadbalancingv2::types::TargetDescription::builder()
                         .id("i-globex-web-01")
+                        .build(),
+                )
+                .build(),
+            aws_sdk_elasticloadbalancingv2::types::TargetHealthDescription::builder()
+                .target(
+                    aws_sdk_elasticloadbalancingv2::types::TargetDescription::builder()
+                        .id("i-globex-web-03")
                         .build(),
                 )
                 .build(),
@@ -484,6 +540,13 @@ pub fn aws() -> Provider {
     let eip = Address::builder()
         .allocation_id("eipalloc-globex")
         .public_ip("203.0.113.50")
+        .network_interface_id("eni-globex-nat-1a")
+        .build();
+    let web_eip = Address::builder()
+        .allocation_id("eipalloc-globex-web")
+        .public_ip("198.51.100.40")
+        .network_interface_id("eni-globex-web-02a")
+        .instance_id("i-globex-web-02")
         .build();
     let public_rt = RouteTable::builder()
         .route_table_id("rtb-public")
@@ -551,11 +614,24 @@ pub fn aws() -> Provider {
             "10.10.2.20",
             "i-globex-web-01",
         ),
+        interface("eni-globex-web-02a", "subnet-public-1a", "10.10.1.11")
+            .interface_type(NetworkInterfaceType::Interface)
+            .attachment(
+                NetworkInterfaceAttachment::builder()
+                    .instance_id("i-globex-web-02")
+                    .build(),
+            )
+            .association(
+                NetworkInterfaceAssociation::builder()
+                    .public_ip("198.51.100.40")
+                    .build(),
+            )
+            .build(),
         attached(
-            "eni-globex-web-02a",
+            "eni-globex-web-03a",
             "subnet-public-1a",
-            "10.10.1.11",
-            "i-globex-web-02",
+            "10.10.1.12",
+            "i-globex-web-03",
         ),
         interface("eni-globex-alb-1a", "subnet-public-1a", "10.10.1.50")
             .interface_type(NetworkInterfaceType::NetworkLoadBalancer)
@@ -581,7 +657,10 @@ pub fn aws() -> Provider {
             r.clone(),
             AmazonCollection::AmazonNetworkInterfaces(interfaces),
         ),
-        (r.clone(), AmazonCollection::AmazonInstances(vec![i1, i2])),
+        (
+            r.clone(),
+            AmazonCollection::AmazonInstances(vec![i1, i2, i3]),
+        ),
         (r.clone(), AmazonCollection::AmazonClusters(vec![ecs])),
         (r.clone(), AmazonCollection::AmazonLambdas(vec![lambda])),
         (r.clone(), AmazonCollection::AmazonEventbridge(vec![bus])),
@@ -627,7 +706,7 @@ pub fn aws() -> Provider {
                 route_tables: vec![public_rt, private_rt],
                 internet_gateways: vec![igw],
                 nat_gateways: vec![nat],
-                addresses: vec![eip],
+                addresses: vec![eip, web_eip],
             }),
         ),
     ])

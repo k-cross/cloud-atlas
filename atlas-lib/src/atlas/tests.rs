@@ -137,13 +137,13 @@ mod tests {
             &builder,
             &Node::AwsRoute53RecordSet("origin.globex.io.".into()),
             &Node::GenericIpAddress("203.0.113.10".into()),
-            &Edge::ConnectsTo,
+            &Edge::ResolvesTo,
         );
         assert_edge(
             &builder,
             &Node::AwsRoute53RecordSet("app.globex.io.".into()),
             &Node::GenericHostname("app-globex.azurewebsites.net".into()),
-            &Edge::ConnectsTo,
+            &Edge::ResolvesTo,
         );
 
         let s3 = Node::AwsConfigResource {
@@ -497,7 +497,7 @@ mod tests {
             &builder,
             &Node::AwsRoute53RecordSet("app.globex.io.".into()),
             &azure_hostname,
-            &Edge::ConnectsTo,
+            &Edge::ResolvesTo,
         );
 
         let shared_ip = Node::GenericIpAddress("10.20.0.5".into());
@@ -624,7 +624,7 @@ mod tests {
             &builder,
             &Node::AwsRoute53RecordSet("db.globex.io.".into()),
             &endpoint,
-            &Edge::ConnectsTo,
+            &Edge::ResolvesTo,
         );
     }
 
@@ -667,7 +667,8 @@ mod tests {
 
         let builder = project_aws(vec![
             AmazonCollection::AmazonNetworkInterfaces(vec![attached_interface(
-                "eni-stopped", "i-stopped",
+                "eni-stopped",
+                "i-stopped",
             )]),
             AmazonCollection::AmazonInstances(Vec::new()),
         ]);
@@ -706,6 +707,135 @@ mod tests {
             &Node::AwsEc2Instance("i-running".into()),
             &Node::AwsEc2Eni("eni-running".into()),
             &Edge::HasIp,
+        );
+    }
+
+    fn target_group(
+        target_type: aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum,
+        target: &str,
+    ) -> GraphBuilder {
+        target_group_scanning(target_type, target, Vec::new())
+    }
+
+    fn target_group_scanning(
+        target_type: aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum,
+        target: &str,
+        running: Vec<&str>,
+    ) -> GraphBuilder {
+        use crate::cloud::definition::{AWSLoadBalancing, AmazonCollection};
+        use aws_sdk_elasticloadbalancingv2::types::{
+            TargetDescription, TargetGroup, TargetHealthDescription,
+        };
+
+        let arn = "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1";
+        let mut target_health = std::collections::HashMap::new();
+        target_health.insert(
+            arn.to_owned(),
+            vec![
+                TargetHealthDescription::builder()
+                    .target(TargetDescription::builder().id(target).build())
+                    .build(),
+            ],
+        );
+        project_aws(vec![
+            AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
+                load_balancers: Vec::new(),
+                target_groups: vec![
+                    TargetGroup::builder()
+                        .target_group_arn(arn)
+                        .target_type(target_type)
+                        .build(),
+                ],
+                listeners: Vec::new(),
+                target_health,
+            }),
+            AmazonCollection::AmazonInstances(
+                running
+                    .into_iter()
+                    .map(|id| {
+                        aws_sdk_ec2::types::Instance::builder()
+                            .instance_id(id)
+                            .build()
+                    })
+                    .collect(),
+            ),
+        ])
+    }
+
+    fn any_instance(builder: &GraphBuilder) -> bool {
+        builder
+            .graph
+            .node_weights()
+            .any(|n| matches!(n, Node::AwsEc2Instance(_)))
+    }
+
+    // An IP target group's targets are addresses. Building an instance from one
+    // invented a node, and the service chain then drew an edge to it.
+    #[test]
+    fn an_ip_target_is_an_address_the_group_routes_to() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group(TargetTypeEnum::Ip, "10.0.1.5");
+
+        assert!(!any_instance(&builder));
+        assert_edge(
+            &builder,
+            &Node::AwsElbTargetGroup(
+                "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1".into(),
+            ),
+            &Node::ip("10.0.1.5"),
+            &Edge::RoutesTo,
+        );
+        assert!(
+            !builder.graph.edge_weights().any(|e| e == &Edge::ConnectsTo),
+            "ConnectsTo to a pivot means holding it, which a target group does not"
+        );
+    }
+
+    #[test]
+    fn a_lambda_target_invents_no_instance() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group(
+            TargetTypeEnum::Lambda,
+            "arn:aws:lambda:us-east-1:123:function:globex-handler",
+        );
+
+        assert!(!any_instance(&builder));
+    }
+
+    #[test]
+    fn a_running_instance_target_is_linked() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group_scanning(TargetTypeEnum::Instance, "i-target", vec!["i-target"]);
+
+        assert_edge(
+            &builder,
+            &Node::AwsElbTargetGroup(
+                "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1".into(),
+            ),
+            &Node::AwsEc2Instance("i-target".into()),
+            &Edge::ConnectsTo,
+        );
+    }
+
+    // A stopped instance stays registered, but DescribeInstances only returns
+    // running and pending ones. The registration must not bring it back.
+    #[test]
+    fn a_stopped_instance_target_invents_no_instance() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group_scanning(TargetTypeEnum::Instance, "i-stopped", Vec::new());
+
+        assert!(!any_instance(&builder));
+        assert!(
+            builder
+                .index_of(&Node::AwsElbTargetGroup(
+                    "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1".into(),
+                ))
+                .is_some(),
+            "the group itself is still real"
         );
     }
 
@@ -753,19 +883,17 @@ mod tests {
             "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),
         );
 
-        for (eni, instance) in [
-            ("eni-globex-web-01a", "i-globex-web-01"),
-            ("eni-globex-web-02a", "i-globex-web-02"),
+        for (eni, instance, address) in [
+            ("eni-globex-web-01a", "i-globex-web-01", "10.10.1.10"),
+            ("eni-globex-web-02a", "i-globex-web-02", "10.10.1.11"),
         ] {
-            let target_ip = builder
-                .graph
-                .neighbors_directed(
-                    builder.index_of(&Node::AwsEc2Eni(eni.into())).unwrap(),
-                    petgraph::Direction::Outgoing,
-                )
-                .find(|n| matches!(builder.graph[*n], Node::GenericIpAddress(_)))
-                .map(|n| builder.graph[n].clone())
-                .expect("the target interface has an address");
+            let target_ip = Node::ip(address);
+            assert_edge(
+                &builder,
+                &Node::AwsEc2Eni(eni.into()),
+                &target_ip,
+                &Edge::ConnectsTo,
+            );
 
             assert_edge(
                 &builder,
@@ -1228,6 +1356,9 @@ mod tests {
         partial.add_edge(a, b, Edge::ResolvesTo);
 
         carry_forward(&mut partial, &live, &all_sources());
+        // Derived edges are not a scan's evidence, so carry_forward refuses to
+        // hold them; the pipeline recomputes them on the carried graph instead.
+        crate::atlas::derive::all(&mut partial, &fixtures::observed());
 
         assert_eq!(partial.graph.node_count(), live.node_count() + 2);
 
@@ -1237,13 +1368,21 @@ mod tests {
             "carrying forward must make the diff purely additive"
         );
         assert_eq!(patch.added_nodes.len(), 2);
-        assert_eq!(patch.added_edges.len(), 1);
         assert!(patch.added_edges.iter().any(|e| e.key
             == edge_key(
                 &node_key(&fresh_src),
                 &node_key(&fresh_dst),
                 &Edge::ResolvesTo
             )));
+        // The fresh address falls inside a range the fixture already had, so
+        // derivation covers it. Nothing beyond that may appear.
+        assert!(patch.added_edges.iter().any(|e| e.key
+            == edge_key(
+                &node_key(&Node::ip("203.0.113.0/24")),
+                &node_key(&fresh_dst),
+                &Edge::Covers
+            )));
+        assert_eq!(patch.added_edges.len(), 2);
     }
 
     #[test]

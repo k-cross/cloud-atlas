@@ -1,6 +1,7 @@
 use crate::state::AppState;
 use crate::ws;
 use atlas_lib::atlas::collection::CollectionReport;
+use atlas_lib::atlas::derive;
 use atlas_lib::atlas::export::render_snapshot_with;
 use axum::Router;
 use axum::extract::State;
@@ -20,7 +21,10 @@ pub fn router(state: AppState) -> Router {
 async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
     let live = state.live.read().await;
     let flows = state.flows.read().await;
-    Json(render_snapshot_with(&live.graph, flows.observations()))
+    Json(render_snapshot_with(
+        &live.graph,
+        derive::observations(&live.graph, &flows),
+    ))
 }
 
 async fn collection(State(state): State<AppState>) -> impl IntoResponse {

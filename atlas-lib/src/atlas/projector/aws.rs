@@ -5,6 +5,7 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection};
 use aws_sdk_ec2::types::NetworkInterface;
+use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 
@@ -16,7 +17,70 @@ pub fn aws_projector(
     project_parallel(builder, aws_data, |local, (region, collection)| {
         project_amazon_collection(local, region, collection, opts)
     });
-    link_interface_owners(builder, aws_data);
+    let scanned = scanned_instances(aws_data);
+    link_interface_owners(builder, aws_data, &scanned);
+    link_instance_targets(builder, aws_data, &scanned);
+}
+
+// DescribeInstances is filtered to running/pending, but a *stopped* instance is
+// still named elsewhere — its interfaces stay attached and its target-group
+// registrations stay put. Any edge built from one of those names would create an
+// instance node the scan deliberately left out: no AZ, tags or security groups,
+// and indistinguishable in kind from a live one. Every such edge is therefore
+// gated on this set, which is why they are built after the parallel pass.
+fn scanned_instances(aws_data: &[(String, AmazonCollection)]) -> HashSet<&str> {
+    aws_data
+        .iter()
+        .filter_map(|(_, collection)| match collection {
+            AmazonCollection::AmazonInstances(instances) => Some(instances),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|instance| instance.instance_id())
+        .collect()
+}
+
+// A registered target is only evidence the instance is wired up, not that it
+// exists in the scan: a stopped instance stays registered.
+fn link_instance_targets(
+    builder: &mut GraphBuilder,
+    aws_data: &[(String, AmazonCollection)],
+    scanned: &HashSet<&str>,
+) {
+    for (_, collection) in aws_data {
+        let AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
+            target_groups,
+            target_health,
+            ..
+        }) = collection
+        else {
+            continue;
+        };
+        for tg in target_groups
+            .iter()
+            .filter(|tg| tg.target_type() == Some(&TargetTypeEnum::Instance))
+        {
+            let Some(arn) = tg.target_group_arn() else {
+                continue;
+            };
+            let Some(health_descriptions) = target_health.get(arn) else {
+                continue;
+            };
+            for target_id in health_descriptions
+                .iter()
+                .filter_map(|h| h.target())
+                .filter_map(|t| t.id())
+                .filter(|id| scanned.contains(id))
+            {
+                let tg_idx = builder.get_or_add_node(Node::AwsElbTargetGroup(arn.into()));
+                builder.link_to(
+                    tg_idx,
+                    Node::AwsEc2Instance(target_id.into()),
+                    Edge::ConnectsTo,
+                );
+            }
+        }
+    }
 }
 
 // The two owner edges an interface cannot decide on its own, because each needs
@@ -25,32 +89,28 @@ pub fn aws_projector(
 // The balancer: an interface names it as "ELB app/<name>/<id>" and the ARN ends
 // with that same triple, but neither collection carries the other's key.
 //
-// The instance: an attachment names one even when the scan deliberately left it
-// out, since DescribeInstances is filtered to running/pending and a *stopped*
-// instance keeps its interfaces attached. Taking the attachment at face value
-// would add an instance node the scan does not produce — with no AZ, tags or
-// security groups, and indistinguishable in kind from a live one. So the edge
-// is emitted only for an instance the scan actually returned; a running one
-// reports its own interfaces and project_instance has already drawn it.
-fn link_interface_owners(builder: &mut GraphBuilder, aws_data: &[(String, AmazonCollection)]) {
+// The instance: an attachment names one even when the scan left it out (see
+// scanned_instances). The edge is emitted only for an instance the scan
+// returned, which costs nothing: a running one reports its own interfaces and
+// project_instance has already drawn it.
+fn link_interface_owners(
+    builder: &mut GraphBuilder,
+    aws_data: &[(String, AmazonCollection)],
+    scanned_instances: &HashSet<&str>,
+) {
     let mut balancers: HashMap<&str, &str> = HashMap::new();
-    let mut scanned_instances: HashSet<&str> = HashSet::new();
     for (_, collection) in aws_data {
-        match collection {
-            AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing { load_balancers, .. }) => {
-                for arn in load_balancers
-                    .iter()
-                    .filter_map(|lb| lb.load_balancer_arn())
-                {
-                    if let Some((_, suffix)) = arn.split_once("loadbalancer/") {
-                        balancers.insert(suffix, arn);
-                    }
+        if let AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing { load_balancers, .. }) =
+            collection
+        {
+            for arn in load_balancers
+                .iter()
+                .filter_map(|lb| lb.load_balancer_arn())
+            {
+                if let Some((_, suffix)) = arn.split_once("loadbalancer/") {
+                    balancers.insert(suffix, arn);
                 }
             }
-            AmazonCollection::AmazonInstances(instances) => {
-                scanned_instances.extend(instances.iter().filter_map(|i| i.instance_id()));
-            }
-            _ => {}
         }
     }
 
@@ -228,16 +288,26 @@ fn project_amazon_collection(
                     }
 
                     if let Some(health_descriptions) = target_health.get(arn) {
-                        for target_id in health_descriptions
+                        let targets = health_descriptions
                             .iter()
                             .filter_map(|h| h.target())
-                            .filter_map(|t| t.id())
-                        {
-                            builder.link_to(
-                                tg_idx,
-                                Node::AwsEc2Instance(target_id.into()),
-                                Edge::ConnectsTo,
-                            );
+                            .filter_map(|t| t.id());
+                        match tg.target_type() {
+                            // Needs the instance collection; see
+                            // link_instance_targets.
+                            Some(TargetTypeEnum::Instance) => {}
+                            // The group routes to this address; it does not
+                            // hold it. `ConnectsTo` to a pivot means holding,
+                            // and would make the group a Serves endpoint.
+                            Some(TargetTypeEnum::Ip) => {
+                                for target_id in targets {
+                                    builder.link_to(tg_idx, Node::ip(target_id), Edge::RoutesTo);
+                                }
+                            }
+                            // A Lambda target is a function ARN and an ALB
+                            // target a balancer ARN. Neither is an instance,
+                            // and an unknown type is not evidence of one.
+                            _ => {}
                         }
                     }
                 }
@@ -292,7 +362,7 @@ fn project_amazon_collection(
                     } else {
                         Node::hostname(val)
                     };
-                    builder.link_to(rs_idx, pivot_node, Edge::ConnectsTo);
+                    builder.link_to(rs_idx, pivot_node, Edge::ResolvesTo);
                 }
             }
         }
@@ -416,6 +486,13 @@ fn project_amazon_collection(
                     let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
                     if let Some(public_ip) = addr.public_ip() {
                         builder.link_to(eip_idx, Node::ip(public_ip), Edge::ConnectsTo);
+                    }
+                    // The interface is what holds an associated address, and
+                    // through it whatever holds the interface. The instance id
+                    // is deliberately not used: a stopped instance keeps its
+                    // association, and the scan does not keep the instance.
+                    if let Some(eni_id) = addr.network_interface_id() {
+                        builder.link_from(eip_idx, Node::AwsEc2Eni(eni_id.into()), Edge::HasIp);
                     }
                 }
             }
@@ -576,7 +653,7 @@ fn interface_addresses(eni: &NetworkInterface) -> Vec<&str> {
 }
 
 // The only owner an interface names unambiguously in its own description. ELB
-// needs the balancer collection too (see link_load_balancer_interfaces), and
+// needs the balancer collection too (see link_interface_owners), and
 // Lambda, VPC endpoint and RDS interfaces are left unowned rather than guessed.
 fn nat_gateway_of(description: Option<&str>) -> Option<&str> {
     let id = description?.strip_prefix("Interface for NAT Gateway ")?;

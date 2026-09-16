@@ -18,11 +18,47 @@ pub struct FlowObservation {
     pub scope: String,
     pub src: Node,
     pub dst: Node,
+    pub src_port: Option<u16>,
+    pub dst_port: Option<u16>,
     pub resources: Vec<Node>,
     pub packets: u64,
     pub bytes: u64,
     pub action: Option<FlowAction>,
     pub observed_at: i64,
+}
+
+// Which end of a record is the service. A flow log writes a request and its
+// reply as two records with the addresses swapped, so packet direction alone
+// makes every relationship read both ways; the ports are what tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    Forward,
+    Reverse,
+}
+
+// Linux starts its ephemeral range here and IANA's starts higher still, so a
+// port at or above it is almost always the client's.
+const EPHEMERAL_FLOOR: u16 = 32_768;
+
+// A heuristic, and it says so by returning `None` where it cannot tell: two
+// ephemeral ports (peer-to-peer, or both ends behind NAT) and identical ports
+// fall back to packet direction. With one ephemeral port the other end is the
+// service. With neither, the lower port is — which is what keeps a NAT gateway,
+// whose translated source ports span 1024-65535, from reading as the server of
+// a 443 it is only a client of.
+pub fn orientation(src_port: Option<u16>, dst_port: Option<u16>) -> Option<Orientation> {
+    let src = src_port.filter(|port| *port != 0)?;
+    let dst = dst_port.filter(|port| *port != 0)?;
+    if src == dst {
+        return None;
+    }
+    match (src >= EPHEMERAL_FLOOR, dst >= EPHEMERAL_FLOOR) {
+        (true, false) => Some(Orientation::Forward),
+        (false, true) => Some(Orientation::Reverse),
+        (true, true) => None,
+        (false, false) if dst < src => Some(Orientation::Forward),
+        (false, false) => Some(Orientation::Reverse),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -32,6 +68,8 @@ pub struct FlowStats {
     pub bytes: u64,
     pub accepted: u64,
     pub rejected: u64,
+    pub forward: u64,
+    pub reverse: u64,
 }
 
 impl FlowStats {
@@ -40,6 +78,21 @@ impl FlowStats {
         self.packets = self.packets.saturating_add(observation.packets);
         self.bytes = self.bytes.saturating_add(observation.bytes);
         verdict(&mut self.accepted, &mut self.rejected, observation);
+        match orientation(observation.src_port, observation.dst_port) {
+            Some(Orientation::Forward) => self.forward = self.forward.saturating_add(1),
+            Some(Orientation::Reverse) => self.reverse = self.reverse.saturating_add(1),
+            None => {}
+        }
+    }
+
+    // One pair aggregates many records, so the answer is a majority, and a tie
+    // is as unknown as no ports at all.
+    pub fn orientation(&self) -> Option<Orientation> {
+        match self.forward.cmp(&self.reverse) {
+            std::cmp::Ordering::Greater => Some(Orientation::Forward),
+            std::cmp::Ordering::Less => Some(Orientation::Reverse),
+            std::cmp::Ordering::Equal => None,
+        }
     }
 
     pub fn status(&self) -> &'static str {
@@ -216,6 +269,10 @@ impl FlowIndex {
         )
     }
 
+    pub fn stats(&self, src: &Node, dst: &Node) -> Option<&FlowStats> {
+        self.flows.get(&(src.clone(), dst.clone()))
+    }
+
     pub fn observations(&self) -> Vec<RenderObservation> {
         let mut all: Vec<RenderObservation> = self
             .flows
@@ -357,6 +414,8 @@ mod tests {
             scope: "us-east-1".to_owned(),
             src: ip(src),
             dst: ip(dst),
+            src_port: None,
+            dst_port: None,
             resources: Vec::new(),
             packets: 10,
             bytes: 840,
@@ -725,5 +784,70 @@ mod tests {
         let context = index.context(&live, &observations);
 
         assert_eq!(context.edge_count(), 1, "only the admissible flow crosses");
+    }
+
+    #[test]
+    fn the_non_ephemeral_end_is_the_service() {
+        assert_eq!(
+            orientation(Some(43122), Some(8080)),
+            Some(Orientation::Forward)
+        );
+        assert_eq!(
+            orientation(Some(8080), Some(43122)),
+            Some(Orientation::Reverse)
+        );
+    }
+
+    // A NAT gateway translates source ports anywhere in 1024-65535, so a client
+    // port below the ephemeral floor is ordinary; the lower port is the service.
+    #[test]
+    fn with_no_ephemeral_port_the_lower_one_is_the_service() {
+        assert_eq!(
+            orientation(Some(20000), Some(443)),
+            Some(Orientation::Forward)
+        );
+        assert_eq!(
+            orientation(Some(443), Some(20000)),
+            Some(Orientation::Reverse)
+        );
+    }
+
+    #[test]
+    fn what_cannot_be_told_apart_is_left_to_packet_direction() {
+        assert_eq!(
+            orientation(Some(50000), Some(60000)),
+            None,
+            "two high ports"
+        );
+        assert_eq!(orientation(Some(5060), Some(5060)), None, "identical ports");
+        assert_eq!(orientation(Some(0), Some(0)), None, "ICMP carries no ports");
+        assert_eq!(orientation(None, Some(443)), None, "a format without ports");
+    }
+
+    #[test]
+    fn a_pair_is_oriented_by_the_majority_of_its_records() {
+        let mut index = FlowIndex::default();
+        let mut record = |src_port, dst_port| {
+            let mut observation = flow("10.0.0.1", "10.0.0.2", 1);
+            observation.src_port = Some(src_port);
+            observation.dst_port = Some(dst_port);
+            index.observe(&observation);
+        };
+        record(8080, 43000);
+        record(8080, 43001);
+        record(43002, 8080);
+
+        let stats = index.stats(&ip("10.0.0.1"), &ip("10.0.0.2")).unwrap();
+        assert_eq!(stats.orientation(), Some(Orientation::Reverse));
+    }
+
+    #[test]
+    fn a_tied_pair_has_no_orientation() {
+        let stats = FlowStats {
+            forward: 2,
+            reverse: 2,
+            ..FlowStats::default()
+        };
+        assert_eq!(stats.orientation(), None);
     }
 }

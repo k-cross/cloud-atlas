@@ -19,7 +19,7 @@ edge that collapses the resulting path into one link between typed resources.
 
 It builds directly on `network_inference_design.md` (the `GenericIpAddress`
 pivot and the Tier-2 overlay) and on the derivation pattern established by
-`atlas::containment`.
+`atlas::derive::containment`.
 
 ## 1. What already exists
 
@@ -370,6 +370,34 @@ uncapped (§7): a shared address producing many `Serves` edges is a real
 observation about the estate, and the map should be instrumented and measured
 before anything is trimmed.
 
+Two things this glossed over, settled while building 2b:
+
+- **Ownership elevates through `HasIp`.** The resource that `ConnectsTo` a flow
+  address is almost always an *interface*, so a one-hop map yields
+  `Eni -Serves-> Eni` and never the `alb -> instance` chain that is the whole
+  goal. A claimer that something else `HasIp` therefore resolves to that owner
+  instead — which is exactly the collapse §4.1 asks for, and it falls out of
+  `HasIp` already meaning "this resource holds that interface or address"
+  everywhere it is produced (LB, instance, NAT gateway, and — since the review in
+  §4.9 — an interface holding its associated Elastic IP). The walk is
+  *transitive* with a visited set. It was first built as one hop on the claim
+  that no producer stacks two, which stopped being true the moment an associated
+  EIP was modelled correctly (`Instance -HasIp-> Eni -HasIp-> Eip`). An interface
+  nothing claims stays its own
+  owner, which is what makes the RDS answer in §7 work — `Instance -Serves->
+  AwsEc2Eni(rds)` is the honest edge when the database cannot be named.
+- **Naming an address is not holding one.** Ownership comes from `ConnectsTo`
+  only. A DNS record reaches a pivot by `ResolvesTo`, so a record set never
+  becomes a `Serves` endpoint — otherwise every name pointing at a load balancer
+  would draw an arrow claiming the record sent the packets. Route 53's projector
+  emitted `ConnectsTo` for record → value and now emits `ResolvesTo`, matching
+  Cloudflare's and architecture rule 5. The cost is visible in the fixture: the
+  `203.0.113.10 -> 34.120.0.9` cross-cloud flow yields no `Serves` edge, because
+  a record set is the only thing claiming the AWS side. That is the correct
+  answer — nothing in the estate holds that address — and it is why the rule is
+  an edge-kind rule rather than a blocklist of DNS node kinds inside an
+  otherwise provider-agnostic pass.
+
 **Observed pairs.** For each `TrafficFlow` edge, look up both endpoints'
 owners and emit `Serves` for every resolved pair, with no cap on fan-out (§7). An endpoint that resolves to
 nothing produces nothing — the external side of a flow is a `GenericIpAddress`
@@ -408,6 +436,151 @@ atlas::derive::all(&mut builder);   // containment, then service topology
 Ordering inside is fixed and stated there: containment first (it adds edges but
 no nodes, and service derivation does not read `Covers`).
 
+**As built (2a).** `atlas/derive.rs` is that entry point and all four call sites
+go through it. `containment` moved to `atlas/derive/containment.rs` and is
+declared `mod containment;` — *private* to `derive` — so the single entry point
+is enforced by the compiler rather than by convention: a direct
+`atlas::derive::containment::link` from anywhere else is `E0603`. That is the
+whole value of doing this before 2b, since the failure it prevents (a
+finalisation point that runs one pass and not the other) shows up only as a diff
+that flickers, never as an error. `deriving_twice_changes_nothing` pins
+idempotence, which the reconciliation loop relies on every tick.
+
+### 4.7 As built (2b)
+
+`derive::service` is the pass, run from `derive::all` after containment, and it
+produces `Edge::Serves` from observed traffic alone — the control-plane half and
+the `inferred` status are 2c. `Edge::is_projected()` returns false for it, which
+the exhaustive match forced at the moment the variant was added.
+
+The status channel landed exactly as §4.3 designed: `SNAPSHOT_VERSION` stays at
+**v3**, and a `Serves` observation carries `last_seen` plus `status:
+"confirmed"` with `packets`/`bytes` omitted. Two functions keep that honest —
+`derive::observations` is what a snapshot reader calls *instead of*
+`FlowIndex::observations` (so a derived edge cannot reach a client unstyled),
+and a patch sends only the derived observations that moved since the last tick
+(`DerivedObservations::changed`, §4.9 — this paragraph first claimed the derived
+half should be resent whole, which made every idle tick a patch). Observations are filtered to pairs the graph actually has an edge for, since a
+flow arriving between reconciliations can otherwise produce an observation keyed
+to an edge no client holds.
+
+What the Globex fixture derives is the goal chain and nothing else:
+
+```
+AwsElbLoadBalancer            -Serves-> AwsEc2Instance (x2)
+AwsEc2Instance(web-01)        -Serves-> AwsEc2Eni(rds-1a)
+AwsEc2Instance(web-01)        -Serves-> AzurePublicIpAddress
+AwsEc2Instance(web-02)        -Serves-> GcpSqlInstance
+AwsEc2NatGateway              -Serves-> AwsEc2Instance(web-02)
+```
+
+Six edges: the balancer collapse from §4.1, the RDS interface attribution from
+§7, and two cross-cloud hops that no control-plane API anywhere returns. The
+internet endpoints produce nothing, as §4.5 requires.
+
+The frontend needs no change to stay correct: `EDGE_COLORS[kind] ??
+DEFAULT_EDGE_COLOR` gives `Serves` a colour, and `observe()` already gates the
+flow-specific colour and width behind `kind === FLOW_KIND`, so the new edges
+carry their status without being drawn as traffic. Making the distinction
+*visible* is 2d.
+
+### 4.8 As built (2c)
+
+The control-plane half landed as §4.5 designed: `CHAINS` in
+`derive/service.rs` is a table of `Node::kind()` sequences, and `wired()` walks
+it generically. Two constraints the doc did not state, both load-bearing:
+
+- **The walk follows only projected edges.** A chain is the scan's own evidence,
+  and `Serves` is an outgoing edge from the very node a pattern starts at — so
+  matching through a derived edge would let the pass read its own output back as
+  input. `derivation_does_not_feed_on_its_own_edges` pins it by deriving twice
+  over the fixture and asserting the graph does not move.
+- **A pattern's kinds are checked against `ALL_KINDS`.** A renamed variant then
+  fails a test instead of quietly matching nothing, which is the failure mode a
+  string table invites.
+
+The two provenances meet in one place: `served()` fills a map of pair → the
+flows confirming it, and chains call `entry(pair).or_default()` on the same map.
+An empty flow list *is* `inferred` — there is no second code path that could
+disagree with the first about which pairs exist, and the status is read off the
+same structure that produced the edge.
+
+The fixture gained `i-globex-web-03`: registered in the target group, receiving
+nothing. That is the state §4.2 says the edge exists to express, and it was not
+representable before — the two existing targets both carry traffic, so every
+edge would have been `confirmed` and the `inferred` half untested. `cargo run
+--example demo` now prints the derived service topology with its statuses, so
+the distinction is visible credential-free:
+
+```
+confirmed  AWS::ELB::LoadBalancer(app/globex/1) -> AWS::Ec2Instance(i-globex-web-01)
+confirmed  AWS::ELB::LoadBalancer(app/globex/1) -> AWS::Ec2Instance(i-globex-web-02)
+ inferred  AWS::ELB::LoadBalancer(app/globex/1) -> AWS::Ec2Instance(i-globex-web-03)
+```
+
+web-01 is both registered and busy; web-02 carries traffic but is not in the
+target group, so traffic alone confirms it; web-03 is wired and idle.
+
+Every row of §4.4's lifecycle table now falls out of the ordinary differ with no
+code of its own, and the two that matter are pinned:
+`a_lapsed_flow_drops_a_wired_target_back_to_inferred` at the unit level and
+`poll::tests::a_lapsed_flow_leaves_the_wiring_behind` through a real
+reconciliation — the edge survives the lapse that takes a `Covers` edge away,
+because the registration outlives the traffic.
+
+### 4.9 Review fixes
+
+A review of phase 2 found six defects, all confirmed and all fixed. The first is
+the one that mattered most, and the fixture could not have caught it.
+
+1. **Replies drew every relationship backwards.** A flow log writes a request and
+   its reply as two records with the addresses swapped, and `served()` read
+   packet direction, so `ALB -Serves-> instance` came with `instance -Serves->
+   ALB` beside it. The fixture held only one-way records. Now `FlowObservation`
+   carries `src_port`/`dst_port` (the adapter already parsed the columns and threw
+   them away), `flow::orientation` names the service end, `FlowStats` keeps a
+   majority per pair, and `derive::all` takes the flow index to read it. The
+   fixture carries the ALB and RDS replies; `a_reply_does_not_reverse_the_relationship`
+   fails on the old code.
+2. **An associated Elastic IP was a second owner.** Only the NAT gateway held
+   its EIP, so any other association left the address with two owners, the
+   instance and the `AwsEc2Eip` object, and a flow drew an edge to each. The
+   projector now emits `Eni -HasIp-> Eip` from `network_interface_id` (never from
+   `instance_id`, which a stopped instance keeps), and ownership resolves
+   transitively.
+3. **Every tick published a patch.** The derived observations were never empty,
+   so `GraphPatch::is_empty` never held. `DerivedObservations` compares values
+   and sends what moved. It deliberately does not gate on "did flows drain":
+   flows ingested between scans move `last_seen` invisibly to the reconcile
+   tick, and that gate would have left a busy edge's freshness stale forever.
+4. **The service view could strand the user.** The toggle lived inside the
+   "anything derived?" guard, so a patch removing the last `Serves` edge hid
+   every node and the only control that could bring them back. The panel now
+   stays while the view is on, and says the view is empty; a mocked-WebSocket
+   e2e test drives exactly that patch.
+5. **"Confirmed, never seen."** Status came from `TrafficFlow` edges and
+   `last_seen` from the index, and between scans an evicted flow's edge outlives
+   its record. Confirmation now requires the index to hold the flow.
+6. **Fictional targets.** The target-group projector built an `AwsEc2Instance`
+   for every target whatever the group's type, so an IP target became
+   `AwsEc2Instance("10.0.1.5")` and `CHAINS` drew an inferred edge to it. Targets
+   are now projected by `target_type`. IP targets `RoutesTo` a pivot, because
+   `ConnectsTo` there would make the group an address *holder*.
+
+A seventh, found while fixing the sixth and fixed after it: a **stopped**
+instance stays registered in its target group, and the projector built its node
+from the registration, the same resurrection `link_interface_owners` had already
+closed for interface attachments. Instance targets are now linked in
+`link_instance_targets` after the parallel pass. It is gated on the same
+`scanned_instances` set, which `aws_projector` computes once and hands to both
+passes. `a_stopped_target_is_not_inferred` drops `i-globex-web-03` from the
+fixture's scan and asserts that neither its registration nor its attached
+interface brings it back.
+
+Still not built: IP targets could join a chain (`[LB, TargetGroup, <address>]`
+resolved through the ownership map), which is how an NLB fronting RDS would get
+an `inferred` edge.
+
 ## 5. Rendering
 
 No wire change, so the frontend work is small and additive:
@@ -425,12 +598,38 @@ No wire change, so the frontend work is small and additive:
   read without the address-level traffic underneath it, but that is a rendering
   concern, not a modelling one.
 
+### 5.1 As built (2d)
+
+All four points in §5 landed, and none of them needed the wire to move.
+
+`EDGE_COLORS` gained `Serves` — set to the *inferred* colour, so an edge that
+reaches the client before its observation (or after one expires, via
+`clearObservations`) is drawn as not-yet-confirmed rather than as confirmed.
+`observe()` gained the second arm §5 asked for: a `Serves` edge takes
+`servesColor(status)` and `servesSize(status)` instead of the flow branch's
+colour and packet-scaled width.
+
+The traffic layer needed no change at all, twice over. It keys off `FLOW_KIND`,
+so it never animates a `Serves` edge; and `TrafficLayer::viewport` already
+returns `null` for any endpoint Sigma reports as `hidden`, so turning the
+service view on stops the beads and halos on the hidden plumbing without the
+layer knowing the feature exists.
+
+The filter §5 left open is `GraphController::setServiceView`, implemented with
+Sigma's node/edge reducers over a `serviceEndpoints` set recomputed whenever the
+graph changes. It **hides** rather than dims, because a `Serves` edge stands in
+for five hops and drawing those hops underneath it is the unreadable picture the
+edge was introduced to replace. The panel carries the counts beside the toggle,
+so `confirmed 6 / inferred 1` is legible without turning the view on.
+
 ## 6. Deliberately not built
 
 - **Request/response semantics.** Flow logs record packets between addresses.
-  They do not prove a request was served, a call succeeded, or which side
-  initiated a long-lived connection. `Serves` means traffic moved in that
-  direction; it does not mean B answered A.
+  They do not prove a request was served or a call succeeded. `Serves` is
+  oriented by a *port heuristic* (§4.9) — the non-ephemeral, or lower, port is
+  the service — which is right for client/server traffic and says nothing for
+  peer-to-peer or two high ports, where it falls back to packet direction. It
+  does not mean B answered A.
 - **Typed nodes invented from flow records.** Unchanged from Tier-2 rule 2. If
   Phase 1 has not given a resource an address, its traffic stays on a generic
   pivot rather than being guessed at.
@@ -487,11 +686,11 @@ All five questions this document opened are settled.
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| **1a** | AWS `DescribeNetworkInterfaces` collector; `AwsEc2Eni` carries its addresses and owner edges; instance private IP moved to the ENI with an instance-level fallback | **Done** — `cloud/amazon/network_interface.rs`, the `AmazonNetworkInterfaces` projector arm, and `link_load_balancer_interfaces` |
+| **1a** | AWS `DescribeNetworkInterfaces` collector; `AwsEc2Eni` carries its addresses and owner edges; instance private IP moved to the ENI with an instance-level fallback | **Done** — `cloud/amazon/network_interface.rs`, the `AmazonNetworkInterfaces` projector arm, and `link_interface_owners` |
 | **1b** | AWS `AwsRdsDbInstance -ConnectsTo-> GenericHostname(endpoint)` — not built today, and the primary way the database is reached | **Done** — the `AmazonRds` projector arm, §3.5 |
 | **1c** | Tier-1 Config ENI arm opened, now that the scan produces the node | **Done** — `AWS::EC2::NetworkInterface` in `events.rs`, via `project_interface`/`InterfaceFacts`, §3.6 |
 | **1d** | GCP `network_ip`/`nat_ip`; Azure `networkinterfaces` + `loadbalancers` — deferred behind AWS (§7) | Deferred |
-| **2a** | `atlas::derive` — one entry point, `containment` moved behind it | Planned |
-| **2b** | `Edge::Serves` from observed traffic; status on the observation channel | Planned |
-| **2c** | Control-plane path patterns; `inferred` → `confirmed` promotion | Planned |
-| **2d** | Frontend: status-coloured `Serves`, service-view filter | Planned |
+| **2a** | `atlas::derive` — one entry point, `containment` moved behind it | **Done** — `atlas/derive.rs`, with `containment` private beneath it, §4.6 |
+| **2b** | `Edge::Serves` from observed traffic; status on the observation channel | **Done** — `atlas/derive/service.rs`, §4.7 |
+| **2c** | Control-plane path patterns; `inferred` → `confirmed` promotion | **Done** — `CHAINS` + `wired()` in `derive/service.rs`, §4.8 |
+| **2d** | Frontend: status-coloured `Serves`, service-view filter | **Done** — `style.ts`, `service.ts`, `GraphController::setServiceView`, §5.1 |

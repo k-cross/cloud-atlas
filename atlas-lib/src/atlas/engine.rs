@@ -1,6 +1,7 @@
 use crate::Settings;
 use crate::atlas::collection::CollectionReport;
-use crate::atlas::containment;
+use crate::atlas::derive;
+use crate::atlas::flow::FlowIndex;
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::patch::{Retention, carry_forward};
 use crate::atlas::projector;
@@ -109,7 +110,7 @@ impl AtlasEngine {
         if !held.is_empty() {
             carry_forward(&mut scan.builder, &self.builder.graph, &held);
         }
-        containment::link(&mut scan.builder);
+        derive::all(&mut scan.builder, &FlowIndex::default());
 
         self.builder = scan.builder;
     }

@@ -1,5 +1,5 @@
-use atlas_lib::atlas::containment;
 use atlas_lib::atlas::definition::{Edge, Node};
+use atlas_lib::atlas::derive;
 use atlas_lib::atlas::export::{RenderObservation, render_snapshot_with};
 use atlas_lib::fixtures;
 use petgraph::dot::Dot;
@@ -13,13 +13,16 @@ fn main() -> ExitCode {
     let mut builder = fixtures::topology();
     let observed = fixtures::observed();
     observed.overlay(&mut builder);
-    containment::link(&mut builder);
+    derive::all(&mut builder, &observed);
 
     let filename = "multi_cloud_demo.dot";
     let dot = format!("{}", Dot::with_config(&builder.graph, &[]));
     fs::write(filename, dot).expect("Failed to write dot file");
 
-    let snapshot = render_snapshot_with(&builder.graph, observed.observations());
+    let snapshot = render_snapshot_with(
+        &builder.graph,
+        derive::observations(&builder.graph, &observed),
+    );
     let json = serde_json::to_string(&snapshot).expect("Failed to serialize render snapshot");
     fs::write("multi_cloud_demo.json", json).expect("Failed to write json file");
 
@@ -48,6 +51,7 @@ fn main() -> ExitCode {
         }
     }
 
+    let served = derive::derived_observations(&builder.graph, &observed);
     let all = observed.observations();
     let (flows, resources): (Vec<&RenderObservation>, Vec<&RenderObservation>) =
         all.iter().partition(|o| o.packets.is_some());
@@ -83,10 +87,20 @@ fn main() -> ExitCode {
         .collect();
 
     println!(
+        "\nService topology ({} derived edges — the control plane says wired, \
+         only traffic says used):",
+        served.len()
+    );
+    for edge in &served {
+        let (src, dst) = endpoints(&edge.key);
+        println!("  {:>9} {:>34} -> {}", edge.status, src, dst);
+    }
+
+    println!(
         "\nGraph: {} nodes, {} edges, {} observations. Saved to {}.",
         builder.graph.node_count(),
         builder.graph.edge_count(),
-        all.len(),
+        all.len() + served.len(),
         filename
     );
 

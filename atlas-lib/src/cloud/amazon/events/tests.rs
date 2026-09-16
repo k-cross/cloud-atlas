@@ -104,8 +104,8 @@ fn interface_config_item(status: &str, description: &str) -> String {
 
 fn scanned_interface_graph(description: &str) -> Graph<Node, Edge> {
     use aws_sdk_ec2::types::{
-        GroupIdentifier, NetworkInterface, NetworkInterfaceAssociation, NetworkInterfaceIpv6Address,
-        NetworkInterfacePrivateIpAddress,
+        GroupIdentifier, NetworkInterface, NetworkInterfaceAssociation,
+        NetworkInterfaceIpv6Address, NetworkInterfacePrivateIpAddress,
     };
 
     let interface = NetworkInterface::builder()
