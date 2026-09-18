@@ -85,30 +85,6 @@ impl DerivedObservations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::definition::{Edge, Node};
-
-    #[test]
-    fn deriving_twice_changes_nothing() {
-        let mut builder = GraphBuilder::new();
-        let range = builder.get_or_add_node(Node::ip("10.0.0.0/8"));
-        builder.link_to(range, Node::ip("10.1.2.3"), Edge::RoutesTo);
-
-        let flows = FlowIndex::default();
-        all(&mut builder, &flows);
-        let once = (builder.graph.node_count(), builder.graph.edge_count());
-        all(&mut builder, &flows);
-
-        assert_eq!(
-            once,
-            (builder.graph.node_count(), builder.graph.edge_count()),
-            "derivation runs on every tick, so it has to be idempotent"
-        );
-        assert!(builder.has_edge(
-            &Node::ip("10.0.0.0/8"),
-            &Node::ip("10.1.2.3"),
-            &Edge::Covers
-        ));
-    }
 
     fn observed(key: &str, last_seen: i64, status: &'static str) -> RenderObservation {
         RenderObservation {

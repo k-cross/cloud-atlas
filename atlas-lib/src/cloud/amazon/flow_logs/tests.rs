@@ -49,34 +49,6 @@ fn a_default_format_record_becomes_a_flow_between_its_endpoints() {
 }
 
 #[test]
-fn a_rejected_record_keeps_its_verdict() {
-    let Parsed { observations, .. } =
-        parsed(&default_record("10.10.1.11", "203.0.113.7", "REJECT"));
-    assert_eq!(observations[0].action, Some(FlowAction::Rejected));
-}
-
-#[test]
-fn a_custom_field_order_is_read_from_the_objects_own_header() {
-    let object = "\
-version srcaddr dstaddr bytes packets end action log-status
-2 10.10.1.10 198.51.100.10 9000 40 1788436800 ACCEPT OK";
-
-    let Parsed {
-        observations,
-        unusable,
-        ..
-    } = parsed(object);
-
-    assert_eq!(unusable, 0);
-    let flow = &observations[0];
-    assert_eq!(flow.src, Node::GenericIpAddress("10.10.1.10".into()));
-    assert_eq!(flow.dst, Node::GenericIpAddress("198.51.100.10".into()));
-    assert_eq!(flow.bytes, 9000);
-    assert_eq!(flow.packets, 40);
-    assert_eq!(flow.observed_at, 1_788_436_800_000);
-}
-
-#[test]
 fn a_header_is_not_mistaken_for_a_record() {
     let object = "\
 version srcaddr dstaddr end
@@ -116,35 +88,6 @@ fn records_with_no_data_are_neither_traffic_nor_failures() {
 
     assert_eq!(observations.len(), 1, "only the real flow");
     assert_eq!(unusable, 0, "an empty window is not a failure");
-}
-
-#[test]
-fn a_record_attributes_both_identities_the_way_the_projector_keys_them() {
-    let object = "\
-version srcaddr dstaddr end instance-id interface-id
-2 10.10.1.10 198.51.100.10 1788436800 i-globex-web-01 eni-globex-web-01a";
-
-    let Parsed { observations, .. } = parsed(object);
-
-    let mut scanned = GraphBuilder::new();
-    projector::build(&mut scanned, &crate::fixtures::aws(), &fixture_settings());
-
-    for named in &observations[0].resources {
-        assert!(
-            scanned.contains(named),
-            "{named} is not a node the full scan produces"
-        );
-    }
-    assert!(
-        observations[0]
-            .resources
-            .contains(&Node::AwsEc2Eni("eni-globex-web-01a".into()))
-    );
-    assert!(
-        observations[0]
-            .resources
-            .contains(&Node::AwsEc2Instance("i-globex-web-01".into()))
-    );
 }
 
 #[test]

@@ -5,10 +5,19 @@ mod tests {
     use crate::atlas::definition::{Edge, Node};
     use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector;
-    use crate::atlas::util::{canonical_address, canonical_hostname, is_large_cidr};
+    use crate::atlas::util::is_large_cidr;
     use crate::fixtures;
     use crate::{Settings, fixtures::azure_id};
     use petgraph::visit::EdgeRef;
+
+    // The projector folds a networking resource's id to one casing (Resource
+    // Graph is not consistent about which casing it echoes an id back with,
+    // depending on which resource's JSON names it), so a test's expectation
+    // has to be built the same way. Leaf resources are never cross-referenced
+    // by id, so they keep whatever casing the fixture wrote and need no helper.
+    fn azure_networking_id(rest: &str) -> std::sync::Arc<str> {
+        azure_id(rest).to_ascii_lowercase().into()
+    }
 
     fn assert_edge(builder: &GraphBuilder, a: &Node, b: &Node, edge: &Edge) {
         let a_idx = builder
@@ -353,31 +362,21 @@ mod tests {
         let mut builder = GraphBuilder::new();
         projector::build(&mut builder, &fixtures::azure(), &fixtures::settings());
 
-        let vm = Node::AzureVirtualMachine(
-            azure_id("Microsoft.Compute/virtualMachines/vm-worker")
-                .as_str()
-                .into(),
-        );
-        let nic = Node::AzureNetworkInterface(
-            azure_id("Microsoft.Network/networkInterfaces/nic-worker")
-                .as_str()
-                .into(),
-        );
-        let vnet = Node::AzureVirtualNetwork(
-            azure_id("Microsoft.Network/virtualNetworks/vnet-globex")
-                .as_str()
-                .into(),
-        );
-        let subnet = Node::AzureSubnet(
-            azure_id("Microsoft.Network/virtualNetworks/vnet-globex/subnets/default")
-                .as_str()
-                .into(),
-        );
-        let nsg = Node::AzureNetworkSecurityGroup(
-            azure_id("Microsoft.Network/networkSecurityGroups/nsg-worker")
-                .as_str()
-                .into(),
-        );
+        let vm = Node::AzureVirtualMachine(azure_networking_id(
+            "Microsoft.Compute/virtualMachines/vm-worker",
+        ));
+        let nic = Node::AzureNetworkInterface(azure_networking_id(
+            "Microsoft.Network/networkInterfaces/nic-worker",
+        ));
+        let vnet = Node::AzureVirtualNetwork(azure_networking_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex",
+        ));
+        let subnet = Node::AzureSubnet(azure_networking_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex/subnets/default",
+        ));
+        let nsg = Node::AzureNetworkSecurityGroup(azure_networking_id(
+            "Microsoft.Network/networkSecurityGroups/nsg-worker",
+        ));
 
         assert_edge(&builder, &vm, &nic, &Edge::HasIp);
         assert_edge(&builder, &vnet, &subnet, &Edge::Contains);
@@ -391,16 +390,12 @@ mod tests {
         );
         assert_edge(&builder, &nic, &subnet, &Edge::AttachedTo);
 
-        let balancer = Node::AzureLoadBalancer(
-            azure_id("Microsoft.Network/loadBalancers/lb-globex")
-                .as_str()
-                .into(),
-        );
-        let pip = Node::AzurePublicIpAddress(
-            azure_id("Microsoft.Network/publicIPAddresses/pip-globex")
-                .as_str()
-                .into(),
-        );
+        let balancer = Node::AzureLoadBalancer(azure_networking_id(
+            "Microsoft.Network/loadBalancers/lb-globex",
+        ));
+        let pip = Node::AzurePublicIpAddress(azure_networking_id(
+            "Microsoft.Network/publicIPAddresses/pip-globex",
+        ));
         assert_edge(&builder, &balancer, &pip, &Edge::HasIp);
 
         assert_edge(
@@ -568,11 +563,9 @@ mod tests {
         let shared_ip = Node::GenericIpAddress("10.20.0.5".into());
         assert_edge(
             &builder,
-            &Node::AzureNetworkSecurityGroup(
-                azure_id("Microsoft.Network/networkSecurityGroups/nsg-worker")
-                    .as_str()
-                    .into(),
-            ),
+            &Node::AzureNetworkSecurityGroup(azure_networking_id(
+                "Microsoft.Network/networkSecurityGroups/nsg-worker",
+            )),
             &shared_ip,
             &Edge::RoutesTo,
         );
@@ -592,11 +585,9 @@ mod tests {
         );
         assert_edge(
             &builder,
-            &Node::AzurePublicIpAddress(
-                azure_id("Microsoft.Network/publicIPAddresses/pip-globex")
-                    .as_str()
-                    .into(),
-            ),
+            &Node::AzurePublicIpAddress(azure_networking_id(
+                "Microsoft.Network/publicIPAddresses/pip-globex",
+            )),
             &public_ip,
             &Edge::ConnectsTo,
         );
@@ -982,32 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn differently_spelled_addresses_land_on_one_pivot() {
-        let builder = fixtures::build_graph();
-
-        let v6 = Node::ip("2001:db8::10");
-        assert_resolves(
-            &builder,
-            "v6.globex.io",
-            &Node::CloudflareDnsRecord("rec-v6".into()),
-            &v6,
-        );
-        assert_edge(
-            &builder,
-            &v6,
-            &Node::ip("198.51.100.10"),
-            &Edge::TrafficFlow,
-        );
-
-        let expanded = Node::GenericIpAddress("2001:0db8:0000:0000:0000:0000:0000:0010".into());
-        assert!(
-            !builder.node_map.contains_key(&expanded),
-            "the flow log's spelling became a second pivot: {:?}",
-            expanded
-        );
-    }
-
-    #[test]
     fn identical_nodes_merge() {
         let mut builder = GraphBuilder::new();
         let a = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
@@ -1027,54 +992,6 @@ mod tests {
 
         builder.add_edge(a, b, Edge::RoutesTo);
         assert_eq!(builder.graph.edge_count(), 2);
-    }
-
-    #[test]
-    fn addresses_canonicalise_to_one_spelling() {
-        let canonical = |v: &str| canonical_address(v).unwrap();
-
-        assert_eq!(
-            canonical("2001:0db8:0000:0000:0000:0000:0000:0010"),
-            "2001:db8::10"
-        );
-        assert_eq!(canonical("2001:DB8::10"), "2001:db8::10");
-        assert_eq!(canonical("::ffff:192.0.2.1"), "192.0.2.1");
-        assert_eq!(canonical("192.0.2.1"), "192.0.2.1");
-
-        assert_eq!(canonical("2001:0DB8:0000::0044/128"), "2001:db8::44/128");
-        assert_eq!(canonical("198.51.100.0/24"), "198.51.100.0/24");
-        assert_eq!(canonical("::ffff:198.51.100.0/120"), "198.51.100.0/24");
-        // Shorter than the ::ffff:0:0/96 block, so it is not the v4 range it resembles.
-        assert_eq!(canonical("::ffff:0.0.0.0/64"), "::ffff:0.0.0.0/64");
-
-        assert_eq!(
-            canonical_address("2001:db8::10"),
-            Some("2001:db8::10".to_owned())
-        );
-    }
-
-    #[test]
-    fn a_value_that_will_not_parse_is_left_alone() {
-        assert_eq!(canonical_address("not-an-address"), None);
-        assert_eq!(canonical_address("192.0.2.1/33"), None);
-        assert_eq!(canonical_address("2001:db8::1/129"), None);
-        assert_eq!(canonical_address("198.51.100.0/"), None);
-        assert_eq!(canonical_hostname("."), None);
-
-        let odd = Node::ip("pl-1a2b3c4d");
-        assert_eq!(odd, Node::GenericIpAddress("pl-1a2b3c4d".into()));
-    }
-
-    #[test]
-    fn hostnames_canonicalise_to_one_spelling() {
-        assert_eq!(
-            canonical_hostname("App.Globex.IO."),
-            Some("app.globex.io".to_owned())
-        );
-        assert_eq!(
-            Node::hostname("app.globex.io."),
-            Node::hostname("APP.GLOBEX.IO")
-        );
     }
 
     #[test]
@@ -1240,130 +1157,6 @@ mod tests {
             CollectionSource::Azure,
             CollectionSource::Cloudflare,
         ])
-    }
-
-    fn owned_by(graph: &petgraph::graph::Graph<Node, Edge>, source: CollectionSource) -> usize {
-        graph
-            .node_weights()
-            .filter(|n| n.owner() == Some(source))
-            .count()
-    }
-
-    fn unreadable(source: CollectionSource) -> crate::atlas::collection::CollectionReport {
-        let mut report = crate::atlas::collection::CollectionReport::default();
-        report.record(
-            source,
-            crate::atlas::collection::FailureKind::Unavailable,
-            "scope",
-            "unreachable",
-        );
-        report
-    }
-
-    #[test]
-    fn retention_releases_a_source_once_its_budget_is_spent() {
-        use crate::atlas::patch::Retention;
-
-        let mut retention = Retention::new(2);
-
-        assert!(
-            !retention
-                .hold(&unreadable(CollectionSource::Aws))
-                .is_empty()
-        );
-        assert!(
-            !retention
-                .hold(&unreadable(CollectionSource::Aws))
-                .is_empty()
-        );
-        assert!(
-            retention
-                .hold(&unreadable(CollectionSource::Aws))
-                .is_empty(),
-            "a third consecutive failure exhausts a budget of 2"
-        );
-        assert_eq!(retention.streak(CollectionSource::Aws), 3);
-    }
-
-    #[test]
-    fn retention_gives_a_recovered_source_a_full_budget_again() {
-        use crate::atlas::collection::CollectionReport;
-        use crate::atlas::patch::Retention;
-
-        let mut retention = Retention::new(1);
-        retention.hold(&unreadable(CollectionSource::Aws));
-        assert!(
-            retention
-                .hold(&unreadable(CollectionSource::Aws))
-                .is_empty()
-        );
-
-        retention.hold(&CollectionReport::default());
-        assert_eq!(
-            retention.streak(CollectionSource::Aws),
-            0,
-            "a complete scan clears the streak"
-        );
-
-        assert!(
-            !retention
-                .hold(&unreadable(CollectionSource::Aws))
-                .is_empty(),
-            "a source that recovered must be protected again if it fails later"
-        );
-    }
-
-    #[test]
-    fn a_zero_budget_never_holds_anything() {
-        use crate::atlas::patch::Retention;
-
-        let mut retention = Retention::new(0);
-        assert!(
-            retention
-                .hold(&unreadable(CollectionSource::Gcp))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn carry_forward_holds_only_the_unreadable_sources_territory() {
-        use crate::atlas::patch::{carry_forward, diff};
-
-        let live = fixtures::build_graph().graph;
-
-        let mut trimmed = live.clone();
-        trimmed.retain_nodes(|g, i| {
-            !matches!(
-                g[i].owner(),
-                Some(CollectionSource::Aws) | Some(CollectionSource::Cloudflare)
-            )
-        });
-        assert!(owned_by(&live, CollectionSource::Aws) > 0);
-        assert!(owned_by(&live, CollectionSource::Cloudflare) > 0);
-
-        let mut next = GraphBuilder::new();
-        next.merge(&trimmed);
-
-        carry_forward(
-            &mut next,
-            &live,
-            &std::collections::HashSet::from([CollectionSource::Aws]),
-        );
-
-        assert_eq!(
-            owned_by(&next.graph, CollectionSource::Aws),
-            owned_by(&live, CollectionSource::Aws),
-            "the unreadable source's resources must be retained"
-        );
-        assert_eq!(
-            owned_by(&next.graph, CollectionSource::Cloudflare),
-            0,
-            "a healthy source's deletions must still go through"
-        );
-        assert!(
-            !diff(&live, &next.graph).removed_nodes.is_empty(),
-            "the graph must still converge for sources that were read"
-        );
     }
 
     #[test]

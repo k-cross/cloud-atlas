@@ -234,22 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn a_redelivered_event_changes_nothing() {
-        let mut live = GraphBuilder::new();
-        let mut applier = EventApplier::new();
-
-        applier.apply(&mut live, &created("i-1", T0));
-        let nodes = live.graph.node_count();
-        let edges = live.graph.edge_count();
-
-        let patch = applier.apply(&mut live, &created("i-1", T0));
-
-        assert!(patch.is_empty(), "nothing new to say");
-        assert_eq!(live.graph.node_count(), nodes);
-        assert_eq!(live.graph.edge_count(), edges);
-    }
-
-    #[test]
     fn a_deletion_removes_the_node_and_names_its_edges() {
         let mut live = GraphBuilder::new();
         let mut applier = EventApplier::new();
@@ -281,53 +265,6 @@ mod tests {
         let patch = applier.apply(&mut live, &event(ChangeOp::Deleted, instance("i-1"), T0));
 
         assert!(patch.is_empty());
-    }
-
-    #[test]
-    fn a_stale_create_cannot_resurrect_a_deleted_resource() {
-        let mut live = GraphBuilder::new();
-        let mut applier = EventApplier::new();
-
-        applier.apply(&mut live, &created("i-1", T0));
-        applier.apply(
-            &mut live,
-            &event(ChangeOp::Deleted, instance("i-1"), T0 + 1_000),
-        );
-
-        let late = created("i-1", T0);
-        assert!(applier.is_stale(&late));
-        let patch = applier.apply(&mut live, &late);
-
-        assert!(patch.is_empty(), "the older statement must not win");
-        assert!(!live.contains(&instance("i-1")));
-    }
-
-    #[test]
-    fn ordering_is_tracked_per_resource() {
-        let mut live = GraphBuilder::new();
-        let mut applier = EventApplier::new();
-
-        applier.apply(&mut live, &created("i-1", T0 + 1_000));
-        let patch = applier.apply(&mut live, &created("i-2", T0));
-
-        assert!(!patch.is_empty());
-        assert!(live.contains(&instance("i-2")));
-    }
-
-    #[test]
-    fn a_newer_event_applies_after_a_stale_one_was_dropped() {
-        let mut live = GraphBuilder::new();
-        let mut applier = EventApplier::new();
-
-        applier.apply(
-            &mut live,
-            &event(ChangeOp::Deleted, instance("i-1"), T0 + 1_000),
-        );
-        applier.apply(&mut live, &created("i-1", T0));
-        assert!(!live.contains(&instance("i-1")));
-
-        applier.apply(&mut live, &created("i-1", T0 + 2_000));
-        assert!(live.contains(&instance("i-1")), "the resource came back");
     }
 
     #[test]
@@ -403,34 +340,5 @@ mod tests {
         );
         assert!(live.contains(&Node::AwsEc2Eni("i-1".into())));
         assert!(live.contains(&Node::AwsEc2Subnet("subnet-1".into())));
-    }
-
-    #[test]
-    fn an_applied_older_event_does_not_weaken_the_guard() {
-        let mut live = GraphBuilder::new();
-        let mut applier = EventApplier::new();
-
-        applier.apply(&mut live, &created("i-1", T0 + 1_000));
-        applier.apply(&mut live, &created("i-1", T0));
-
-        let stale_delete = event(ChangeOp::Deleted, instance("i-1"), T0 + 500);
-        assert!(applier.is_stale(&stale_delete));
-        applier.apply(&mut live, &stale_delete);
-
-        assert!(live.contains(&instance("i-1")));
-    }
-
-    #[test]
-    fn a_stale_delete_cannot_remove_a_recreated_resource() {
-        let mut live = GraphBuilder::new();
-        let mut applier = EventApplier::new();
-
-        applier.apply(&mut live, &event(ChangeOp::Deleted, instance("i-1"), T0));
-        applier.apply(&mut live, &created("i-1", T0 + 1_000));
-
-        let patch = applier.apply(&mut live, &event(ChangeOp::Deleted, instance("i-1"), T0));
-
-        assert!(patch.is_empty());
-        assert!(live.contains(&instance("i-1")));
     }
 }

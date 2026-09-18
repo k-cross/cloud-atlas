@@ -332,26 +332,6 @@ mod tests {
     use crate::atlas::projector::azure::azure_projector;
 
     #[test]
-    fn a_flood_of_bad_rows_is_capped_in_the_report() {
-        let malformed: Vec<serde_json::Value> = (0..MAX_REPORTED_ROWS + 2)
-            .map(|i| serde_json::json!({ "id": format!("row-{i}"), "name": i }))
-            .collect();
-
-        let (_collections, report) = map_resources(malformed);
-
-        assert_eq!(
-            report.failures.len(),
-            MAX_REPORTED_ROWS + 1,
-            "expected {MAX_REPORTED_ROWS} rows plus one summary"
-        );
-        assert!(
-            report.summary().contains("2 further rows"),
-            "the tail must be counted: {}",
-            report.summary()
-        );
-    }
-
-    #[test]
     fn every_queried_type_reaches_the_graph() {
         for azure_type in AzureType::ALL {
             let row = serde_json::json!({
@@ -371,6 +351,112 @@ mod tests {
                 "{} mapped to no graph nodes",
                 azure_type.arg_type()
             );
+        }
+    }
+
+    use proptest::prelude::*;
+
+    // ARG answers with the whole tenant in one response, so a row that will not
+    // deserialize has to be skipped and reported without costing the rows
+    // around it. An exhaustive match rather than a node count: a new Azure type
+    // has to teach this counter about itself, the way `ALL_KINDS` does.
+    fn mapped(collections: &[MicrosoftCollection]) -> usize {
+        collections
+            .iter()
+            .map(|collection| match collection {
+                MicrosoftCollection::AzureVirtualMachines(items) => items.len(),
+                MicrosoftCollection::AzureVirtualNetworks(items) => items.len(),
+                MicrosoftCollection::AzureSubnets(items) => items.len(),
+                MicrosoftCollection::AzureNetworkInterfaces(items) => items.len(),
+                MicrosoftCollection::AzureLoadBalancers(items) => items.len(),
+                MicrosoftCollection::AzureNetworkSecurityGroups(items) => items.len(),
+                MicrosoftCollection::AzurePublicIpAddresses(items) => items.len(),
+                MicrosoftCollection::AzureStorageAccounts(items) => items.len(),
+                MicrosoftCollection::AzureManagedClusters(items) => items.len(),
+                MicrosoftCollection::AzureSqlServers(items) => items.len(),
+                MicrosoftCollection::AzureAppServices(items) => items.len(),
+                MicrosoftCollection::AzureFunctionApps(items) => items.len(),
+                MicrosoftCollection::AzureApiManagement(items) => items.len(),
+                MicrosoftCollection::AzureCosmosDbs(items) => items.len(),
+                MicrosoftCollection::AzureServiceBuses(items) => items.len(),
+                MicrosoftCollection::AzureEventGridTopics(items) => items.len(),
+                MicrosoftCollection::AzureDnsZones(items) => items.len(),
+                MicrosoftCollection::AzureCdnProfiles(items) => items.len(),
+            })
+            .sum()
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Row {
+        Good(usize),
+        Drifted,
+        Unknown,
+    }
+
+    fn row() -> impl Strategy<Value = Row> {
+        prop_oneof![
+            6 => (0usize..AzureType::ALL.len()).prop_map(Row::Good),
+            3 => Just(Row::Drifted),
+            1 => Just(Row::Unknown),
+        ]
+    }
+
+    fn render(row: Row, seq: usize) -> serde_json::Value {
+        match row {
+            Row::Good(pick) => {
+                let arg_type = AzureType::ALL[pick].arg_type();
+                serde_json::json!({
+                    "id": format!("/subscriptions/s/providers/{arg_type}/r{seq}"),
+                    "name": format!("r{seq}"),
+                    "type": arg_type,
+                    "location": "eastus",
+                    "properties": {}
+                })
+            }
+            // `name` is an Option<String>; a number is the shape drift ARG
+            // actually produces when a provider changes a field's type.
+            Row::Drifted => serde_json::json!({ "id": format!("row-{seq}"), "name": seq }),
+            Row::Unknown => serde_json::json!({
+                "id": format!("/subscriptions/s/providers/microsoft.future/thing/r{seq}"),
+                "name": format!("r{seq}"),
+                "type": "microsoft.future/things",
+                "location": "eastus",
+                "properties": {}
+            }),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn a_drifted_row_costs_only_itself(rows in prop::collection::vec(row(), 0..40)) {
+            let raw: Vec<serde_json::Value> = rows
+                .iter()
+                .enumerate()
+                .map(|(seq, row)| render(*row, seq))
+                .collect();
+
+            let good = rows.iter().filter(|r| matches!(r, Row::Good(_))).count();
+            let drifted = rows.iter().filter(|r| matches!(r, Row::Drifted)).count();
+
+            let (collections, report) = map_resources(raw);
+
+            // Every good row still lands, wherever the bad ones fell among them.
+            prop_assert_eq!(mapped(&collections), good);
+
+            // A type the table does not query is not a failure — it is a row we
+            // never asked about and cannot model.
+            let capped = drifted.min(MAX_REPORTED_ROWS);
+            let tail = usize::from(drifted > MAX_REPORTED_ROWS);
+            prop_assert_eq!(report.failures.len(), capped + tail);
+            prop_assert_eq!(report.is_complete(), drifted == 0);
+
+            // The whole point of `Malformed`: one bad row must never freeze
+            // deletions across the rest of Azure.
+            prop_assert!(
+                report.failures.iter().all(|f| f.kind == FailureKind::Malformed)
+            );
+            prop_assert!(report.unreadable_sources().is_empty());
+            prop_assert_eq!(report.unreadable_kind(SOURCE), None);
         }
     }
 }

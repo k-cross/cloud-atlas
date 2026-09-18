@@ -53,3 +53,4 @@ serde_json = "1.0"
 aws-smithy-runtime = { version = "1", features = ["client", "test-util"] }
 aws-credential-types = { version = "1", features = ["test-util"] }
 http = "1"
+proptest = "1"

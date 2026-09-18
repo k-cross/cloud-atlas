@@ -5,9 +5,24 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::MicrosoftCollection;
 use petgraph::graph::NodeIndex;
+use std::sync::Arc;
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
     project_parallel(builder, azure_data, project_microsoft_collection);
+}
+
+// Resource Graph echoes one resource's id with whatever casing the JSON that
+// mentions it happened to use — a VM's own top-level `id` and the same
+// resource named inside another resource's `properties` are not guaranteed
+// to agree — and Node identity is exact string equality (rule 6), so a
+// networking resource's id has to be folded to one spelling before it
+// becomes a node, everywhere it can be named from two directions. ARM ids
+// are case-insensitive as identifiers (only the final segment's display
+// casing varies), so lowercasing is safe. Leaf resources that nothing else
+// ever names by id (`project_leaf!` below) have no second spelling to
+// disagree with, so they are left as ARG returned them.
+fn canonical_azure_id(id: &str) -> Arc<str> {
+    id.to_ascii_lowercase().into()
 }
 
 fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollection) {
@@ -16,7 +31,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
             for vm in vms {
                 if let Some(id) = &vm.id {
                     let idx =
-                        builder.get_or_add_node(Node::AzureVirtualMachine(id.as_str().into()));
+                        builder.get_or_add_node(Node::AzureVirtualMachine(canonical_azure_id(id)));
 
                     // `HasIp`, not `ConnectsTo`: the NIC is what holds the
                     // machine's addresses, and `derive::service` resolves an
@@ -25,7 +40,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                     for nic_id in &vm.network_interfaces {
                         builder.link_to(
                             idx,
-                            Node::AzureNetworkInterface(nic_id.as_str().into()),
+                            Node::AzureNetworkInterface(canonical_azure_id(nic_id)),
                             Edge::HasIp,
                         );
                     }
@@ -36,12 +51,12 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
             for vnet in vnets {
                 if let Some(id) = &vnet.id {
                     let idx =
-                        builder.get_or_add_node(Node::AzureVirtualNetwork(id.as_str().into()));
+                        builder.get_or_add_node(Node::AzureVirtualNetwork(canonical_azure_id(id)));
 
                     for subnet_id in &vnet.subnets {
                         builder.link_to(
                             idx,
-                            Node::AzureSubnet(subnet_id.as_str().into()),
+                            Node::AzureSubnet(canonical_azure_id(subnet_id)),
                             Edge::Contains,
                         );
                     }
@@ -51,12 +66,12 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureSubnets(subnets) => {
             for subnet in subnets {
                 if let Some(id) = &subnet.id {
-                    let idx = builder.get_or_add_node(Node::AzureSubnet(id.as_str().into()));
+                    let idx = builder.get_or_add_node(Node::AzureSubnet(canonical_azure_id(id)));
 
                     if let Some(vnet_id) = &subnet.vnet_id {
                         builder.link_from(
                             idx,
-                            Node::AzureVirtualNetwork(vnet_id.as_str().into()),
+                            Node::AzureVirtualNetwork(canonical_azure_id(vnet_id)),
                             Edge::Contains,
                         );
                     }
@@ -64,7 +79,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                     if let Some(nsg_id) = &subnet.network_security_group_id {
                         builder.link_to(
                             idx,
-                            Node::AzureNetworkSecurityGroup(nsg_id.as_str().into()),
+                            Node::AzureNetworkSecurityGroup(canonical_azure_id(nsg_id)),
                             Edge::ConnectsTo,
                         );
                     }
@@ -74,8 +89,8 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureNetworkInterfaces(nics) => {
             for nic in nics {
                 if let Some(id) = &nic.id {
-                    let idx =
-                        builder.get_or_add_node(Node::AzureNetworkInterface(id.as_str().into()));
+                    let idx = builder
+                        .get_or_add_node(Node::AzureNetworkInterface(canonical_azure_id(id)));
                     let configs = nic
                         .properties
                         .as_ref()
@@ -87,7 +102,8 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureLoadBalancers(balancers) => {
             for balancer in balancers {
                 if let Some(id) = &balancer.id {
-                    let idx = builder.get_or_add_node(Node::AzureLoadBalancer(id.as_str().into()));
+                    let idx =
+                        builder.get_or_add_node(Node::AzureLoadBalancer(canonical_azure_id(id)));
                     let configs = balancer
                         .properties
                         .as_ref()
@@ -100,7 +116,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
             for nsg in nsgs {
                 if let Some(id) = &nsg.id {
                     let idx = builder
-                        .get_or_add_node(Node::AzureNetworkSecurityGroup(id.as_str().into()));
+                        .get_or_add_node(Node::AzureNetworkSecurityGroup(canonical_azure_id(id)));
 
                     if let Some(props) = &nsg.properties
                         && let Some(rules) = &props.security_rules
@@ -136,7 +152,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
             for pip in pips {
                 if let Some(id) = &pip.id {
                     let idx =
-                        builder.get_or_add_node(Node::AzurePublicIpAddress(id.as_str().into()));
+                        builder.get_or_add_node(Node::AzurePublicIpAddress(canonical_azure_id(id)));
 
                     if let Some(ip) = &pip.ip_address {
                         builder.link_to(idx, Node::ip(ip), Edge::ConnectsTo);
@@ -217,13 +233,17 @@ fn project_ip_configurations(
         {
             builder.link_to(
                 idx,
-                Node::AzurePublicIpAddress(public_ip_id.into()),
+                Node::AzurePublicIpAddress(canonical_azure_id(public_ip_id)),
                 Edge::HasIp,
             );
         }
 
         if let Some(subnet_id) = properties.subnet.as_ref().and_then(|r| r.id.as_deref()) {
-            builder.link_to(idx, Node::AzureSubnet(subnet_id.into()), Edge::AttachedTo);
+            builder.link_to(
+                idx,
+                Node::AzureSubnet(canonical_azure_id(subnet_id)),
+                Edge::AttachedTo,
+            );
         }
     }
 }

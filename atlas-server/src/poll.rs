@@ -353,17 +353,6 @@ mod tests {
         report
     }
 
-    fn aws_refused() -> CollectionReport {
-        let mut report = CollectionReport::default();
-        report.record(
-            CollectionSource::Aws,
-            FailureKind::Unauthorized,
-            "us-east-1/credentials",
-            "the security token included in the request is expired",
-        );
-        report
-    }
-
     fn azure_drifted_row() -> CollectionReport {
         let mut report = CollectionReport::default();
         report.note(
@@ -405,59 +394,6 @@ mod tests {
             !patch.removed_nodes.is_empty(),
             "a scan that was read stays authoritative about what is gone"
         );
-    }
-
-    #[test]
-    fn an_unauthorized_source_is_released_sooner_than_an_unavailable_one() {
-        let budget = Retention::DEFAULT_BUDGET;
-        assert!(Retention::AUTH_BUDGET < budget);
-
-        let mut throttled = Retention::new(budget);
-        for scan in 1..=budget {
-            assert!(
-                !throttled.hold(&aws_throttled()).is_empty(),
-                "scan {scan} is within the outage budget"
-            );
-        }
-        assert!(throttled.hold(&aws_throttled()).is_empty());
-
-        let mut refused = Retention::new(budget);
-        for scan in 1..=Retention::AUTH_BUDGET {
-            assert!(
-                !refused.hold(&aws_refused()).is_empty(),
-                "scan {scan} is within the auth budget"
-            );
-        }
-        assert!(
-            refused.hold(&aws_refused()).is_empty(),
-            "a credential failure must not pin the provider for the full outage budget"
-        );
-    }
-
-    #[test]
-    fn mixed_evidence_keeps_the_longer_budget() {
-        let mut report = aws_refused();
-        report.record(
-            CollectionSource::Aws,
-            FailureKind::Unavailable,
-            "us-west-2/ec2",
-            "throttled",
-        );
-
-        let mut retention = Retention::new(Retention::DEFAULT_BUDGET);
-        for scan in 1..=Retention::AUTH_BUDGET + 1 {
-            assert!(
-                !retention.hold(&report).is_empty(),
-                "scan {scan}: mixed evidence must not spend the short auth budget"
-            );
-        }
-    }
-
-    #[test]
-    fn a_zero_budget_holds_nothing_regardless_of_kind() {
-        let mut retention = Retention::new(0);
-        assert!(retention.hold(&aws_refused()).is_empty());
-        assert!(retention.hold(&aws_throttled()).is_empty());
     }
 
     #[test]

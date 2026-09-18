@@ -260,16 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn conserves_mass_and_count() {
-        let (positions, masses) = scatter(500);
-        let tree = QuadTree::build(&positions, &masses);
-        let root = tree.root();
-        assert_eq!(root.count, 500);
-        let total: f32 = masses.iter().sum();
-        assert!((root.mass - total).abs() < total * 1e-4);
-    }
-
-    #[test]
     fn approximates_brute_force() {
         let (positions, masses) = scatter(400);
         let tree = QuadTree::build(&positions, &masses);
@@ -302,42 +292,10 @@ mod tests {
     }
 
     #[test]
-    fn theta_zero_is_exact() {
-        let (positions, masses) = scatter(100);
-        let tree = QuadTree::build(&positions, &masses);
-        for i in 0..masses.len() {
-            let (ax, ay) = tree.repulsion(
-                i as u32,
-                positions[2 * i],
-                positions[2 * i + 1],
-                masses[i],
-                1.0,
-                0.0,
-            );
-            let (ex, ey) = QuadTree::brute_force_repulsion(&positions, &masses, i, 1.0);
-            assert!((ax - ex).abs() < 1e-2 && (ay - ey).abs() < 1e-2);
-        }
-    }
-
-    #[test]
     fn empty_tree_repulsion_is_zero_not_a_panic() {
         let mut tree = QuadTree::new();
         tree.rebuild(&[], &[]);
         assert_eq!(tree.repulsion(0, 0.0, 0.0, 1.0, 1.0, 0.5), (0.0, 0.0));
-    }
-
-    #[test]
-    fn rebuild_reuses_buffer_and_matches_fresh_build() {
-        let (p1, m1) = scatter(300);
-        let (p2, m2) = scatter(300);
-        let mut reused = QuadTree::build(&p1, &m1);
-        reused.rebuild(&p2, &m2);
-        let fresh = QuadTree::build(&p2, &m2);
-        for i in 0..m2.len() {
-            let (rx, ry) = reused.repulsion(i as u32, p2[2 * i], p2[2 * i + 1], m2[i], 1.0, 0.5);
-            let (fx, fy) = fresh.repulsion(i as u32, p2[2 * i], p2[2 * i + 1], m2[i], 1.0, 0.5);
-            assert_eq!((rx, ry), (fx, fy), "node {i} diverged after reuse");
-        }
     }
 
     #[test]
@@ -348,5 +306,136 @@ mod tests {
         let (fx, fy) = tree.repulsion(0, 5.0, 5.0, 1.0, 1.0, 0.5);
         assert!(fx.is_finite() && fy.is_finite());
         assert!(fx != 0.0 || fy != 0.0, "coincident points must still repel");
+    }
+
+    use proptest::prelude::*;
+
+    // Coordinates snap to a coarse grid often enough that coincident points —
+    // the degenerate case a Barnes-Hut build has to survive — turn up on their
+    // own rather than only in a hand-written test.
+    fn cloud(max: usize) -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
+        prop::collection::vec((-400i32..400, -400i32..400, 1u8..8, any::<bool>()), 1..max).prop_map(
+            |points| {
+                let mut positions = Vec::with_capacity(points.len() * 2);
+                let mut masses = Vec::with_capacity(points.len());
+                for (x, y, m, snap) in points {
+                    let grid = if snap { 50 } else { 1 };
+                    positions.push((x / grid * grid) as f32);
+                    positions.push((y / grid * grid) as f32);
+                    masses.push(m as f32);
+                }
+                (positions, masses)
+            },
+        )
+    }
+
+    // Bodies at exactly the same spot cannot be separated by subdivision, so
+    // they bottom out in one max-depth leaf that `repulsion` cannot exclude
+    // itself from: such a body repels itself, which the brute force does not
+    // do. The force there is an arbitrary jitter angle rather than a physical
+    // one, so the two agreeing is not the contract — staying finite and
+    // non-zero is, which `repulsion_is_finite_for_any_arrangement` covers.
+    fn distinct(max: usize) -> impl Strategy<Value = (Vec<f32>, Vec<f32>)> {
+        cloud(max).prop_map(|(positions, masses)| {
+            let mut seen = std::collections::HashSet::new();
+            let mut kept_positions = Vec::new();
+            let mut kept_masses = Vec::new();
+            for i in 0..masses.len() {
+                let (x, y) = (positions[2 * i], positions[2 * i + 1]);
+                if seen.insert((x.to_bits(), y.to_bits())) {
+                    kept_positions.push(x);
+                    kept_positions.push(y);
+                    kept_masses.push(masses[i]);
+                }
+            }
+            (kept_positions, kept_masses)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn a_tree_holds_every_point_it_was_built_from((positions, masses) in cloud(200)) {
+            let tree = QuadTree::build(&positions, &masses);
+            let root = tree.root();
+
+            prop_assert_eq!(root.count as usize, masses.len());
+            let total: f32 = masses.iter().sum();
+            prop_assert!(
+                (root.mass - total).abs() <= total * 1e-4,
+                "root mass {} vs {}",
+                root.mass,
+                total
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn theta_zero_is_the_brute_force_answer((positions, masses) in distinct(60)) {
+            let tree = QuadTree::build(&positions, &masses);
+
+            for i in 0..masses.len() {
+                let (ax, ay) = tree.repulsion(
+                    i as u32, positions[2 * i], positions[2 * i + 1], masses[i], 1.0, 0.0,
+                );
+                let (ex, ey) = QuadTree::brute_force_repulsion(&positions, &masses, i, 1.0);
+
+                // Opening every cell visits the same bodies as the brute force
+                // does; only summation order differs.
+                let scale = (ex * ex + ey * ey).sqrt().max(1.0);
+                prop_assert!(
+                    (ax - ex).abs() <= scale * 1e-3 && (ay - ey).abs() <= scale * 1e-3,
+                    "node {}: ({}, {}) vs ({}, {})",
+                    i, ax, ay, ex, ey
+                );
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn repulsion_is_finite_for_any_arrangement(
+            (positions, masses) in cloud(120),
+            theta in 0.0f32..1.5,
+        ) {
+            let tree = QuadTree::build(&positions, &masses);
+
+            for i in 0..masses.len() {
+                let (fx, fy) = tree.repulsion(
+                    i as u32, positions[2 * i], positions[2 * i + 1], masses[i], 1.0, theta,
+                );
+                prop_assert!(
+                    fx.is_finite() && fy.is_finite(),
+                    "node {} blew up: ({}, {})",
+                    i, fx, fy
+                );
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn rebuilding_matches_a_fresh_build(
+            (first, first_masses) in cloud(80),
+            (second, second_masses) in cloud(80),
+        ) {
+            // The buffer is reused every tick, so a stale cell left behind
+            // would show up as a layout that depends on the previous frame.
+            let mut reused = QuadTree::build(&first, &first_masses);
+            reused.rebuild(&second, &second_masses);
+            let fresh = QuadTree::build(&second, &second_masses);
+
+            for i in 0..second_masses.len() {
+                let args = (
+                    i as u32, second[2 * i], second[2 * i + 1], second_masses[i], 1.0, 0.5,
+                );
+                prop_assert_eq!(
+                    reused.repulsion(args.0, args.1, args.2, args.3, args.4, args.5),
+                    fresh.repulsion(args.0, args.1, args.2, args.3, args.4, args.5),
+                    "node {} diverged after reuse",
+                    i
+                );
+            }
+        }
     }
 }

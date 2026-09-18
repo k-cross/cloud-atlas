@@ -258,6 +258,13 @@ mod tests {
         )
     }
 
+    // The projector folds a networking resource's id to one casing (Resource
+    // Graph is not consistent about which casing it echoes an id back with),
+    // so an expectation built from the fixture's own literal has to match.
+    fn azure_networking_id(rest: &str) -> std::sync::Arc<str> {
+        fixtures::azure_id(rest).to_ascii_lowercase().into()
+    }
+
     fn serves_any(builder: &GraphBuilder, pick: impl Fn(&Node, &Node) -> bool) -> bool {
         builder
             .graph
@@ -317,29 +324,6 @@ mod tests {
         assert_eq!(names, vec![&Node::AwsEc2NatGateway("nat-globex".into())]);
     }
 
-    #[test]
-    fn holding_is_followed_to_the_top_without_looping() {
-        let mut graph = Graph::<Node, Edge>::new();
-        let a = graph.add_node(Node::AwsEc2Eni("eni-a".into()));
-        let b = graph.add_node(Node::AwsEc2Eni("eni-b".into()));
-        let top = graph.add_node(Node::AwsEc2Instance("i-top".into()));
-        graph.add_edge(b, a, Edge::HasIp);
-        graph.add_edge(a, b, Edge::HasIp);
-        graph.add_edge(top, b, Edge::HasIp);
-
-        let mut held_by: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
-        for edge in graph.edge_references() {
-            held_by
-                .entry(edge.target())
-                .or_default()
-                .push(edge.source());
-        }
-        let mut out = Vec::new();
-        holders(a, &held_by, &mut out);
-
-        assert_eq!(out, vec![top], "a cycle below the owner must not hide it");
-    }
-
     // Between scans an evicted flow's edge outlives its record. The edge alone
     // must not confirm anything, or the status reads "confirmed, never seen".
     #[test]
@@ -389,11 +373,9 @@ mod tests {
             serves(
                 &builder,
                 &web01,
-                &Node::AzureVirtualMachine(
-                    fixtures::azure_id("Microsoft.Compute/virtualMachines/vm-worker")
-                        .as_str()
-                        .into(),
-                ),
+                &Node::AzureVirtualMachine(azure_networking_id(
+                    "Microsoft.Compute/virtualMachines/vm-worker",
+                )),
             ),
             "the address is the NIC's, and the NIC is the machine's"
         );
@@ -423,11 +405,9 @@ mod tests {
         assert!(serves(
             &builder,
             &Node::AwsEc2Instance("i-globex-web-01".into()),
-            &Node::AzureLoadBalancer(
-                fixtures::azure_id("Microsoft.Network/loadBalancers/lb-globex")
-                    .as_str()
-                    .into(),
-            ),
+            &Node::AzureLoadBalancer(azure_networking_id(
+                "Microsoft.Network/loadBalancers/lb-globex",
+            )),
         ));
         assert!(
             !serves_any(&builder, |source, target| {

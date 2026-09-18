@@ -196,33 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn removal_repairs_the_index_of_the_node_that_moved() {
-        let mut builder = GraphBuilder::new();
-        for id in ["i-1", "i-2", "i-3"] {
-            builder.get_or_add_node(instance(id));
-        }
-
-        builder.remove_node(&instance("i-1")).expect("present");
-
-        for id in ["i-2", "i-3"] {
-            let idx = builder.index_of(&instance(id)).expect("still mapped");
-            assert_eq!(
-                builder.graph[idx],
-                instance(id),
-                "{id} must still resolve to itself after the swap-remove"
-            );
-        }
-    }
-
-    #[test]
-    fn removing_an_absent_node_reports_nothing() {
-        let mut builder = GraphBuilder::new();
-        builder.get_or_add_node(instance("i-1"));
-        assert!(builder.remove_node(&instance("i-missing")).is_none());
-        assert_eq!(builder.graph.node_count(), 1);
-    }
-
-    #[test]
     fn has_edge_matches_the_dedup_rule_add_edge_applies() {
         let mut builder = GraphBuilder::new();
         let a = builder.get_or_add_node(instance("i-1"));

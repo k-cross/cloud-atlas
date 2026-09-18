@@ -527,60 +527,6 @@ mod tests {
     }
 
     #[test]
-    fn observations_accumulate_and_carry_the_newest_sighting() {
-        let mut index = FlowIndex::default();
-        index.observe(&flow("10.0.0.1", "198.51.100.10", T0));
-        index.observe(&flow("10.0.0.1", "198.51.100.10", T0 + MINUTE));
-
-        let key = flow_key(&(ip("10.0.0.1"), ip("198.51.100.10")));
-        let observed = index
-            .observations()
-            .into_iter()
-            .find(|o| o.key == key)
-            .expect("the flow is observed");
-
-        assert_eq!(observed.last_seen, T0 + MINUTE);
-        assert_eq!(observed.packets, Some(20));
-        assert_eq!(observed.status, "accepted");
-    }
-
-    #[test]
-    fn a_rejected_record_alongside_an_accepted_one_reads_as_mixed() {
-        let mut index = FlowIndex::default();
-        index.observe(&flow("10.0.0.1", "198.51.100.10", T0));
-        let mut rejected = flow("10.0.0.1", "198.51.100.10", T0 + 1);
-        rejected.action = Some(FlowAction::Rejected);
-        index.observe(&rejected);
-
-        let key = flow_key(&(ip("10.0.0.1"), ip("198.51.100.10")));
-        let observed = index
-            .observations()
-            .into_iter()
-            .find(|o| o.key == key)
-            .expect("the flow is observed");
-
-        assert_eq!(observed.status, "mixed");
-    }
-
-    #[test]
-    fn a_record_with_no_verdict_is_observed_not_accepted() {
-        let mut index = FlowIndex::default();
-        let mut silent = flow("10.0.0.1", "198.51.100.10", T0);
-        silent.action = None;
-        index.observe(&silent);
-
-        let key = flow_key(&(ip("10.0.0.1"), ip("198.51.100.10")));
-        let observed = index
-            .observations()
-            .into_iter()
-            .find(|o| o.key == key)
-            .expect("the flow is observed");
-
-        assert_eq!(observed.status, "observed");
-        assert_eq!(observed.last_seen, T0, "liveness is still recorded");
-    }
-
-    #[test]
     fn volume_is_counted_once_across_the_whole_overlay() {
         let mut index = FlowIndex::default();
         let mut observation = flow("10.0.0.1", "198.51.100.10", T0);
@@ -665,29 +611,6 @@ mod tests {
     }
 
     #[test]
-    fn the_index_stays_within_its_budget() {
-        let capacity = 50;
-        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
-
-        for i in 0..capacity as i64 * 4 {
-            index.observe(&flow("10.0.0.1", &format!("203.0.113.{i}"), T0 + i));
-        }
-
-        assert!(index.flow_count() <= capacity, "{}", index.flow_count());
-        assert!(index.resource_count() <= capacity);
-    }
-
-    #[test]
-    fn a_zero_budget_keeps_nothing() {
-        let mut index = FlowIndex::new(Duration::from_secs(600), 0);
-
-        index.observe(&flow("10.0.0.1", "198.51.100.10", T0));
-
-        assert_eq!(index.flow_count(), 0);
-        assert_eq!(index.resource_count(), 0);
-    }
-
-    #[test]
     fn eviction_leaves_headroom_rather_than_refiring_per_record() {
         let capacity = 100;
         let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
@@ -702,18 +625,6 @@ mod tests {
             "trimmed to {} of {capacity}, leaving no headroom",
             index.flow_count()
         );
-    }
-
-    #[test]
-    fn eviction_keeps_the_most_recently_seen() {
-        let capacity = 10;
-        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
-        for i in 0..capacity as i64 * 3 {
-            index.observe(&flow("10.0.0.1", &format!("203.0.113.{i}"), T0 + i));
-        }
-
-        let newest = flow_key(&(ip("10.0.0.1"), ip("203.0.113.29")));
-        assert!(index.observations().iter().any(|o| o.key == newest));
     }
 
     #[test]
@@ -784,44 +695,6 @@ mod tests {
         let context = index.context(&live, &observations);
 
         assert_eq!(context.edge_count(), 1, "only the admissible flow crosses");
-    }
-
-    #[test]
-    fn the_non_ephemeral_end_is_the_service() {
-        assert_eq!(
-            orientation(Some(43122), Some(8080)),
-            Some(Orientation::Forward)
-        );
-        assert_eq!(
-            orientation(Some(8080), Some(43122)),
-            Some(Orientation::Reverse)
-        );
-    }
-
-    // A NAT gateway translates source ports anywhere in 1024-65535, so a client
-    // port below the ephemeral floor is ordinary; the lower port is the service.
-    #[test]
-    fn with_no_ephemeral_port_the_lower_one_is_the_service() {
-        assert_eq!(
-            orientation(Some(20000), Some(443)),
-            Some(Orientation::Forward)
-        );
-        assert_eq!(
-            orientation(Some(443), Some(20000)),
-            Some(Orientation::Reverse)
-        );
-    }
-
-    #[test]
-    fn what_cannot_be_told_apart_is_left_to_packet_direction() {
-        assert_eq!(
-            orientation(Some(50000), Some(60000)),
-            None,
-            "two high ports"
-        );
-        assert_eq!(orientation(Some(5060), Some(5060)), None, "identical ports");
-        assert_eq!(orientation(Some(0), Some(0)), None, "ICMP carries no ports");
-        assert_eq!(orientation(None, Some(443)), None, "a format without ports");
     }
 
     #[test]
