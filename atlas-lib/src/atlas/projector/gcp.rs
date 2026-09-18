@@ -1,4 +1,5 @@
 use super::{project_leaf, project_parallel};
+use crate::api::google::compute::NetworkInterface;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
@@ -45,6 +46,18 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                                     Node::GcpComputeNetwork(network.as_str().into()),
                                     Edge::Contains,
                                 );
+                            }
+
+                            if let Some(subnetwork) = &net.subnetwork {
+                                builder.link_to(
+                                    idx,
+                                    Node::GcpComputeSubnetwork(subnetwork.as_str().into()),
+                                    Edge::AttachedTo,
+                                );
+                            }
+
+                            for address in interface_addresses(net) {
+                                builder.link_to(idx, Node::ip(address), Edge::ConnectsTo);
                             }
                         }
                     }
@@ -182,4 +195,24 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
             }
         }
     }
+}
+
+// GCE has no separate interface resource, so unlike an ENI there is nothing
+// between the instance and its addresses. The two access-config lists share one
+// shape but not one field: `natIP` is only ever set on `accessConfigs` and
+// `externalIpv6` only on `ipv6AccessConfigs`, so both lists are read for both.
+fn interface_addresses(net: &NetworkInterface) -> Vec<&str> {
+    let mut addresses = Vec::new();
+    addresses.extend(net.network_i_p.as_deref());
+    addresses.extend(net.ipv6_address.as_deref());
+    for config in net
+        .access_configs
+        .iter()
+        .chain(net.ipv6_access_configs.iter())
+        .flatten()
+    {
+        addresses.extend(config.nat_i_p.as_deref());
+        addresses.extend(config.external_ipv6.as_deref());
+    }
+    addresses
 }

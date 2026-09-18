@@ -43,6 +43,16 @@ pub struct NetworkInterface {
     pub network: Option<String>,
     pub subnetwork: Option<String>,
     pub network_i_p: Option<String>,
+    pub ipv6_address: Option<String>,
+    pub access_configs: Option<Vec<AccessConfig>>,
+    pub ipv6_access_configs: Option<Vec<AccessConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessConfig {
+    pub nat_i_p: Option<String>,
+    pub external_ipv6: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,7 +120,18 @@ mod tests {
               "name": "web-1",
               "selfLink": "https://www.googleapis.com/compute/v1/projects/my-project/zones/us-central1-a/instances/web-1",
               "networkInterfaces": [
-                { "network": "https://www.googleapis.com/compute/v1/projects/my-project/global/networks/default", "networkIP": "10.128.0.2" }
+                {
+                  "network": "https://www.googleapis.com/compute/v1/projects/my-project/global/networks/default",
+                  "subnetwork": "https://www.googleapis.com/compute/v1/projects/my-project/regions/us-central1/subnetworks/default",
+                  "networkIP": "10.128.0.2",
+                  "ipv6Address": "2600:1900:4000:1::2",
+                  "accessConfigs": [
+                    { "type": "ONE_TO_ONE_NAT", "name": "External NAT", "natIP": "34.72.0.2" }
+                  ],
+                  "ipv6AccessConfigs": [
+                    { "type": "DIRECT_IPV6", "name": "External IPv6", "externalIpv6": "2600:1900:4000:1::5" }
+                  ]
+                }
               ]
             }
           ]
@@ -136,11 +157,21 @@ mod tests {
         let self_link = inst.self_link.as_deref().expect("self_link present");
         assert!(self_link.contains("/projects/my-project/"));
         assert!(self_link.contains("/zones/us-central1-a/"));
-        let network = inst.network_interfaces.as_ref().expect("nics present")[0]
-            .network
-            .as_deref()
-            .expect("network present");
+        let nic = &inst.network_interfaces.as_ref().expect("nics present")[0];
+        let network = nic.network.as_deref().expect("network present");
         assert!(network.ends_with("/networks/default"));
+        assert_eq!(nic.network_i_p.as_deref(), Some("10.128.0.2"));
+        assert_eq!(nic.ipv6_address.as_deref(), Some("2600:1900:4000:1::2"));
+        let access = nic.access_configs.as_ref().expect("access configs present");
+        assert_eq!(access[0].nat_i_p.as_deref(), Some("34.72.0.2"));
+        // `externalIpv6` rides the same AccessConfig shape but is only ever
+        // populated on `ipv6AccessConfigs`, never on the NAT entries above.
+        let v6 = nic
+            .ipv6_access_configs
+            .as_ref()
+            .expect("ipv6 access configs present");
+        assert_eq!(v6[0].external_ipv6.as_deref(), Some("2600:1900:4000:1::5"));
+        assert!(access[0].external_ipv6.is_none());
 
         assert!(
             items

@@ -69,6 +69,64 @@ pub struct NetworkSecurityGroup {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct ResourceRef {
+    pub id: Option<String>,
+}
+
+// Both a NIC's `ipConfigurations` and a load balancer's
+// `frontendIPConfigurations` are this shape, so the projector reads one
+// address-bearing configuration whichever resource carried it.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IpConfigurationProperties {
+    #[serde(rename = "privateIPAddress")]
+    pub private_ip_address: Option<String>,
+    #[serde(rename = "publicIPAddress")]
+    pub public_ip_address: Option<ResourceRef>,
+    pub subnet: Option<ResourceRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IpConfiguration {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub properties: Option<IpConfigurationProperties>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInterfaceProperties {
+    pub ip_configurations: Option<Vec<IpConfiguration>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInterface {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub properties: Option<NetworkInterfaceProperties>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadBalancerProperties {
+    #[serde(rename = "frontendIPConfigurations")]
+    pub frontend_ip_configurations: Option<Vec<IpConfiguration>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadBalancer {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub properties: Option<LoadBalancerProperties>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicIpAddress {
     pub id: Option<String>,
     pub name: Option<String>,

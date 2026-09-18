@@ -200,6 +200,24 @@ pub fn flows() -> Vec<FlowObservation> {
             3_100,
             Some(FlowAction::Accepted),
         ),
+        // The other two clouds' compute, reached over the interconnect: an
+        // Azure VM by the private address its NIC holds, a GCE instance by the
+        // one-to-one NAT address its access config carries. Neither endpoint
+        // had an owner before their interfaces were collected.
+        flow(
+            ("10.10.1.10", 41000),
+            ("10.20.1.4", 1433),
+            web01(),
+            21_700,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            ("10.10.1.11", 42000),
+            ("34.120.0.21", 443),
+            web02(),
+            18_300,
+            Some(FlowAction::Accepted),
+        ),
     ]
 }
 
@@ -713,7 +731,7 @@ pub fn aws() -> Provider {
 }
 
 pub fn gcp() -> Provider {
-    use crate::api::google::compute::{Firewall, Instance};
+    use crate::api::google::compute::{AccessConfig, Firewall, Instance, NetworkInterface};
     use crate::api::google::compute_network::{ForwardingRule, Network, Subnetwork};
     use crate::api::google::dns::ManagedZone;
     use crate::api::google::functions::CloudFunction;
@@ -739,7 +757,20 @@ pub fn gcp() -> Provider {
             "https://www.googleapis.com/compute/v1/projects/{}/zones/us-central1-a/instances/gce-worker-01",
             GCP_PROJECT
         )),
-        ..Default::default()
+        network_interfaces: Some(vec![NetworkInterface {
+            network: Some(network_link.clone()),
+            subnetwork: Some(subnet_link.clone()),
+            network_i_p: Some("10.30.0.11".to_owned()),
+            ipv6_address: None,
+            access_configs: Some(vec![AccessConfig {
+                nat_i_p: Some("34.120.0.21".to_owned()),
+                external_ipv6: None,
+            }]),
+            ipv6_access_configs: Some(vec![AccessConfig {
+                nat_i_p: None,
+                external_ipv6: Some("2600:1900:4000:1::15".to_owned()),
+            }]),
+        }]),
     };
 
     let firewall = Firewall {
@@ -911,6 +942,53 @@ pub fn azure() -> Provider {
         ip_address: Some("198.51.100.10".to_owned()),
     };
 
+    let ip_configuration = |name: &str,
+                            private_ip: Option<&str>,
+                            public_ip: Option<&str>,
+                            subnet: Option<&str>| IpConfiguration {
+        id: None,
+        name: Some(name.to_owned()),
+        properties: Some(IpConfigurationProperties {
+            private_ip_address: private_ip.map(str::to_owned),
+            public_ip_address: public_ip.map(|id| ResourceRef {
+                id: Some(azure_id(id)),
+            }),
+            subnet: subnet.map(|id| ResourceRef {
+                id: Some(azure_id(id)),
+            }),
+        }),
+    };
+
+    let nic = NetworkInterface {
+        id: Some(azure_id("Microsoft.Network/networkInterfaces/nic-worker")),
+        name: Some("nic-worker".to_owned()),
+        location: Some("eastus".to_owned()),
+        properties: Some(NetworkInterfaceProperties {
+            ip_configurations: Some(vec![ip_configuration(
+                "ipconfig1",
+                Some("10.20.1.4"),
+                None,
+                Some("Microsoft.Network/virtualNetworks/vnet-globex/subnets/default"),
+            )]),
+        }),
+    };
+
+    // The balancer holds the public address the AWS side is seen talking to,
+    // so that flow reads as a service and not as a bare address object.
+    let balancer = LoadBalancer {
+        id: Some(azure_id("Microsoft.Network/loadBalancers/lb-globex")),
+        name: Some("lb-globex".to_owned()),
+        location: Some("eastus".to_owned()),
+        properties: Some(LoadBalancerProperties {
+            frontend_ip_configurations: Some(vec![ip_configuration(
+                "frontend",
+                None,
+                Some("Microsoft.Network/publicIPAddresses/pip-globex"),
+                None,
+            )]),
+        }),
+    };
+
     let leaf = |rest: &str, name: &str| (azure_id(rest), name.to_owned());
 
     let (sa_id, sa_name) = leaf(
@@ -1005,6 +1083,8 @@ pub fn azure() -> Provider {
         MicrosoftCollection::AzureVirtualMachines(vec![vm]),
         MicrosoftCollection::AzureVirtualNetworks(vec![vnet]),
         MicrosoftCollection::AzureSubnets(vec![subnet]),
+        MicrosoftCollection::AzureNetworkInterfaces(vec![nic]),
+        MicrosoftCollection::AzureLoadBalancers(vec![balancer]),
         MicrosoftCollection::AzureNetworkSecurityGroups(vec![nsg]),
         MicrosoftCollection::AzurePublicIpAddresses(vec![pip]),
         MicrosoftCollection::AzureStorageAccounts(vec![storage]),

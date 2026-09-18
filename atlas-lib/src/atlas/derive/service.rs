@@ -17,8 +17,10 @@ pub(super) const INFERRED: &str = "inferred";
 // so a renamed variant fails a test rather than silently matching nothing.
 //
 // GCP and Azure rows wait on node kinds that do not exist yet (a backend
-// service, a load balancer and a backend pool), so until those land their
-// `Serves` edges come from observed traffic alone. Asymmetric on purpose.
+// service, and a backend pool to sit under `AzureLoadBalancer`), so until those
+// land their `Serves` edges come from observed traffic alone, which phase 1d
+// made possible by giving both clouds' resources their addresses. Asymmetric on
+// purpose.
 const CHAINS: &[&[&str]] = &[&["AwsElbLoadBalancer", "AwsElbTargetGroup", "AwsEc2Instance"]];
 
 pub(super) fn link(builder: &mut GraphBuilder, flows: &FlowIndex) {
@@ -374,22 +376,98 @@ mod tests {
         ));
     }
 
+    // Phase 1d: before the other two clouds carried addresses, a flow to a VM
+    // or a GCE instance landed on a pivot nothing claimed, and the whole
+    // relationship was invisible.
+    #[test]
+    fn the_other_clouds_compute_is_named_by_the_addresses_it_holds() {
+        let builder = fixtures::build_graph();
+        let web01 = Node::AwsEc2Instance("i-globex-web-01".into());
+        let web02 = Node::AwsEc2Instance("i-globex-web-02".into());
+
+        assert!(
+            serves(
+                &builder,
+                &web01,
+                &Node::AzureVirtualMachine(
+                    fixtures::azure_id("Microsoft.Compute/virtualMachines/vm-worker")
+                        .as_str()
+                        .into(),
+                ),
+            ),
+            "the address is the NIC's, and the NIC is the machine's"
+        );
+        assert!(
+            serves(
+                &builder,
+                &web02,
+                &Node::GcpComputeInstance("7000000000000000001".into()),
+            ),
+            "a GCE instance holds its own NAT address, with no interface between"
+        );
+        assert!(
+            !serves_any(&builder, |source, target| {
+                matches!(source, Node::AzureNetworkInterface(_))
+                    || matches!(target, Node::AzureNetworkInterface(_))
+            }),
+            "a NIC held by a machine is an address, not the service"
+        );
+    }
+
+    // The balancer's frontend is a public address object, so without a kind to
+    // hold it the hop read as `-> Azure::Network::PublicIpAddress(...)`.
+    #[test]
+    fn a_balancer_frontend_resolves_to_the_balancer() {
+        let builder = fixtures::build_graph();
+
+        assert!(serves(
+            &builder,
+            &Node::AwsEc2Instance("i-globex-web-01".into()),
+            &Node::AzureLoadBalancer(
+                fixtures::azure_id("Microsoft.Network/loadBalancers/lb-globex")
+                    .as_str()
+                    .into(),
+            ),
+        ));
+        assert!(
+            !serves_any(&builder, |source, target| {
+                matches!(source, Node::AzurePublicIpAddress(_))
+                    || matches!(target, Node::AzurePublicIpAddress(_))
+            }),
+            "a public address object is held by the resource behind it"
+        );
+    }
+
+    // A pivot can never itself be a `Serves` endpoint — the pass only ever emits
+    // resolved owners — so this asserts on the resolution: the address has no
+    // owner, and the flow across it therefore yields no edge at all.
     #[test]
     fn an_endpoint_no_resource_holds_serves_nothing() {
         let builder = fixtures::build_graph();
-        let external = Node::ip("198.51.100.10");
+        // A firewall rule names this address as a destination it allows, which
+        // is not the same as holding it — nothing in the estate answers on it.
+        let external = Node::ip("192.0.2.55");
+        let index = builder
+            .index_of(&external)
+            .expect("the fixture's internet endpoint is still a pivot");
 
         assert!(
-            builder.index_of(&external).is_some(),
-            "the fixture's internet endpoint is still a pivot"
+            !address_owners(&builder.graph).contains_key(&index),
+            "naming an address in a rule is not holding it"
         );
+        // The fixture flows it into web-01, whose own end does resolve; an
+        // unowned peer has to kill the pair, not fall back to the pivot.
+        let web01 = builder
+            .index_of(&Node::AwsEc2Instance("i-globex-web-01".into()))
+            .expect("the other end of that flow");
         assert!(
             !builder
                 .graph
                 .edge_references()
                 .filter(|e| e.weight() == &Edge::Serves)
-                .any(|e| builder.graph[e.source()] == external
-                    || builder.graph[e.target()] == external),
+                .any(|e| e.source() == index
+                    || e.target() == index
+                    || (e.target() == web01 && builder.graph[e.source()].owner().is_none())),
             "an address no resource claims is the external end, by design"
         );
     }
@@ -405,10 +483,14 @@ mod tests {
                 .graph
                 .edge_references()
                 .filter(|e| e.weight() == &Edge::Serves)
-                .any(|e| matches!(
-                    builder.graph[e.source()],
-                    Node::AwsRoute53RecordSet(_) | Node::CloudflareDnsRecord(_)
-                )),
+                .any(|e| {
+                    [e.source(), e.target()].iter().any(|end| {
+                        matches!(
+                            builder.graph[*end],
+                            Node::AwsRoute53RecordSet(_) | Node::CloudflareDnsRecord(_)
+                        )
+                    })
+                }),
             "DNS records reach the graph through ResolvesTo, which is not ownership"
         );
     }

@@ -38,12 +38,33 @@ An unrecognised description means no owner edge, never a guessed one. The load b
 
 **Tier 1.** `AWS::EC2::NetworkInterface` Config items now map through `project_interface`/`InterfaceFacts`, which was unsafe until the scan produced every ENI. Both deferred owner edges are omitted from events, since each needs a collection the event lacks. Pinned by `an_interface_event_produces_only_what_a_full_scan_would` and `a_balancer_interface_event_does_not_invent_the_balancer`.
 
-### GCP and Azure (deferred)
+### GCP (done)
 
-Getting AWS right came first.
+GCE has no separate interface resource, so an instance holds its addresses directly: `GcpComputeInstance -ConnectsTo-> GenericIpAddress`, for each interface's `networkIP` and `ipv6Address` and each access config's `natIP` and `externalIpv6`. The NAT address matters most — it is the one a peer's flow log records for egress. Forwarding rules and Cloud SQL instances already carried theirs.
 
-- **GCP** — instances drop `network_ip` and `access_configs[].nat_ip`; link them as `GcpComputeInstance -ConnectsTo-> GenericIpAddress`. Forwarding rules already carry their address.
-- **Azure** — `AzureNetworkInterface` exists but `microsoft.network/networkinterfaces` isn't in `azure_types!`, so NICs are created by reference with no address. Adding it yields `ipConfigurations[].privateIPAddress`. Load balancers need a new kind as well.
+### Azure (done)
+
+`microsoft.network/networkinterfaces` and `microsoft.network/loadbalancers` join `azure_types!`. A NIC's `ipConfigurations` and a balancer's `frontendIPConfigurations` are the same shape, so one projector helper reads both:
+
+| Field | Edge |
+|---|---|
+| `privateIPAddress` | `-ConnectsTo-> GenericIpAddress` |
+| `publicIPAddress.id` | `-HasIp-> AzurePublicIpAddress` |
+| `subnet.id` | `-AttachedTo-> AzureSubnet` |
+
+ARG spells both address fields `IP`, not `Ip`, so each carries an explicit `serde(rename)`; camelCase alone would deserialise a NIC that holds nothing. `AzureLoadBalancer` is the new kind — without it a balancer's frontend address belongs to a bare `AzurePublicIpAddress`, which is an address object, not something that serves.
+
+**`AzureVirtualMachine -HasIp-> AzureNetworkInterface`**, where it used to be `ConnectsTo`. `derive::service` resolves an address up through its holders, so this is what makes a flow to a NIC's address read as the machine rather than the interface — the same shape as `Instance -HasIp-> Eni`. Backend pools are still unmodelled, so Azure has no control-plane chain and its `Serves` edges come from traffic alone.
+
+### Cloudflare (nothing to carry)
+
+Cloudflare is absent from this phase because it has no per-resource address to collect, not because it was skipped.
+
+- **Workers and Durable Objects** run on shared anycast. The addresses Cloudflare publishes are network-wide ranges fronting every zone on the platform, so pinning one to a worker or a zone would be the same guess the RDS ENI case rejects — worse, since one address really does front millions of tenants.
+- **KV, R2 and D1** are reached through the Workers runtime or an account-level API host. There is no per-namespace or per-bucket endpoint for a flow record to name.
+- **The one address Cloudflare knows** is the `A`/`AAAA` content of a DNS record, and it is already in the graph: `GenericHostname -ResolvesTo-> CloudflareDnsRecord -ResolvesTo-> GenericIpAddress`. That is an *origin* address, held by whatever actually answers on it — often an ENI in the same graph. `ResolvesTo` confers no ownership (architecture rule 5), so the record never becomes a `Serves` endpoint; the fixture's `v6.globex.io` names `2001:db8::10`, which is also a flow source, and draws no edge. Pinned by `naming_an_address_is_not_holding_it`.
+
+So the invariant holds for Cloudflare vacuously: no Cloudflare resource can be the thing a flow endpoint resolves to. If that changes — Workers with dedicated egress IPs, or Spectrum's per-application addresses — the resource would carry them with `ConnectsTo` like any other.
 
 ## 2. `Edge::Serves`
 
@@ -87,10 +108,10 @@ Hence `Edge::is_projected()` is false for `Serves`, and no event adapter may emi
 - **Ownership.** A pivot is owned by what `ConnectsTo` it, resolved transitively up `HasIp` (a visited set breaks cycles), so `Eni -Serves-> Eni` becomes `ALB -Serves-> Instance` and an Elastic IP held by an interface (`Instance -HasIp-> Eni -HasIp-> Eip`) isn't a second owner. An interface nothing holds owns itself — `Instance -Serves-> AwsEc2Eni(rds)` is the honest answer when the database can't be named. `ResolvesTo` never confers ownership, so a DNS record is never a `Serves` endpoint; this is an edge-kind rule, not a blocklist, which keeps the pass provider-agnostic.
 - **Observed pairs.** For each flow, emit `Serves` for every pair of resolved owners, uncapped (below). An unowned endpoint (internet addresses, a NAT gateway's peers) produces nothing.
 - **Orientation.** A flow log writes request and reply as separate records, so packet direction draws every relationship both ways. `FlowObservation` carries ports; `flow::orientation` treats the non-ephemeral (or lower) port as the service, falls back to packet direction when ambiguous, and `FlowStats` keeps a per-pair majority. Pinned by `a_reply_does_not_reverse_the_relationship`.
-- **Chains.** `CHAINS` lists `Node::kind()` sequences, checked against `ALL_KINDS`; the matcher walks projected edges only, so it can't read its own output. Only `[AwsElbLoadBalancer, AwsElbTargetGroup, AwsEc2Instance]` exists; GCP (backend service) and Azure (load balancer, backend pool) lack the kinds, so their `Serves` edges come from traffic alone.
+- **Chains.** `CHAINS` lists `Node::kind()` sequences, checked against `ALL_KINDS`; the matcher walks projected edges only, so it can't read its own output. Only `[AwsElbLoadBalancer, AwsElbTargetGroup, AwsEc2Instance]` exists; GCP (backend service) and Azure (a backend pool under `AzureLoadBalancer`) lack the kinds, so their `Serves` edges come from traffic alone.
 - **Targets.** Projected by `target_type`: `instance` via `link_instance_targets`; `ip` as `RoutesTo` a pivot (`ConnectsTo` would make the group an address holder); Lambda/ALB targets skipped.
 
-The Globex fixture derives eight edges, printed by `cargo run --example demo`: the ALB to web-01 and web-02 (`confirmed`) and to web-03 (registered and idle, `inferred`); plus `confirmed` web-01 → web-02, web-01 → the RDS ENI, NAT → web-02, and two cross-cloud hops (to an Azure public IP and a GCP SQL instance).
+The Globex fixture derives ten edges, printed by `cargo run --example demo`: the ALB to web-01 and web-02 (`confirmed`) and to web-03 (registered and idle, `inferred`); plus `confirmed` web-01 → web-02, web-01 → the RDS ENI, NAT → web-02, and four cross-cloud hops — web-01 to the Azure load balancer (its frontend public IP) and to the Azure VM (its NIC's private address), web-02 to the GCE instance (its NAT address) and to the GCP SQL instance. Phase 1d added the two middle ones; the GCP SQL hop predates it, and the Azure balancer hop is the one that used to land on a bare `AzurePublicIpAddress`.
 
 ### Rendering
 
@@ -101,7 +122,7 @@ The Globex fixture derives eight edges, printed by `cargo run --example demo`: t
 - **Name and direction:** `Serves`, in traffic direction. `Reaches` said less.
 - **RDS:** DNS linkage primary, the ENI path kept for IP-fronted access.
 - **All addresses, then measure:** secondary and IPv6 addresses all become pivots. Owner fan-out is uncapped — a shared or anycast address producing many edges is a real observation, and no budget has been measured to justify dropping it.
-- **AWS first.** GCP/Azure wait.
+- **AWS first.** GCP and Azure followed in 1d, once the AWS shape had proven itself.
 - **Not built:** request/response semantics (ports are a heuristic; `Serves` doesn't mean B answered A); typed nodes from flow records; typed external endpoints; transitive `Serves` closure (a query, not an edge).
 
 ## 4. Phases
@@ -111,7 +132,7 @@ The Globex fixture derives eight edges, printed by `cargo run --example demo`: t
 | 1a | `DescribeNetworkInterfaces`; ENIs carry addresses and owners | Done |
 | 1b | RDS → endpoint hostname | Done |
 | 1c | Tier-1 Config ENI arm | Done |
-| 1d | GCP and Azure addresses | Deferred |
+| 1d | GCP and Azure addresses | Done |
 | 2a | `atlas::derive` single entry point | Done |
 | 2b | `Serves` from traffic | Done |
 | 2c | Control-plane chains, `inferred` status | Done |

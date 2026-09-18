@@ -1,8 +1,10 @@
 use super::{project_leaf, project_parallel};
+use crate::api::azure::models::IpConfiguration;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::MicrosoftCollection;
+use petgraph::graph::NodeIndex;
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
     project_parallel(builder, azure_data, project_microsoft_collection);
@@ -16,11 +18,15 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                     let idx =
                         builder.get_or_add_node(Node::AzureVirtualMachine(id.as_str().into()));
 
+                    // `HasIp`, not `ConnectsTo`: the NIC is what holds the
+                    // machine's addresses, and `derive::service` resolves an
+                    // address up through its holders to name the VM rather
+                    // than the interface.
                     for nic_id in &vm.network_interfaces {
                         builder.link_to(
                             idx,
                             Node::AzureNetworkInterface(nic_id.as_str().into()),
-                            Edge::ConnectsTo,
+                            Edge::HasIp,
                         );
                     }
                 }
@@ -62,6 +68,31 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                             Edge::ConnectsTo,
                         );
                     }
+                }
+            }
+        }
+        MicrosoftCollection::AzureNetworkInterfaces(nics) => {
+            for nic in nics {
+                if let Some(id) = &nic.id {
+                    let idx =
+                        builder.get_or_add_node(Node::AzureNetworkInterface(id.as_str().into()));
+                    let configs = nic
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.ip_configurations.as_deref());
+                    project_ip_configurations(builder, idx, configs);
+                }
+            }
+        }
+        MicrosoftCollection::AzureLoadBalancers(balancers) => {
+            for balancer in balancers {
+                if let Some(id) = &balancer.id {
+                    let idx = builder.get_or_add_node(Node::AzureLoadBalancer(id.as_str().into()));
+                    let configs = balancer
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.frontend_ip_configurations.as_deref());
+                    project_ip_configurations(builder, idx, configs);
                 }
             }
         }
@@ -156,6 +187,43 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         }
         MicrosoftCollection::AzureCdnProfiles(cdns) => {
             project_leaf!(builder, cdns, id, Node::AzureCdnProfile)
+        }
+    }
+}
+
+// A NIC's ip configurations and a load balancer's frontend ones say the same
+// three things: the address the resource holds, the public address object
+// associated with it, and the subnet it sits in. The public address is a
+// resource of its own, so the association is `HasIp` — the pivot stays under
+// the address object and resolves up to whatever holds the interface.
+fn project_ip_configurations(
+    builder: &mut GraphBuilder,
+    idx: NodeIndex,
+    configs: Option<&[IpConfiguration]>,
+) {
+    for config in configs.unwrap_or_default() {
+        let Some(properties) = &config.properties else {
+            continue;
+        };
+
+        if let Some(private_ip) = &properties.private_ip_address {
+            builder.link_to(idx, Node::ip(private_ip), Edge::ConnectsTo);
+        }
+
+        if let Some(public_ip_id) = properties
+            .public_ip_address
+            .as_ref()
+            .and_then(|r| r.id.as_deref())
+        {
+            builder.link_to(
+                idx,
+                Node::AzurePublicIpAddress(public_ip_id.into()),
+                Edge::HasIp,
+            );
+        }
+
+        if let Some(subnet_id) = properties.subnet.as_ref().and_then(|r| r.id.as_deref()) {
+            builder.link_to(idx, Node::AzureSubnet(subnet_id.into()), Edge::AttachedTo);
         }
     }
 }

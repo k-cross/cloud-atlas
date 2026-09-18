@@ -262,6 +262,32 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
+        // Both halves of an instance's interface: the internal address and the
+        // one-to-one NAT address a flow log records for its egress.
+        let gce = Node::GcpComputeInstance("7000000000000000001".into());
+        for address in ["10.30.0.11", "34.120.0.21", "2600:1900:4000:1::15"] {
+            assert_edge(
+                &builder,
+                &gce,
+                &Node::GenericIpAddress(address.into()),
+                &Edge::ConnectsTo,
+            );
+        }
+        assert_edge(&builder, &network, &gce, &Edge::Contains);
+        assert_edge(
+            &builder,
+            &gce,
+            &Node::GcpComputeSubnetwork(
+                format!(
+                    "https://www.googleapis.com/compute/v1/projects/{}/regions/us-central1/subnetworks/subnet-data",
+                    fixtures::GCP_PROJECT
+                )
+                .as_str()
+                .into(),
+            ),
+            &Edge::AttachedTo,
+        );
+
         assert_edge(
             &builder,
             &Node::GenericHostname("run.globex.app".into()),
@@ -353,9 +379,29 @@ mod tests {
                 .into(),
         );
 
-        assert_edge(&builder, &vm, &nic, &Edge::ConnectsTo);
+        assert_edge(&builder, &vm, &nic, &Edge::HasIp);
         assert_edge(&builder, &vnet, &subnet, &Edge::Contains);
         assert_edge(&builder, &subnet, &nsg, &Edge::ConnectsTo);
+
+        assert_edge(
+            &builder,
+            &nic,
+            &Node::GenericIpAddress("10.20.1.4".into()),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(&builder, &nic, &subnet, &Edge::AttachedTo);
+
+        let balancer = Node::AzureLoadBalancer(
+            azure_id("Microsoft.Network/loadBalancers/lb-globex")
+                .as_str()
+                .into(),
+        );
+        let pip = Node::AzurePublicIpAddress(
+            azure_id("Microsoft.Network/publicIPAddresses/pip-globex")
+                .as_str()
+                .into(),
+        );
+        assert_edge(&builder, &balancer, &pip, &Edge::HasIp);
 
         assert_edge(
             &builder,
@@ -372,11 +418,7 @@ mod tests {
 
         assert_edge(
             &builder,
-            &Node::AzurePublicIpAddress(
-                azure_id("Microsoft.Network/publicIPAddresses/pip-globex")
-                    .as_str()
-                    .into(),
-            ),
+            &pip,
             &Node::GenericIpAddress("198.51.100.10".into()),
             &Edge::ConnectsTo,
         );

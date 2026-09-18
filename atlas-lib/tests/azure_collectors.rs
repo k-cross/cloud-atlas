@@ -134,6 +134,116 @@ fn vnet_extracts_inline_subnets_with_nsg() {
     );
 }
 
+// ARG spells these two `IP` where serde's camelCase would spell them `Ip`, and
+// an all-`None` row would read as a NIC that holds no address at all.
+#[test]
+fn nic_extracts_the_addresses_its_ip_configurations_carry() {
+    let cols = map(vec![json!({
+        "id": "/subscriptions/s/.../networkInterfaces/nic1",
+        "name": "nic1",
+        "type": "microsoft.network/networkInterfaces",
+        "location": "eastus",
+        "properties": { "ipConfigurations": [ {
+            "name": "ipconfig1",
+            "properties": {
+                "privateIPAddress": "10.0.1.4",
+                "publicIPAddress": { "id": "/subscriptions/s/.../publicIPAddresses/pip1" },
+                "subnet": { "id": "/subscriptions/s/.../subnets/sn1" }
+            }
+        } ] }
+    })]);
+
+    let nics = variant!(cols, AzureNetworkInterfaces);
+    let configs = nics[0]
+        .properties
+        .as_ref()
+        .and_then(|p| p.ip_configurations.as_ref())
+        .expect("ip configurations present");
+    let properties = configs[0].properties.as_ref().expect("properties present");
+
+    assert_eq!(properties.private_ip_address.as_deref(), Some("10.0.1.4"));
+    assert_eq!(
+        properties
+            .public_ip_address
+            .as_ref()
+            .and_then(|r| r.id.as_deref()),
+        Some("/subscriptions/s/.../publicIPAddresses/pip1")
+    );
+    assert_eq!(
+        properties.subnet.as_ref().and_then(|r| r.id.as_deref()),
+        Some("/subscriptions/s/.../subnets/sn1")
+    );
+}
+
+#[test]
+fn load_balancer_extracts_its_frontend_addresses() {
+    let cols = map(vec![json!({
+        "id": "/subscriptions/s/.../loadBalancers/lb1",
+        "name": "lb1",
+        "type": "microsoft.network/loadBalancers",
+        "location": "eastus",
+        "properties": {
+            "frontendIPConfigurations": [ {
+                "name": "frontend",
+                "properties": { "publicIPAddress": { "id": "/subscriptions/s/.../publicIPAddresses/pip1" } }
+            } ],
+            "backendAddressPools": [ { "id": "/subscriptions/s/.../backendAddressPools/pool1" } ]
+        }
+    })]);
+
+    let balancers = variant!(cols, AzureLoadBalancers);
+    let configs = balancers[0]
+        .properties
+        .as_ref()
+        .and_then(|p| p.frontend_ip_configurations.as_ref())
+        .expect("frontend configurations present");
+
+    assert_eq!(
+        configs[0]
+            .properties
+            .as_ref()
+            .and_then(|p| p.public_ip_address.as_ref())
+            .and_then(|r| r.id.as_deref()),
+        Some("/subscriptions/s/.../publicIPAddresses/pip1")
+    );
+}
+
+// An internal balancer fronts a private address in a subnet instead, which is
+// the other two branches of the projector's shared configuration reader.
+#[test]
+fn an_internal_load_balancer_frontend_carries_a_private_address() {
+    let cols = map(vec![json!({
+        "id": "/subscriptions/s/.../loadBalancers/lb-internal",
+        "name": "lb-internal",
+        "type": "microsoft.network/loadBalancers",
+        "location": "eastus",
+        "properties": { "frontendIPConfigurations": [ {
+            "name": "internal",
+            "properties": {
+                "privateIPAddress": "10.0.2.10",
+                "subnet": { "id": "/subscriptions/s/.../subnets/sn1" }
+            }
+        } ] }
+    })]);
+
+    let balancers = variant!(cols, AzureLoadBalancers);
+    let properties = balancers[0]
+        .properties
+        .as_ref()
+        .and_then(|p| p.frontend_ip_configurations.as_ref())
+        .expect("frontend configurations present")[0]
+        .properties
+        .as_ref()
+        .expect("configuration properties present");
+
+    assert_eq!(properties.private_ip_address.as_deref(), Some("10.0.2.10"));
+    assert_eq!(
+        properties.subnet.as_ref().and_then(|r| r.id.as_deref()),
+        Some("/subscriptions/s/.../subnets/sn1")
+    );
+    assert!(properties.public_ip_address.is_none());
+}
+
 #[test]
 fn public_ip_extracts_ip_address() {
     let cols = map(vec![json!({

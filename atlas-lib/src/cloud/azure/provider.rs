@@ -72,6 +72,8 @@ macro_rules! azure_types {
 azure_types! {
     VirtualMachines => "microsoft.compute/virtualmachines",
     VirtualNetworks => "microsoft.network/virtualnetworks",
+    NetworkInterfaces => "microsoft.network/networkinterfaces",
+    LoadBalancers => "microsoft.network/loadbalancers",
     NetworkSecurityGroups => "microsoft.network/networksecuritygroups",
     PublicIpAddresses => "microsoft.network/publicipaddresses",
     StorageAccounts => "microsoft.storage/storageaccounts",
@@ -106,6 +108,8 @@ pub fn map_resources(
     let mut vms = Vec::new();
     let mut vnets = Vec::new();
     let mut subnets = Vec::new();
+    let mut nics = Vec::new();
+    let mut balancers = Vec::new();
     let mut nsgs = Vec::new();
     let mut pips = Vec::new();
     let mut storage = Vec::new();
@@ -208,6 +212,24 @@ pub fn map_resources(
                     subnets: subnet_ids,
                 });
             }
+            AzureType::NetworkInterfaces => {
+                let properties = res.properties.as_ref().and_then(properties_of);
+                nics.push(NetworkInterface {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                    properties,
+                });
+            }
+            AzureType::LoadBalancers => {
+                let properties = res.properties.as_ref().and_then(properties_of);
+                balancers.push(LoadBalancer {
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                    properties,
+                });
+            }
             AzureType::NetworkSecurityGroups => {
                 let properties = res.properties.as_ref().and_then(properties_of);
                 nsgs.push(NetworkSecurityGroup {
@@ -260,6 +282,8 @@ pub fn map_resources(
         MicrosoftCollection::AzureVirtualMachines(vms),
         MicrosoftCollection::AzureVirtualNetworks(vnets),
         MicrosoftCollection::AzureSubnets(subnets),
+        MicrosoftCollection::AzureNetworkInterfaces(nics),
+        MicrosoftCollection::AzureLoadBalancers(balancers),
         MicrosoftCollection::AzureNetworkSecurityGroups(nsgs),
         MicrosoftCollection::AzurePublicIpAddresses(pips),
         MicrosoftCollection::AzureStorageAccounts(storage),

@@ -121,6 +121,7 @@ nodes!(
         AzureVirtualNetwork(id) => "Azure::Network::VirtualNetwork({id})",
         AzureSubnet(id) => "Azure::Network::Subnet({id})",
         AzureNetworkInterface(id) => "Azure::Network::NetworkInterface({id})",
+        AzureLoadBalancer(id) => "Azure::Network::LoadBalancer({id})",
         AzureNetworkSecurityGroup(id) => "Azure::Network::NetworkSecurityGroup({id})",
         AzurePublicIpAddress(id) => "Azure::Network::PublicIpAddress({id})",
         AzureStorageAccount(id) => "Azure::Storage::StorageAccount({id})",

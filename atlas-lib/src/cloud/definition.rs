@@ -115,6 +115,8 @@ pub enum MicrosoftCollection {
     AzureVirtualMachines(Vec<crate::api::azure::models::VirtualMachine>),
     AzureVirtualNetworks(Vec<crate::api::azure::models::VirtualNetwork>),
     AzureSubnets(Vec<crate::api::azure::models::Subnet>),
+    AzureNetworkInterfaces(Vec<crate::api::azure::models::NetworkInterface>),
+    AzureLoadBalancers(Vec<crate::api::azure::models::LoadBalancer>),
     AzureNetworkSecurityGroups(Vec<crate::api::azure::models::NetworkSecurityGroup>),
     AzurePublicIpAddresses(Vec<crate::api::azure::models::PublicIpAddress>),
     AzureStorageAccounts(Vec<crate::api::azure::models::StorageAccount>),
