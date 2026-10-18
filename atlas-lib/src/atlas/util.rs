@@ -36,9 +36,43 @@ pub fn parse_address(value: &str) -> Option<(IpAddr, Option<u8>)> {
 }
 
 pub fn canonical_address(value: &str) -> Option<String> {
-    match parse_address(value)? {
-        (addr, Some(width)) => Some(format!("{addr}/{width}")),
-        (addr, None) => Some(addr.to_string()),
+    parse_address(value).map(|(addr, prefix)| format_address(&addr, prefix))
+}
+
+pub fn format_address(addr: &IpAddr, prefix: Option<u8>) -> String {
+    match prefix {
+        Some(width) => format!("{addr}/{width}"),
+        None => addr.to_string(),
+    }
+}
+
+const PRIVATE_V4: [(Ipv4Addr, u8); 6] = [
+    (Ipv4Addr::new(10, 0, 0, 0), 8),
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(127, 0, 0, 0), 8),
+    (Ipv4Addr::new(169, 254, 0, 0), 16),
+    (Ipv4Addr::new(172, 16, 0, 0), 12),
+    (Ipv4Addr::new(192, 168, 0, 0), 16),
+];
+
+const PRIVATE_V6: [(Ipv6Addr, u8); 3] = [
+    (Ipv6Addr::LOCALHOST, 128),
+    (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
+    (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+];
+
+pub fn is_private(addr: &IpAddr, prefix: Option<u8>) -> bool {
+    let width = prefix.unwrap_or_else(|| address_bits(addr));
+    let inside = |block: IpAddr, block_width: u8| {
+        width >= block_width && mask_to_prefix(addr, block_width) == Some(block)
+    };
+    match addr {
+        IpAddr::V4(_) => PRIVATE_V4
+            .iter()
+            .any(|(block, block_width)| inside(IpAddr::V4(*block), *block_width)),
+        IpAddr::V6(_) => PRIVATE_V6
+            .iter()
+            .any(|(block, block_width)| inside(IpAddr::V6(*block), *block_width)),
     }
 }
 

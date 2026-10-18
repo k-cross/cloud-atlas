@@ -405,7 +405,7 @@ mod tests {
     const MINUTE: i64 = 60 * 1_000;
 
     fn ip(addr: &str) -> Node {
-        Node::ip(addr)
+        Node::ip(addr, "vpc-test")
     }
 
     fn flow(src: &str, dst: &str, at: i64) -> FlowObservation {

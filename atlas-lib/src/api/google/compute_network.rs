@@ -43,6 +43,7 @@ pub struct ForwardingRule {
     pub name: Option<String>,
     #[serde(rename = "IPAddress")]
     pub ip_address: Option<String>,
+    pub network: Option<String>,
     pub target: Option<String>,
     pub self_link: Option<String>,
 }

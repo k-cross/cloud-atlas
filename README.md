@@ -11,7 +11,7 @@ Discovers cloud configuration and keeps a live, in-memory property graph of the 
 - **Service topology**: derived `Edge::Serves` links collapse load balancer → interface → address → instance paths into one edge, `inferred` from wiring and `confirmed` by traffic. See [`docs/service_topology_design.md`](docs/service_topology_design.md).
 - **Interactive rendering** (`atlas-render/`): a WebAssembly force-directed layout feeding a Sigma.js WebGL frontend. See [`atlas-render/README.md`](atlas-render/README.md).
 
-Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together, e.g. Route 53 resolving to an Azure App Service or GCP Cloud Run. DNS from every provider reads `name -ResolvesTo-> record -ResolvesTo-> target`, so records for the same name in different providers meet at one node.
+Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together, e.g. Route 53 resolving to an Azure App Service or GCP Cloud Run. A private address is scoped to the network it was read in (`GenericPrivateIpAddress`), so `10.0.1.5` in one VPC never joins `10.0.1.5` in another; only public addresses cross networks. DNS from every provider reads `name -ResolvesTo-> record -ResolvesTo-> target`, so records for the same name in different providers meet at one node.
 
 ## Goals
 

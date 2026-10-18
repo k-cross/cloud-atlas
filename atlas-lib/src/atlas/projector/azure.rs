@@ -5,10 +5,12 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::MicrosoftCollection;
 use petgraph::graph::NodeIndex;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
     project_parallel(builder, azure_data, project_microsoft_collection);
+    link_rule_destinations(builder, azure_data);
 }
 
 // Resource Graph echoes one resource's id with whatever casing the JSON that
@@ -89,73 +91,45 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
         MicrosoftCollection::AzureNetworkInterfaces(nics) => {
             for nic in nics {
                 if let Some(id) = &nic.id {
-                    let idx = builder
-                        .get_or_add_node(Node::AzureNetworkInterface(canonical_azure_id(id)));
+                    let id = canonical_azure_id(id);
+                    let idx = builder.get_or_add_node(Node::AzureNetworkInterface(id.clone()));
                     let configs = nic
                         .properties
                         .as_ref()
                         .and_then(|p| p.ip_configurations.as_deref());
-                    project_ip_configurations(builder, idx, configs);
+                    project_ip_configurations(builder, idx, &id, configs);
                 }
             }
         }
         MicrosoftCollection::AzureLoadBalancers(balancers) => {
             for balancer in balancers {
                 if let Some(id) = &balancer.id {
-                    let idx =
-                        builder.get_or_add_node(Node::AzureLoadBalancer(canonical_azure_id(id)));
+                    let id = canonical_azure_id(id);
+                    let idx = builder.get_or_add_node(Node::AzureLoadBalancer(id.clone()));
                     let configs = balancer
                         .properties
                         .as_ref()
                         .and_then(|p| p.frontend_ip_configurations.as_deref());
-                    project_ip_configurations(builder, idx, configs);
+                    project_ip_configurations(builder, idx, &id, configs);
                 }
             }
         }
         MicrosoftCollection::AzureNetworkSecurityGroups(nsgs) => {
             for nsg in nsgs {
                 if let Some(id) = &nsg.id {
-                    let idx = builder
+                    builder
                         .get_or_add_node(Node::AzureNetworkSecurityGroup(canonical_azure_id(id)));
-
-                    if let Some(props) = &nsg.properties
-                        && let Some(rules) = &props.security_rules
-                    {
-                        for rule in rules {
-                            if let Some(rprops) = &rule.properties
-                                && let Some(direction) = &rprops.direction
-                                && direction.eq_ignore_ascii_case("Outbound")
-                            {
-                                let destinations = rprops
-                                    .destination_address_prefix
-                                    .iter()
-                                    .chain(rprops.destination_address_prefixes.iter().flatten());
-
-                                for dest in destinations {
-                                    if is_service_tag(dest) {
-                                        builder.link_to(
-                                            idx,
-                                            Node::AzureServiceTag(dest.as_str().into()),
-                                            Edge::RoutesTo,
-                                        );
-                                    } else if !is_large_cidr(dest) {
-                                        builder.link_to(idx, Node::ip(dest), Edge::RoutesTo);
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
         MicrosoftCollection::AzurePublicIpAddresses(pips) => {
             for pip in pips {
                 if let Some(id) = &pip.id {
-                    let idx =
-                        builder.get_or_add_node(Node::AzurePublicIpAddress(canonical_azure_id(id)));
+                    let id = canonical_azure_id(id);
+                    let idx = builder.get_or_add_node(Node::AzurePublicIpAddress(id.clone()));
 
                     if let Some(ip) = &pip.ip_address {
-                        builder.link_to(idx, Node::ip(ip), Edge::ConnectsTo);
+                        builder.link_to(idx, Node::ip(ip, &id), Edge::ConnectsTo);
                     }
                 }
             }
@@ -215,6 +189,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
 fn project_ip_configurations(
     builder: &mut GraphBuilder,
     idx: NodeIndex,
+    owner: &Arc<str>,
     configs: Option<&[IpConfiguration]>,
 ) {
     for config in configs.unwrap_or_default() {
@@ -223,7 +198,13 @@ fn project_ip_configurations(
         };
 
         if let Some(private_ip) = &properties.private_ip_address {
-            builder.link_to(idx, Node::ip(private_ip), Edge::ConnectsTo);
+            let network = properties
+                .subnet
+                .as_ref()
+                .and_then(|r| r.id.as_deref())
+                .and_then(virtual_network_of)
+                .unwrap_or_else(|| owner.clone());
+            builder.link_to(idx, Node::ip(private_ip, &network), Edge::ConnectsTo);
         }
 
         if let Some(public_ip_id) = properties
@@ -244,6 +225,83 @@ fn project_ip_configurations(
                 Node::AzureSubnet(canonical_azure_id(subnet_id)),
                 Edge::AttachedTo,
             );
+        }
+    }
+}
+
+fn virtual_network_of(subnet_id: &str) -> Option<Arc<str>> {
+    let subnet_id = canonical_azure_id(subnet_id);
+    subnet_id
+        .find("/subnets/")
+        .map(|at| Arc::from(&subnet_id[..at]))
+}
+
+fn link_rule_destinations(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
+    let mut networks: HashMap<Arc<str>, Vec<Arc<str>>> = HashMap::new();
+    for collection in azure_data {
+        if let MicrosoftCollection::AzureSubnets(subnets) = collection {
+            for subnet in subnets {
+                if let (Some(nsg_id), Some(vnet_id)) =
+                    (&subnet.network_security_group_id, &subnet.vnet_id)
+                {
+                    networks
+                        .entry(canonical_azure_id(nsg_id))
+                        .or_default()
+                        .push(canonical_azure_id(vnet_id));
+                }
+            }
+        }
+    }
+    for scopes in networks.values_mut() {
+        scopes.sort();
+        scopes.dedup();
+    }
+
+    for collection in azure_data {
+        let MicrosoftCollection::AzureNetworkSecurityGroups(nsgs) = collection else {
+            continue;
+        };
+        for nsg in nsgs {
+            let Some(id) = &nsg.id else {
+                continue;
+            };
+            let id = canonical_azure_id(id);
+            let scopes = networks
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| vec![id.clone()]);
+            let idx = builder.get_or_add_node(Node::AzureNetworkSecurityGroup(id));
+
+            let outbound = nsg
+                .properties
+                .iter()
+                .flat_map(|props| props.security_rules.iter().flatten())
+                .filter_map(|rule| rule.properties.as_ref())
+                .filter(|rprops| {
+                    rprops
+                        .direction
+                        .as_deref()
+                        .is_some_and(|d| d.eq_ignore_ascii_case("Outbound"))
+                });
+            for rprops in outbound {
+                let destinations = rprops
+                    .destination_address_prefix
+                    .iter()
+                    .chain(rprops.destination_address_prefixes.iter().flatten());
+                for dest in destinations {
+                    if is_service_tag(dest) {
+                        builder.link_to(
+                            idx,
+                            Node::AzureServiceTag(dest.as_str().into()),
+                            Edge::RoutesTo,
+                        );
+                    } else if !is_large_cidr(dest) {
+                        for scope in &scopes {
+                            builder.link_to(idx, Node::ip(dest, scope), Edge::RoutesTo);
+                        }
+                    }
+                }
+            }
         }
     }
 }

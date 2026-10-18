@@ -1,6 +1,10 @@
 use crate::atlas::collection::CollectionSource;
-use crate::atlas::definition::Node;
+use crate::atlas::definition::{Edge, Node};
 use crate::atlas::flow::{FlowAction, FlowObservation};
+use petgraph::graph::Graph;
+use petgraph::visit::EdgeRef;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 const SOURCE: CollectionSource = CollectionSource::Aws;
 
@@ -34,6 +38,7 @@ pub struct Layout {
     log_status: Option<usize>,
     instance: Option<usize>,
     interface: Option<usize>,
+    vpc: Option<usize>,
     width: usize,
 }
 
@@ -64,6 +69,7 @@ impl Layout {
             log_status: None,
             instance: None,
             interface: None,
+            vpc: None,
             width: 0,
         };
         for (column, field) in fields.enumerate() {
@@ -80,6 +86,7 @@ impl Layout {
                 "log-status" => &mut layout.log_status,
                 "instance-id" => &mut layout.instance,
                 "interface-id" => &mut layout.interface,
+                "vpc-id" => &mut layout.vpc,
                 _ => continue,
             };
             *slot = Some(column);
@@ -98,20 +105,48 @@ fn is_field_name(token: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct InterfaceNetworks(HashMap<Arc<str>, Arc<str>>);
+
+impl InterfaceNetworks {
+    pub fn read(graph: &Graph<Node, Edge>) -> Self {
+        let mut networks = HashMap::new();
+        for edge in graph
+            .edge_references()
+            .filter(|e| e.weight() == &Edge::ConnectsTo)
+        {
+            if let (Node::AwsEc2Eni(interface), Node::GenericPrivateIpAddress { network, .. }) =
+                (&graph[edge.source()], &graph[edge.target()])
+            {
+                networks
+                    .entry(interface.clone())
+                    .or_insert_with(|| network.clone());
+            }
+        }
+        Self(networks)
+    }
+
+    fn of(&self, interface: &str) -> Option<&str> {
+        self.0.get(interface).map(|network| network.as_ref())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Skip {
     NoData,
     Unusable,
+    Unplaced,
 }
 
 pub struct Parsed {
     pub observations: Vec<FlowObservation>,
     pub unusable: usize,
+    pub unplaced: usize,
     pub dropped: usize,
     pub unusable_layout: bool,
 }
 
-pub fn parse(text: &str, scope: &str, limit: usize) -> Parsed {
+pub fn parse(text: &str, scope: &str, limit: usize, networks: &InterfaceNetworks) -> Parsed {
     let mut lines = text
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -130,6 +165,7 @@ pub fn parse(text: &str, scope: &str, limit: usize) -> Parsed {
         return Parsed {
             observations: Vec::new(),
             unusable: 0,
+            unplaced: 0,
             dropped: 0,
             unusable_layout: true,
         };
@@ -137,28 +173,36 @@ pub fn parse(text: &str, scope: &str, limit: usize) -> Parsed {
 
     let mut observations = Vec::new();
     let mut unusable = 0;
+    let mut unplaced = 0;
     let mut dropped = 0;
     for line in lines {
         if observations.len() >= limit {
             dropped += 1;
             continue;
         }
-        match record(&layout, line, scope) {
+        match record(&layout, line, scope, networks) {
             Ok(observation) => observations.push(observation),
             Err(Skip::NoData) => {}
             Err(Skip::Unusable) => unusable += 1,
+            Err(Skip::Unplaced) => unplaced += 1,
         }
     }
 
     Parsed {
         observations,
         unusable,
+        unplaced,
         dropped,
         unusable_layout: false,
     }
 }
 
-fn record(layout: &Layout, line: &str, scope: &str) -> Result<FlowObservation, Skip> {
+fn record(
+    layout: &Layout,
+    line: &str,
+    scope: &str,
+    networks: &InterfaceNetworks,
+) -> Result<FlowObservation, Skip> {
     let columns: Vec<&str> = line.split_whitespace().collect();
     if columns.len() < layout.width {
         return Err(Skip::Unusable);
@@ -201,19 +245,32 @@ fn record(layout: &Layout, line: &str, scope: &str) -> Result<FlowObservation, S
         _ => None,
     };
 
+    let interface = layout.interface.and_then(|at| value(&columns, at));
+    let network = layout
+        .vpc
+        .and_then(|at| value(&columns, at))
+        .or_else(|| interface.and_then(|id| networks.of(id)));
+    let endpoint = |address: &str| match network {
+        Some(network) => Some(Node::ip(address, network)),
+        None => Node::public_ip(address),
+    };
+    let (Some(src), Some(dst)) = (endpoint(src), endpoint(dst)) else {
+        return Err(Skip::Unplaced);
+    };
+
     let mut resources = Vec::new();
     if let Some(id) = layout.instance.and_then(|at| value(&columns, at)) {
         resources.push(Node::AwsEc2Instance(id.into()));
     }
-    if let Some(id) = layout.interface.and_then(|at| value(&columns, at)) {
+    if let Some(id) = interface {
         resources.push(Node::AwsEc2Eni(id.into()));
     }
 
     Ok(FlowObservation {
         source: SOURCE,
         scope: scope.to_owned(),
-        src: Node::ip(src),
-        dst: Node::ip(dst),
+        src,
+        dst,
         src_port: port(layout.src_port),
         dst_port: port(layout.dst_port),
         resources,
@@ -232,7 +289,7 @@ fn value<'a>(columns: &[&'a str], at: usize) -> Option<&'a str> {
 }
 
 pub mod stream {
-    use super::{SOURCE, parse};
+    use super::{InterfaceNetworks, SOURCE, parse};
     use crate::atlas::collection::{CollectionReport, FailureKind};
     use crate::atlas::flow::FlowObservation;
     use crate::cloud::amazon::sqs::feed::{self, unwrap_sns};
@@ -315,7 +372,7 @@ pub mod stream {
             format!("{}/flow-logs", self.region)
         }
 
-        pub async fn receive(&self) -> FlowBatch {
+        pub async fn receive(&self, networks: &InterfaceNetworks) -> FlowBatch {
             let mut report = CollectionReport::default();
 
             let response = self
@@ -347,7 +404,7 @@ pub mod stream {
                 let body = message.body.as_deref().unwrap_or_default();
                 let mut readable = true;
                 for (bucket, key) in objects(body, &mut report, &self.scope()) {
-                    match self.read_object(&bucket, &key, &mut report).await {
+                    match self.read_object(&bucket, &key, &mut report, networks).await {
                         Some(mut fetched) => observations.append(&mut fetched),
                         None => readable = false,
                     }
@@ -378,6 +435,7 @@ pub mod stream {
             bucket: &str,
             key: &str,
             report: &mut CollectionReport,
+            networks: &InterfaceNetworks,
         ) -> Option<Vec<FlowObservation>> {
             let scope = self.scope();
             let object = self
@@ -462,7 +520,7 @@ pub mod stream {
                 }
             };
 
-            let parsed = parse(&text, &self.region, Self::MAX_RECORDS);
+            let parsed = parse(&text, &self.region, Self::MAX_RECORDS, networks);
             if parsed.unusable_layout {
                 report.note(
                     SOURCE,
@@ -482,6 +540,19 @@ pub mod stream {
                     format!(
                         "s3://{bucket}/{key}: dropped {} unreadable record(s)",
                         parsed.unusable
+                    ),
+                );
+            }
+            if parsed.unplaced > 0 {
+                report.note(
+                    SOURCE,
+                    FailureKind::Malformed,
+                    &scope,
+                    format!(
+                        "s3://{bucket}/{key}: dropped {} record(s) naming a private address \
+                         with no network to read it in (no vpc-id, and the interface is not \
+                         in the scan)",
+                        parsed.unplaced
                     ),
                 );
             }

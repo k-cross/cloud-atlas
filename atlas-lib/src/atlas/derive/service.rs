@@ -21,7 +21,19 @@ pub(super) const INFERRED: &str = "inferred";
 // land their `Serves` edges come from observed traffic alone, which phase 1d
 // made possible by giving both clouds' resources their addresses. Asymmetric on
 // purpose.
-const CHAINS: &[&[&str]] = &[&["AwsElbLoadBalancer", "AwsElbTargetGroup", "AwsEc2Instance"]];
+const CHAINS: &[&[&str]] = &[
+    &["AwsElbLoadBalancer", "AwsElbTargetGroup", "AwsEc2Instance"],
+    &[
+        "AwsElbLoadBalancer",
+        "AwsElbTargetGroup",
+        "GenericPrivateIpAddress",
+    ],
+    &[
+        "AwsElbLoadBalancer",
+        "AwsElbTargetGroup",
+        "GenericIpAddress",
+    ],
+];
 
 pub(super) fn link(builder: &mut GraphBuilder, flows: &FlowIndex) {
     for serving in served(&builder.graph, flows) {
@@ -117,7 +129,7 @@ fn served(graph: &Graph<Node, Edge>, flows: &FlowIndex) -> Vec<Serving> {
         }
     }
 
-    for (source, target) in wired(graph) {
+    for (source, target) in wired(graph, &owners) {
         pairs.entry((source, target)).or_default();
     }
 
@@ -138,7 +150,10 @@ fn served(graph: &Graph<Node, Edge>, flows: &FlowIndex) -> Vec<Serving> {
 // kinds discriminate; the walk follows any *projected* edge, since a chain is
 // the scan's own evidence — matching through a derived edge would let the pass
 // feed on its own output.
-fn wired(graph: &Graph<Node, Edge>) -> Vec<(NodeIndex, NodeIndex)> {
+fn wired(
+    graph: &Graph<Node, Edge>,
+    owners: &HashMap<NodeIndex, Vec<NodeIndex>>,
+) -> Vec<(NodeIndex, NodeIndex)> {
     let mut ends = Vec::new();
     for pattern in CHAINS {
         let Some((first, rest)) = pattern.split_first() else {
@@ -148,7 +163,7 @@ fn wired(graph: &Graph<Node, Edge>) -> Vec<(NodeIndex, NodeIndex)> {
             .node_indices()
             .filter(|index| graph[*index].kind() == *first)
         {
-            walk(graph, start, rest, start, &mut ends);
+            walk(graph, owners, start, rest, start, &mut ends);
         }
     }
     ends
@@ -156,14 +171,22 @@ fn wired(graph: &Graph<Node, Edge>) -> Vec<(NodeIndex, NodeIndex)> {
 
 fn walk(
     graph: &Graph<Node, Edge>,
+    owners: &HashMap<NodeIndex, Vec<NodeIndex>>,
     at: NodeIndex,
     remaining: &[&str],
     start: NodeIndex,
     ends: &mut Vec<(NodeIndex, NodeIndex)>,
 ) {
     let Some((kind, rest)) = remaining.split_first() else {
-        if at != start {
-            ends.push((start, at));
+        let targets = if graph[at].owner().is_none() {
+            owners.get(&at).map_or(&[][..], Vec::as_slice)
+        } else {
+            std::slice::from_ref(&at)
+        };
+        for &target in targets {
+            if target != start {
+                ends.push((start, target));
+            }
         }
         return;
     };
@@ -172,7 +195,7 @@ fn walk(
         .filter(|edge| edge.weight().is_projected())
     {
         if graph[edge.target()].kind() == *kind {
-            walk(graph, edge.target(), rest, start, ends);
+            walk(graph, owners, edge.target(), rest, start, ends);
         }
     }
 }
@@ -318,7 +341,9 @@ mod tests {
     fn a_holder_reached_two_ways_is_one_owner() {
         let builder = fixtures::build_graph();
         let owners = address_owners(&builder.graph);
-        let public = builder.index_of(&Node::ip("203.0.113.50")).unwrap();
+        let public = builder
+            .index_of(&Node::ip("203.0.113.50", fixtures::AWS_NETWORK))
+            .unwrap();
 
         let names: Vec<&Node> = owners[&public].iter().map(|i| &builder.graph[*i]).collect();
         assert_eq!(names, vec![&Node::AwsEc2NatGateway("nat-globex".into())]);
@@ -366,17 +391,24 @@ mod tests {
     #[test]
     fn the_other_clouds_compute_is_named_by_the_addresses_it_holds() {
         let builder = fixtures::build_graph();
-        let web01 = Node::AwsEc2Instance("i-globex-web-01".into());
         let web02 = Node::AwsEc2Instance("i-globex-web-02".into());
+        let vm = Node::AzureVirtualMachine(azure_networking_id(
+            "Microsoft.Compute/virtualMachines/vm-worker",
+        ));
 
-        assert!(
-            serves(
-                &builder,
-                &web01,
-                &Node::AzureVirtualMachine(azure_networking_id(
-                    "Microsoft.Compute/virtualMachines/vm-worker",
-                )),
-            ),
+        let nic_address = builder
+            .index_of(&Node::ip(
+                "10.20.1.4",
+                &azure_networking_id("Microsoft.Network/virtualNetworks/vnet-globex"),
+            ))
+            .expect("the NIC holds its address in its own network");
+        let owners: Vec<&Node> = address_owners(&builder.graph)[&nic_address]
+            .iter()
+            .map(|i| &builder.graph[*i])
+            .collect();
+        assert_eq!(
+            owners,
+            vec![&vm],
             "the address is the NIC's, and the NIC is the machine's"
         );
         assert!(
@@ -426,7 +458,7 @@ mod tests {
         let builder = fixtures::build_graph();
         // A firewall rule names this address as a destination it allows, which
         // is not the same as holding it — nothing in the estate answers on it.
-        let external = Node::ip("192.0.2.55");
+        let external = Node::ip("192.0.2.55", fixtures::AWS_NETWORK);
         let index = builder
             .index_of(&external)
             .expect("the fixture's internet endpoint is still a pivot");
@@ -488,12 +520,20 @@ mod tests {
         );
     }
 
-    fn status_of(observations: &[RenderObservation], target: &str) -> &'static str {
+    fn status_between(
+        observations: &[RenderObservation],
+        balancer: &str,
+        target: &str,
+    ) -> &'static str {
         observations
             .iter()
-            .find(|o| o.key.contains("app/globex/1") && o.key.ends_with(&format!("{target})")))
-            .unwrap_or_else(|| panic!("the balancer should serve {target}"))
+            .find(|o| o.key.contains(balancer) && o.key.ends_with(&format!("{target})")))
+            .unwrap_or_else(|| panic!("{balancer} should serve {target}"))
             .status
+    }
+
+    fn status_of(observations: &[RenderObservation], target: &str) -> &'static str {
+        status_between(observations, "app/globex/1", target)
     }
 
     #[test]
@@ -534,6 +574,28 @@ mod tests {
         let observations = observations(&builder.graph, &fixtures::observed());
         assert_eq!(status_of(&observations, "i-globex-web-03"), INFERRED);
         assert_eq!(status_of(&observations, "i-globex-web-01"), CONFIRMED);
+    }
+
+    #[test]
+    fn an_ip_target_resolves_through_the_owner_of_its_address() {
+        let builder = fixtures::build_graph();
+        let nlb = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/globex-db/1".into(),
+        );
+        let rds = Node::AwsEc2Eni("eni-globex-rds-1a".into());
+
+        assert!(serves(&builder, &nlb, &rds));
+        let observations = observations(&builder.graph, &fixtures::observed());
+        assert_eq!(
+            status_between(&observations, "net/globex-db/1", "eni-globex-rds-1a"),
+            INFERRED
+        );
+        assert!(
+            !serves_any(&builder, |source, target| {
+                source.owner().is_none() || target.owner().is_none()
+            }),
+            "a pivot at the end of a chain is resolved, never emitted as an endpoint"
+        );
     }
 
     // The transition the two provenances exist to express: the wiring outlives
@@ -595,6 +657,143 @@ mod tests {
     }
 
     #[test]
+    fn a_private_address_seen_from_another_network_names_nothing_there() {
+        let builder = fixtures::build_graph();
+        let web01 = Node::AwsEc2Instance("i-globex-web-01".into());
+        let web02 = Node::AwsEc2Instance("i-globex-web-02".into());
+
+        assert!(!serves(
+            &builder,
+            &web01,
+            &Node::AzureVirtualMachine(azure_networking_id(
+                "Microsoft.Compute/virtualMachines/vm-worker",
+            )),
+        ));
+        assert!(!serves(
+            &builder,
+            &web02,
+            &Node::GcpSqlInstance("globex-analytics-db".into()),
+        ));
+    }
+
+    fn overlapping_estate(target_running: bool) -> GraphBuilder {
+        use crate::cloud::definition::{AWSLoadBalancing, AmazonCollection, Provider};
+        use aws_sdk_ec2::types::{
+            Instance, NetworkInterface, NetworkInterfaceAttachment,
+            NetworkInterfacePrivateIpAddress,
+        };
+        use aws_sdk_elasticloadbalancingv2::types::{
+            Action, Listener, LoadBalancer, TargetDescription, TargetGroup,
+            TargetHealthDescription, TargetTypeEnum,
+        };
+
+        let lb_arn = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/front/1";
+        let tg_arn = "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/back/1";
+        let interface = |id: &str, vpc: &str, instance: &str| {
+            NetworkInterface::builder()
+                .network_interface_id(id)
+                .vpc_id(vpc)
+                .subnet_id(format!("subnet-{vpc}"))
+                .private_ip_addresses(
+                    NetworkInterfacePrivateIpAddress::builder()
+                        .private_ip_address("10.0.1.5")
+                        .build(),
+                )
+                .attachment(
+                    NetworkInterfaceAttachment::builder()
+                        .instance_id(instance)
+                        .build(),
+                )
+                .build()
+        };
+        let mut running = vec![Instance::builder().instance_id("i-other").build()];
+        if target_running {
+            running.push(Instance::builder().instance_id("i-target").build());
+        }
+
+        let mut builder = GraphBuilder::new();
+        crate::atlas::projector::build(
+            &mut builder,
+            &Provider::AWS(
+                [
+                    AmazonCollection::AmazonNetworkInterfaces(vec![
+                        interface("eni-target", "vpc-a", "i-target"),
+                        interface("eni-other", "vpc-b", "i-other"),
+                    ]),
+                    AmazonCollection::AmazonInstances(running),
+                    AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
+                        load_balancers: vec![
+                            LoadBalancer::builder()
+                                .load_balancer_arn(lb_arn)
+                                .vpc_id("vpc-a")
+                                .build(),
+                        ],
+                        target_groups: vec![
+                            TargetGroup::builder()
+                                .target_group_arn(tg_arn)
+                                .target_type(TargetTypeEnum::Ip)
+                                .vpc_id("vpc-a")
+                                .build(),
+                        ],
+                        listeners: vec![
+                            Listener::builder()
+                                .load_balancer_arn(lb_arn)
+                                .default_actions(Action::builder().target_group_arn(tg_arn).build())
+                                .build(),
+                        ],
+                        target_health: HashMap::from([(
+                            tg_arn.to_owned(),
+                            vec![
+                                TargetHealthDescription::builder()
+                                    .target(TargetDescription::builder().id("10.0.1.5").build())
+                                    .build(),
+                            ],
+                        )]),
+                    }),
+                ]
+                .into_iter()
+                .map(|collection| ("us-east-1".to_owned(), collection))
+                .collect(),
+            ),
+            &crate::Settings::default(),
+        );
+        super::super::all(&mut builder, &FlowIndex::default());
+        builder
+    }
+
+    fn front() -> Node {
+        Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/front/1".into(),
+        )
+    }
+
+    #[test]
+    fn an_ip_target_is_served_only_by_the_holder_in_its_own_network() {
+        let builder = overlapping_estate(true);
+
+        assert!(serves(
+            &builder,
+            &front(),
+            &Node::AwsEc2Instance("i-target".into())
+        ));
+        assert!(!serves(
+            &builder,
+            &front(),
+            &Node::AwsEc2Instance("i-other".into())
+        ));
+    }
+
+    #[test]
+    fn a_stopped_ip_target_is_not_inferred() {
+        let builder = overlapping_estate(false);
+
+        assert!(
+            !serves_any(&builder, |source, _| source == &front()),
+            "the stopped instance's interface is not a service of its own"
+        );
+    }
+
+    #[test]
     fn traffic_alone_never_claims_a_target_is_registered() {
         let builder = fixtures::build_graph();
         let observations = observations(&builder.graph, &fixtures::observed());
@@ -645,8 +844,8 @@ mod tests {
             flows.observe(&FlowObservation {
                 source: crate::atlas::collection::CollectionSource::Aws,
                 scope: "us-east-1".to_owned(),
-                src: Node::ip("10.10.1.50"),
-                dst: Node::ip(dst),
+                src: Node::ip("10.10.1.50", fixtures::AWS_NETWORK),
+                dst: Node::ip(dst, fixtures::AWS_NETWORK),
                 src_port: Some(43122),
                 dst_port: Some(8080),
                 resources: Vec::new(),

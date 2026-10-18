@@ -19,7 +19,7 @@ pub fn aws_projector(
     });
     let scanned = scanned_instances(aws_data);
     link_interface_owners(builder, aws_data, &scanned);
-    link_instance_targets(builder, aws_data, &scanned);
+    link_targets(builder, aws_data, &scanned);
 }
 
 // DescribeInstances is filtered to running/pending, but a *stopped* instance is
@@ -41,12 +41,14 @@ fn scanned_instances(aws_data: &[(String, AmazonCollection)]) -> HashSet<&str> {
 }
 
 // A registered target is only evidence the instance is wired up, not that it
-// exists in the scan: a stopped instance stays registered.
-fn link_instance_targets(
+// exists in the scan: a stopped instance stays registered, by id or by the
+// address of its interface.
+fn link_targets(
     builder: &mut GraphBuilder,
     aws_data: &[(String, AmazonCollection)],
     scanned: &HashSet<&str>,
 ) {
+    let held_by_unscanned = addresses_of_unscanned_instances(aws_data, scanned);
     for (_, collection) in aws_data {
         let AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
             target_groups,
@@ -56,31 +58,73 @@ fn link_instance_targets(
         else {
             continue;
         };
-        for tg in target_groups
-            .iter()
-            .filter(|tg| tg.target_type() == Some(&TargetTypeEnum::Instance))
-        {
+        for tg in target_groups {
             let Some(arn) = tg.target_group_arn() else {
                 continue;
             };
             let Some(health_descriptions) = target_health.get(arn) else {
                 continue;
             };
-            for target_id in health_descriptions
+            let targets = health_descriptions
                 .iter()
                 .filter_map(|h| h.target())
-                .filter_map(|t| t.id())
-                .filter(|id| scanned.contains(id))
-            {
+                .filter_map(|t| t.id());
+            let linked: Vec<(Node, Edge)> = match tg.target_type() {
+                Some(TargetTypeEnum::Instance) => targets
+                    .filter(|id| scanned.contains(id))
+                    .map(|id| (Node::AwsEc2Instance(id.into()), Edge::ConnectsTo))
+                    .collect(),
+                // The group routes to this address; it does not hold it.
+                // `ConnectsTo` to a pivot means holding, and would make the
+                // group a Serves endpoint.
+                Some(TargetTypeEnum::Ip) => {
+                    let network = tg.vpc_id().unwrap_or(arn);
+                    targets
+                        .map(|address| Node::ip(address, network))
+                        .filter(|address| !held_by_unscanned.contains(address))
+                        .map(|address| (address, Edge::RoutesTo))
+                        .collect()
+                }
+                // A Lambda target is a function ARN and an ALB target a
+                // balancer ARN. Neither is an instance, and an unknown type is
+                // not evidence of one.
+                _ => Vec::new(),
+            };
+            for (target, edge) in linked {
                 let tg_idx = builder.get_or_add_node(Node::AwsElbTargetGroup(arn.into()));
-                builder.link_to(
-                    tg_idx,
-                    Node::AwsEc2Instance(target_id.into()),
-                    Edge::ConnectsTo,
-                );
+                builder.link_to(tg_idx, target, edge);
             }
         }
     }
+}
+
+fn addresses_of_unscanned_instances(
+    aws_data: &[(String, AmazonCollection)],
+    scanned: &HashSet<&str>,
+) -> HashSet<Node> {
+    aws_data
+        .iter()
+        .filter_map(|(_, collection)| match collection {
+            AmazonCollection::AmazonNetworkInterfaces(interfaces) => Some(interfaces),
+            _ => None,
+        })
+        .flatten()
+        .filter(|eni| {
+            eni.attachment()
+                .and_then(|a| a.instance_id())
+                .is_some_and(|instance_id| !scanned.contains(instance_id))
+        })
+        .filter_map(|eni| {
+            let id = eni.network_interface_id()?;
+            let network = eni.vpc_id().unwrap_or(id);
+            Some(
+                interface_addresses(eni)
+                    .into_iter()
+                    .map(move |address| Node::ip(address, network)),
+            )
+        })
+        .flatten()
+        .collect()
 }
 
 // The two owner edges an interface cannot decide on its own, because each needs
@@ -183,6 +227,7 @@ fn project_amazon_collection(
                             .filter_map(|eni| {
                                 Some(EniFacts {
                                     id: eni.network_interface_id()?,
+                                    vpc_id: eni.vpc_id(),
                                     subnet_id: eni.subnet_id(),
                                     private_ip: eni.private_ip_address(),
                                 })
@@ -263,7 +308,7 @@ fn project_amazon_collection(
             load_balancers,
             target_groups,
             listeners,
-            target_health,
+            ..
         }) => {
             for lb in load_balancers {
                 if let Some(arn) = lb.load_balancer_arn() {
@@ -285,30 +330,6 @@ fn project_amazon_collection(
 
                     if let Some(vpc_id) = tg.vpc_id() {
                         builder.link_from(tg_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
-                    }
-
-                    if let Some(health_descriptions) = target_health.get(arn) {
-                        let targets = health_descriptions
-                            .iter()
-                            .filter_map(|h| h.target())
-                            .filter_map(|t| t.id());
-                        match tg.target_type() {
-                            // Needs the instance collection; see
-                            // link_instance_targets.
-                            Some(TargetTypeEnum::Instance) => {}
-                            // The group routes to this address; it does not
-                            // hold it. `ConnectsTo` to a pivot means holding,
-                            // and would make the group a Serves endpoint.
-                            Some(TargetTypeEnum::Ip) => {
-                                for target_id in targets {
-                                    builder.link_to(tg_idx, Node::ip(target_id), Edge::RoutesTo);
-                                }
-                            }
-                            // A Lambda target is a function ARN and an ALB
-                            // target a balancer ARN. Neither is an instance,
-                            // and an unknown type is not evidence of one.
-                            _ => {}
-                        }
                     }
                 }
             }
@@ -359,7 +380,7 @@ fn project_amazon_collection(
                 for r in rs.resource_records() {
                     let val = r.value();
                     let pivot_node = if is_ip {
-                        Node::ip(val)
+                        Node::ip(val, rs.name())
                     } else {
                         Node::hostname(val)
                     };
@@ -486,7 +507,7 @@ fn project_amazon_collection(
                 if let Some(alloc) = addr.allocation_id().or_else(|| addr.public_ip()) {
                     let eip_idx = builder.get_or_add_node(Node::AwsEc2Eip(alloc.into()));
                     if let Some(public_ip) = addr.public_ip() {
-                        builder.link_to(eip_idx, Node::ip(public_ip), Edge::ConnectsTo);
+                        builder.link_to(eip_idx, Node::ip(public_ip, alloc), Edge::ConnectsTo);
                     }
                     // The interface is what holds an associated address, and
                     // through it whatever holds the interface. The instance id
@@ -593,19 +614,20 @@ fn project_amazon_collection(
                         }
                     }
 
+                    let network = sg.vpc_id().unwrap_or(id);
                     for perm in sg.ip_permissions_egress() {
                         for ip_range in perm.ip_ranges() {
                             if let Some(cidr) = ip_range.cidr_ip()
                                 && !is_large_cidr(cidr)
                             {
-                                builder.link_to(idx, Node::ip(cidr), Edge::RoutesTo);
+                                builder.link_to(idx, Node::ip(cidr, network), Edge::RoutesTo);
                             }
                         }
                         for ipv6_range in perm.ipv6_ranges() {
                             if let Some(cidr) = ipv6_range.cidr_ipv6()
                                 && !is_large_cidr(cidr)
                             {
-                                builder.link_to(idx, Node::ip(cidr), Edge::RoutesTo);
+                                builder.link_to(idx, Node::ip(cidr, network), Edge::RoutesTo);
                             }
                         }
                     }
@@ -628,6 +650,7 @@ pub(crate) struct InstanceFacts<'a> {
 
 pub(crate) struct EniFacts<'a> {
     pub id: &'a str,
+    pub vpc_id: Option<&'a str>,
     pub subnet_id: Option<&'a str>,
     pub private_ip: Option<&'a str>,
 }
@@ -699,8 +722,9 @@ pub(crate) fn project_interface(
         builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
     }
 
+    let network = facts.vpc_id.unwrap_or(facts.id);
     for address in &facts.addresses {
-        builder.link_to(eni_idx, Node::ip(address), Edge::ConnectsTo);
+        builder.link_to(eni_idx, Node::ip(address, network), Edge::ConnectsTo);
     }
 
     for group_id in &facts.security_group_ids {
@@ -754,8 +778,16 @@ pub(crate) fn project_instance(
                 builder.add_edge(eni_idx, subnet_idx, Edge::AttachedTo);
             }
             if let Some(private_ip) = eni.private_ip {
-                builder.link_to(eni_idx, Node::ip(private_ip), Edge::ConnectsTo);
+                let network = eni.vpc_id.or(facts.vpc_id).unwrap_or(eni.id);
+                builder.link_to(eni_idx, Node::ip(private_ip, network), Edge::ConnectsTo);
             }
+        }
+
+        if facts.network_interfaces.is_empty()
+            && let Some(private_ip) = facts.private_ip
+        {
+            let network = facts.vpc_id.unwrap_or(instance_id);
+            builder.link_to(idx, Node::ip(private_ip, network), Edge::ConnectsTo);
         }
     }
 
@@ -765,12 +797,6 @@ pub(crate) fn project_instance(
             Node::AwsEc2AvailabilityZone(az_name.into()),
             Edge::Contains,
         );
-    }
-
-    if facts.network_interfaces.is_empty()
-        && let Some(private_ip) = facts.private_ip
-    {
-        builder.link_to(inst_idx, Node::ip(private_ip), Edge::ConnectsTo);
     }
 
     for (key, value) in &facts.tags {

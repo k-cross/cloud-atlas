@@ -18,8 +18,8 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                 builder.link_from(record_node, Node::hostname(&record.name), Edge::ResolvesTo);
 
                 let target = match &record.content {
-                    DnsContent::A { content } => Some(Node::ip(&content.to_string())),
-                    DnsContent::AAAA { content } => Some(Node::ip(&content.to_string())),
+                    DnsContent::A { content } => Some(Node::ip(&content.to_string(), &zone.id)),
+                    DnsContent::AAAA { content } => Some(Node::ip(&content.to_string(), &zone.id)),
                     DnsContent::CNAME { content } => Some(Node::hostname(content)),
                     _ => None,
                 };
@@ -95,17 +95,15 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
                                 || text.starts_with("postgresql://")
                                 || text.starts_with("mongodb://")
                                 || text.starts_with("mysql://"))
+                            && let Ok(url) = url::Url::parse(text)
+                            && let Some(host) = url.host_str()
                         {
-                            if let Ok(url) = url::Url::parse(text)
-                                && let Some(host) = url.host_str()
-                            {
-                                let external_id = format!("{}://{}", url.scheme(), host);
-                                builder.link_to(
-                                    worker_node,
-                                    Node::ExternalService(external_id.into()),
-                                    Edge::ConnectsTo,
-                                );
-                            }
+                            let external_id = format!("{}://{}", url.scheme(), host);
+                            builder.link_to(
+                                worker_node,
+                                Node::ExternalService(external_id.into()),
+                                Edge::ConnectsTo,
+                            );
                         }
                     }
                     _ => {}

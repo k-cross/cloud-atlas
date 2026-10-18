@@ -5,7 +5,7 @@ pub mod collector {
 
     async fn scan_resources(
         client: &Client,
-    ) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Error> {
+    ) -> Result<HashMap<String, Vec<ResourceIdentifier>>, Box<dyn std::error::Error>> {
         let mut r_map = HashMap::new();
 
         use futures::stream::{self, StreamExt};
@@ -25,7 +25,10 @@ pub mod collector {
         let mut results = requests.buffer_unordered(10);
 
         while let Some((value, resp_result)) = results.next().await {
-            let resources = resp_result?.resource_identifiers.unwrap_or_default();
+            let resources = resp_result
+                .map_err(Error::from)?
+                .resource_identifiers
+                .unwrap_or_default();
 
             if !resources.is_empty() {
                 r_map.insert(value.to_string(), resources);
@@ -44,6 +47,6 @@ pub mod collector {
         }
 
         let client = Client::new(config);
-        scan_resources(&client).await.map_err(Into::into)
+        scan_resources(&client).await
     }
 }

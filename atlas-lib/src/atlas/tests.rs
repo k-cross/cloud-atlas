@@ -19,6 +19,21 @@ mod tests {
         azure_id(rest).to_ascii_lowercase().into()
     }
 
+    fn public(address: &str) -> Node {
+        Node::public_ip(address).expect("a public address")
+    }
+
+    fn gcp_network() -> String {
+        format!(
+            "projects/{}/global/networks/vpc-globex",
+            fixtures::GCP_PROJECT
+        )
+    }
+
+    fn azure_network() -> std::sync::Arc<str> {
+        azure_networking_id("Microsoft.Network/virtualNetworks/vnet-globex")
+    }
+
     fn assert_edge(builder: &GraphBuilder, a: &Node, b: &Node, edge: &Edge) {
         let a_idx = builder
             .node_map
@@ -156,6 +171,20 @@ mod tests {
         assert_edge(&builder, &lb, &tg, &Edge::ConnectsTo);
         assert_edge(&builder, &tg, &instance, &Edge::ConnectsTo);
 
+        let nlb = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/globex-db/1".into(),
+        );
+        let tg_db = Node::AwsElbTargetGroup(
+            "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-db/1".into(),
+        );
+        assert_edge(&builder, &nlb, &tg_db, &Edge::ConnectsTo);
+        assert_edge(
+            &builder,
+            &tg_db,
+            &Node::ip("10.10.2.30", fixtures::AWS_NETWORK),
+            &Edge::RoutesTo,
+        );
+
         assert_edge(&builder, &lambda, &role, &Edge::DependsOn);
         assert_edge(&builder, &lambda, &sg, &Edge::ConnectsTo);
 
@@ -177,7 +206,7 @@ mod tests {
             &builder,
             "origin.globex.io",
             &Node::AwsRoute53RecordSet("origin.globex.io.".into()),
-            &Node::ip("203.0.113.10"),
+            &public("203.0.113.10"),
         );
         assert_resolves(
             &builder,
@@ -267,7 +296,7 @@ mod tests {
         assert_edge(
             &builder,
             &Node::GcpSqlInstance("globex-analytics-db".into()),
-            &Node::GenericIpAddress("10.20.0.5".into()),
+            &Node::ip("10.20.0.5", &gcp_network()),
             &Edge::ConnectsTo,
         );
 
@@ -278,7 +307,7 @@ mod tests {
             assert_edge(
                 &builder,
                 &gce,
-                &Node::GenericIpAddress(address.into()),
+                &Node::ip(address, &gcp_network()),
                 &Edge::ConnectsTo,
             );
         }
@@ -385,7 +414,7 @@ mod tests {
         assert_edge(
             &builder,
             &nic,
-            &Node::GenericIpAddress("10.20.1.4".into()),
+            &Node::ip("10.20.1.4", &azure_network()),
             &Edge::ConnectsTo,
         );
         assert_edge(&builder, &nic, &subnet, &Edge::AttachedTo);
@@ -401,7 +430,7 @@ mod tests {
         assert_edge(
             &builder,
             &nsg,
-            &Node::GenericIpAddress("10.20.0.5".into()),
+            &Node::ip("10.20.0.5", &azure_network()),
             &Edge::RoutesTo,
         );
         assert_edge(
@@ -504,13 +533,13 @@ mod tests {
             &builder,
             "db.globex.io",
             &record("rec-db"),
-            &Node::ip("198.51.100.10"),
+            &public("198.51.100.10"),
         );
         assert_resolves(
             &builder,
             "v6.globex.io",
             &record("rec-v6"),
-            &Node::ip("2001:db8::10"),
+            &public("2001:db8::10"),
         );
 
         assert_edge(
@@ -560,22 +589,6 @@ mod tests {
             assert_resolves(&builder, "app.globex.io", &record, &azure_hostname);
         }
 
-        let shared_ip = Node::GenericIpAddress("10.20.0.5".into());
-        assert_edge(
-            &builder,
-            &Node::AzureNetworkSecurityGroup(azure_networking_id(
-                "Microsoft.Network/networkSecurityGroups/nsg-worker",
-            )),
-            &shared_ip,
-            &Edge::RoutesTo,
-        );
-        assert_edge(
-            &builder,
-            &Node::GcpSqlInstance("globex-analytics-db".into()),
-            &shared_ip,
-            &Edge::ConnectsTo,
-        );
-
         let public_ip = Node::GenericIpAddress("198.51.100.10".into());
         assert_resolves(
             &builder,
@@ -601,6 +614,39 @@ mod tests {
     }
 
     #[test]
+    fn a_private_address_is_one_node_per_network_it_is_read_in() {
+        let builder = fixtures::build_graph();
+        let nsg = Node::AzureNetworkSecurityGroup(azure_networking_id(
+            "Microsoft.Network/networkSecurityGroups/nsg-worker",
+        ));
+        let sql = Node::GcpSqlInstance("globex-analytics-db".into());
+
+        let in_azure = Node::ip("10.20.0.5", &azure_network());
+        let in_gcp = Node::ip("10.20.0.5", &gcp_network());
+        let in_aws = Node::ip("10.20.0.5", fixtures::AWS_NETWORK);
+        assert_edge(&builder, &nsg, &in_azure, &Edge::RoutesTo);
+        assert_edge(&builder, &sql, &in_gcp, &Edge::ConnectsTo);
+        assert_edge(
+            &builder,
+            &Node::ip("10.10.1.11", fixtures::AWS_NETWORK),
+            &in_aws,
+            &Edge::TrafficFlow,
+        );
+
+        let spellings: std::collections::HashSet<&Node> =
+            [&in_azure, &in_gcp, &in_aws].into_iter().collect();
+        assert_eq!(
+            spellings.len(),
+            3,
+            "one value, three networks, three addresses"
+        );
+        assert!(
+            !builder.has_edge(&sql, &in_aws, &Edge::ConnectsTo),
+            "the database holds its address in its own network, not in the VPC that sent to it"
+        );
+    }
+
+    #[test]
     fn every_interface_carries_its_address_not_just_the_instance_attached_ones() {
         let builder = fixtures::build_graph();
 
@@ -615,7 +661,7 @@ mod tests {
             assert_edge(
                 &builder,
                 &Node::AwsEc2Eni(eni.into()),
-                &Node::ip(address),
+                &Node::ip(address, fixtures::AWS_NETWORK),
                 &Edge::ConnectsTo,
             );
         }
@@ -642,7 +688,7 @@ mod tests {
         assert_edge(
             &builder,
             &Node::AwsEc2Instance("i-lonely".into()),
-            &Node::ip("10.0.9.9"),
+            &Node::ip("10.0.9.9", "i-lonely"),
             &Edge::ConnectsTo,
         );
     }
@@ -652,14 +698,15 @@ mod tests {
         let builder = fixtures::build_graph();
         let instance = Node::AwsEc2Instance("i-globex-web-01".into());
 
+        let address = Node::ip("10.10.1.10", fixtures::AWS_NETWORK);
         assert_edge(
             &builder,
             &Node::AwsEc2Eni("eni-globex-web-01a".into()),
-            &Node::ip("10.10.1.10"),
+            &address,
             &Edge::ConnectsTo,
         );
         assert!(
-            !builder.has_edge(&instance, &Node::ip("10.10.1.10"), &Edge::ConnectsTo),
+            !builder.has_edge(&instance, &address, &Edge::ConnectsTo),
             "the instance-level address is a fallback, not a duplicate assertion"
         );
     }
@@ -738,7 +785,7 @@ mod tests {
         assert_edge(
             &builder,
             &Node::AwsEc2Eni("eni-stopped".into()),
-            &Node::ip("10.0.5.5"),
+            &Node::ip("10.0.5.5", "vpc-globex"),
             &Edge::ConnectsTo,
         );
     }
@@ -778,6 +825,15 @@ mod tests {
         target: &str,
         running: Vec<&str>,
     ) -> GraphBuilder {
+        target_group_with_interfaces(target_type, target, running, Vec::new())
+    }
+
+    fn target_group_with_interfaces(
+        target_type: aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum,
+        target: &str,
+        running: Vec<&str>,
+        interfaces: Vec<aws_sdk_ec2::types::NetworkInterface>,
+    ) -> GraphBuilder {
         use crate::cloud::definition::{AWSLoadBalancing, AmazonCollection};
         use aws_sdk_elasticloadbalancingv2::types::{
             TargetDescription, TargetGroup, TargetHealthDescription,
@@ -800,6 +856,7 @@ mod tests {
                     TargetGroup::builder()
                         .target_group_arn(arn)
                         .target_type(target_type)
+                        .vpc_id("vpc-globex")
                         .build(),
                 ],
                 listeners: Vec::new(),
@@ -815,7 +872,14 @@ mod tests {
                     })
                     .collect(),
             ),
+            AmazonCollection::AmazonNetworkInterfaces(interfaces),
         ])
+    }
+
+    fn typed_target_group() -> Node {
+        Node::AwsElbTargetGroup(
+            "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1".into(),
+        )
     }
 
     fn any_instance(builder: &GraphBuilder) -> bool {
@@ -836,16 +900,83 @@ mod tests {
         assert!(!any_instance(&builder));
         assert_edge(
             &builder,
-            &Node::AwsElbTargetGroup(
-                "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1".into(),
-            ),
-            &Node::ip("10.0.1.5"),
+            &typed_target_group(),
+            &Node::ip("10.0.1.5", "vpc-globex"),
             &Edge::RoutesTo,
         );
         assert!(
             !builder.graph.edge_weights().any(|e| e == &Edge::ConnectsTo),
             "ConnectsTo to a pivot means holding it, which a target group does not"
         );
+    }
+
+    #[test]
+    fn an_ip_target_on_a_stopped_instances_interface_is_not_linked() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group_with_interfaces(
+            TargetTypeEnum::Ip,
+            "10.0.5.5",
+            Vec::new(),
+            vec![attached_interface("eni-stopped", "i-stopped")],
+        );
+
+        assert!(
+            !builder.has_edge(
+                &typed_target_group(),
+                &Node::ip("10.0.5.5", "vpc-globex"),
+                &Edge::RoutesTo
+            ),
+            "the registration names the stopped instance by its address, and the scan dropped it"
+        );
+        assert!(!any_instance(&builder));
+    }
+
+    #[test]
+    fn an_ip_target_on_a_running_instances_interface_is_linked() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group_with_interfaces(
+            TargetTypeEnum::Ip,
+            "10.0.5.5",
+            vec!["i-running"],
+            vec![attached_interface("eni-running", "i-running")],
+        );
+
+        assert_edge(
+            &builder,
+            &typed_target_group(),
+            &Node::ip("10.0.5.5", "vpc-globex"),
+            &Edge::RoutesTo,
+        );
+    }
+
+    #[test]
+    fn an_ip_target_is_read_in_its_groups_vpc() {
+        use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+
+        let builder = target_group_with_interfaces(
+            TargetTypeEnum::Ip,
+            "10.0.5.5",
+            vec!["i-elsewhere"],
+            vec![{
+                let mut interface = attached_interface("eni-elsewhere", "i-elsewhere");
+                interface.vpc_id = Some("vpc-elsewhere".to_owned());
+                interface
+            }],
+        );
+
+        assert_edge(
+            &builder,
+            &typed_target_group(),
+            &Node::ip("10.0.5.5", "vpc-globex"),
+            &Edge::RoutesTo,
+        );
+        assert!(!builder.has_edge(
+            &typed_target_group(),
+            &Node::ip("10.0.5.5", "vpc-elsewhere"),
+            &Edge::RoutesTo
+        ));
     }
 
     #[test]
@@ -886,11 +1017,7 @@ mod tests {
 
         assert!(!any_instance(&builder));
         assert!(
-            builder
-                .index_of(&Node::AwsElbTargetGroup(
-                    "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/typed/1".into(),
-                ))
-                .is_some(),
+            builder.index_of(&typed_target_group()).is_some(),
             "the group itself is still real"
         );
     }
@@ -943,7 +1070,7 @@ mod tests {
             ("eni-globex-web-01a", "i-globex-web-01", "10.10.1.10"),
             ("eni-globex-web-02a", "i-globex-web-02", "10.10.1.11"),
         ] {
-            let target_ip = Node::ip(address);
+            let target_ip = Node::ip(address, fixtures::AWS_NETWORK);
             assert_edge(
                 &builder,
                 &Node::AwsEc2Eni(eni.into()),
@@ -959,7 +1086,7 @@ mod tests {
             );
             assert_edge(
                 &builder,
-                &Node::ip("10.10.1.50"),
+                &Node::ip("10.10.1.50", fixtures::AWS_NETWORK),
                 &target_ip,
                 &Edge::TrafficFlow,
             );
@@ -975,8 +1102,8 @@ mod tests {
     #[test]
     fn identical_nodes_merge() {
         let mut builder = GraphBuilder::new();
-        let a = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
-        let b = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        let a = builder.get_or_add_node(Node::ip("10.0.0.1", fixtures::AWS_NETWORK));
+        let b = builder.get_or_add_node(Node::ip("10.0.0.1", fixtures::AWS_NETWORK));
         assert_eq!(a, b);
         assert_eq!(builder.graph.node_count(), 1);
     }
@@ -984,7 +1111,7 @@ mod tests {
     #[test]
     fn identical_edges_dedupe() {
         let mut builder = GraphBuilder::new();
-        let a = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        let a = builder.get_or_add_node(Node::ip("10.0.0.1", fixtures::AWS_NETWORK));
         let b = builder.get_or_add_node(Node::GenericHostname("db.example.com".into()));
         builder.add_edge(a, b, Edge::ResolvesTo);
         builder.add_edge(a, b, Edge::ResolvesTo);
@@ -1198,7 +1325,7 @@ mod tests {
 
         let repointed = Node::CloudflareDnsRecord("rec-app".into());
         let deleted = Node::CloudflareDnsRecord("rec-gone".into());
-        let (old_ip, new_ip) = (Node::ip("192.0.2.1"), Node::ip("192.0.2.2"));
+        let (old_ip, new_ip) = (public("192.0.2.1"), public("192.0.2.2"));
 
         let mut live = GraphBuilder::new();
         for (record, name) in [
@@ -1280,7 +1407,7 @@ mod tests {
         // derivation covers it. Nothing beyond that may appear.
         assert!(patch.added_edges.iter().any(|e| e.key
             == edge_key(
-                &node_key(&Node::ip("203.0.113.0/24")),
+                &node_key(&public("203.0.113.0/24")),
                 &node_key(&fresh_dst),
                 &Edge::Covers
             )));
@@ -1291,7 +1418,7 @@ mod tests {
     fn carry_forward_drops_pivots_nothing_points_at_any_more() {
         use crate::atlas::patch::carry_forward;
 
-        let anchored = Node::GenericIpAddress("10.0.0.1".into());
+        let anchored = Node::ip("10.0.0.1", fixtures::AWS_NETWORK);
         let orphan = Node::GenericIpAddress("203.0.113.7".into());
         let traffic_only = Node::GenericIpAddress("203.0.113.8".into());
 

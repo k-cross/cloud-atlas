@@ -9,6 +9,19 @@ pub struct SqlInstance {
     pub database_version: Option<String>,
     pub connection_name: Option<String>,
     pub ip_addresses: Option<Vec<SqlIpAddress>>,
+    pub settings: Option<SqlSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlSettings {
+    pub ip_configuration: Option<SqlIpConfiguration>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlIpConfiguration {
+    pub private_network: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

@@ -9,6 +9,7 @@ use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
 use atlas_lib::atlas::flow::{FlowIndex, FlowObservation};
 use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff, merge_additions};
+use atlas_lib::cloud::amazon::flow_logs::InterfaceNetworks;
 use petgraph::graph::Graph;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -138,7 +139,7 @@ pub async fn run(
     ticker.tick().await;
 
     let mut drain = Box::pin(events.next(backoff.delay()));
-    let mut flow_drain = Box::pin(flows.next(flow_backoff.delay()));
+    let mut flow_drain = Box::pin(flows.next(flow_backoff.delay(), networks(&state).await));
 
     loop {
         tokio::select! {
@@ -154,10 +155,14 @@ pub async fn run(
             batch = &mut flow_drain => {
                 flow_backoff.record(healthy(&batch.report));
                 ingest_flows(&state, batch).await;
-                flow_drain = Box::pin(flows.next(flow_backoff.delay()));
+                flow_drain = Box::pin(flows.next(flow_backoff.delay(), networks(&state).await));
             }
         }
     }
+}
+
+async fn networks(state: &AppState) -> InterfaceNetworks {
+    InterfaceNetworks::read(&state.live.read().await.graph)
 }
 
 fn healthy(report: &CollectionReport) -> bool {
@@ -294,6 +299,7 @@ mod tests {
     use atlas_lib::atlas::event::ChangeOp;
     use atlas_lib::atlas::export::{edge_key, node_key};
     use atlas_lib::atlas::flow::FlowAction;
+    use atlas_lib::fixtures::AWS_NETWORK;
 
     const T0: i64 = 1_788_436_800_000;
 
@@ -652,8 +658,8 @@ mod tests {
         FlowObservation {
             source: CollectionSource::Aws,
             scope: "us-east-1".to_owned(),
-            src: Node::GenericIpAddress(src.into()),
-            dst: Node::GenericIpAddress(dst.into()),
+            src: Node::ip(src, AWS_NETWORK),
+            dst: Node::ip(dst, AWS_NETWORK),
             src_port: None,
             dst_port: None,
             resources: Vec::new(),
@@ -667,7 +673,7 @@ mod tests {
     fn rule_to(range: &str) -> GraphBuilder {
         let mut builder = GraphBuilder::new();
         let sg = builder.get_or_add_node(Node::AwsEc2SecurityGroup("sg-web".into()));
-        builder.link_to(sg, Node::ip(range), Edge::RoutesTo);
+        builder.link_to(sg, Node::ip(range, AWS_NETWORK), Edge::RoutesTo);
         builder
     }
 
@@ -681,8 +687,8 @@ mod tests {
         reconcile(&live.graph, &mut next, &HashSet::new(), &flows);
 
         assert!(next.has_edge(
-            &Node::ip("203.0.113.0/24"),
-            &Node::ip("203.0.113.77"),
+            &Node::ip("203.0.113.0/24", AWS_NETWORK),
+            &Node::ip("203.0.113.77", AWS_NETWORK),
             &Edge::Covers
         ));
     }
@@ -752,8 +758,8 @@ mod tests {
             &flows,
         );
         let covers = edge_key(
-            &node_key(&Node::ip("203.0.113.0/24")),
-            &node_key(&Node::ip("203.0.113.77")),
+            &node_key(&Node::ip("203.0.113.0/24", AWS_NETWORK)),
+            &node_key(&Node::ip("203.0.113.77", AWS_NETWORK)),
             &Edge::Covers,
         );
 
@@ -779,18 +785,18 @@ mod tests {
             &HashSet::new(),
             &flows,
         );
-        assert!(live.contains(&Node::ip("203.0.113.77")));
+        assert!(live.contains(&Node::ip("203.0.113.77", AWS_NETWORK)));
 
         let held = HashSet::from([CollectionSource::Aws]);
         let mut next = GraphBuilder::new();
         reconcile(&live.graph, &mut next, &held, &FlowIndex::default());
 
         assert!(
-            !next.contains(&Node::ip("203.0.113.77")),
+            !next.contains(&Node::ip("203.0.113.77", AWS_NETWORK)),
             "carry_forward must not treat a Covers edge as a scan's evidence"
         );
         assert!(
-            next.contains(&Node::ip("203.0.113.0/24")),
+            next.contains(&Node::ip("203.0.113.0/24", AWS_NETWORK)),
             "the rule itself is still carried, anchored by the security group"
         );
     }
@@ -820,8 +826,8 @@ mod tests {
             "the freshness rides along with the edge"
         );
         assert!(state.live.read().await.has_edge(
-            &Node::GenericIpAddress("10.10.1.10".into()),
-            &Node::GenericIpAddress("192.0.2.5".into()),
+            &Node::ip("10.10.1.10", AWS_NETWORK),
+            &Node::ip("192.0.2.5", AWS_NETWORK),
             &Edge::TrafficFlow
         ));
     }

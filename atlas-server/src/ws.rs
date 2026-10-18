@@ -184,7 +184,7 @@ mod tests {
     fn state_with_a_pair() -> (AppState, String) {
         let mut builder = GraphBuilder::new();
         let a = builder.get_or_add_node(Node::GenericHostname("center.example".into()));
-        let b = builder.get_or_add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        let b = builder.get_or_add_node(Node::ip("10.0.0.1", "vpc-test"));
         builder.add_edge(a, b, Edge::ResolvesTo);
         let key = node_key(&builder.graph[a]);
         (
@@ -386,7 +386,7 @@ mod tests {
         let filler: Vec<_> = (0..8)
             .map(|i| graph.add_node(Node::GenericIpAddress(format!("192.0.2.{i}").into())))
             .collect();
-        let peer = graph.add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        let peer = graph.add_node(Node::ip("10.0.0.1", "vpc-test"));
 
         graph.add_edge(center, peer, Edge::ResolvesTo);
         graph.add_edge(center, peer, Edge::RoutesTo);
@@ -434,7 +434,7 @@ mod tests {
 
         let mut graph: Graph<Node, Edge> = Graph::new();
         let a = graph.add_node(Node::GenericHostname("center.example".into()));
-        let b = graph.add_node(Node::GenericIpAddress("10.0.0.1".into()));
+        let b = graph.add_node(Node::ip("10.0.0.1", "vpc-test"));
         graph.add_edge(a, b, Edge::ResolvesTo);
 
         let neighbors = neighbors_value(&graph, &node_key(&graph[a]));

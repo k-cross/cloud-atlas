@@ -160,6 +160,8 @@ struct InstanceConfiguration {
 struct NetworkInterfaceRef {
     #[serde(rename = "networkInterfaceId")]
     network_interface_id: Option<String>,
+    #[serde(rename = "vpcId")]
+    vpc_id: Option<String>,
     #[serde(rename = "subnetId")]
     subnet_id: Option<String>,
     #[serde(rename = "privateIpAddress")]
@@ -385,7 +387,10 @@ fn typed_context(
         "AWS::EC2::EIP" => {
             let config: EipConfiguration = item.configuration().unwrap_or_default();
             match config.public_ip {
-                Some(ip) => linked(node.clone(), Node::ip(&ip), Edge::ConnectsTo),
+                Some(ip) => {
+                    let network = item.resource_id.as_deref().unwrap_or(&ip);
+                    linked(node.clone(), Node::ip(&ip, network), Edge::ConnectsTo)
+                }
                 None => solo(node.clone()),
             }
         }
@@ -424,6 +429,7 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
         .filter_map(|eni| {
             Some(EniFacts {
                 id: eni.network_interface_id.as_deref()?,
+                vpc_id: eni.vpc_id.as_deref(),
                 subnet_id: eni.subnet_id.as_deref(),
                 private_ip: eni.private_ip_address.as_deref(),
             })
@@ -435,6 +441,7 @@ fn instance_context(item: &ConfigurationItem, region: &str) -> Graph<Node, Edge>
             .into_iter()
             .map(|id| EniFacts {
                 id,
+                vpc_id: None,
                 subnet_id: None,
                 private_ip: None,
             })
@@ -796,6 +803,7 @@ fn launched_instances(
                         .filter_map(|eni| {
                             Some(EniFacts {
                                 id: eni.network_interface_id.as_deref()?,
+                                vpc_id: eni.vpc_id.as_deref(),
                                 subnet_id: eni.subnet_id.as_deref(),
                                 private_ip: eni.private_ip_address.as_deref(),
                             })

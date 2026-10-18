@@ -2,6 +2,7 @@ use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::event::ChangeEvent;
 use atlas_lib::atlas::flow::FlowObservation;
 use atlas_lib::cloud::amazon::events::stream::EventQueue;
+use atlas_lib::cloud::amazon::flow_logs::InterfaceNetworks;
 use atlas_lib::cloud::amazon::flow_logs::stream::FlowLogQueue;
 use std::time::Duration;
 
@@ -67,14 +68,14 @@ impl FlowSource {
         !matches!(self, FlowSource::Disabled)
     }
 
-    pub async fn next(&self, delay: Duration) -> FlowBatch {
+    pub async fn next(&self, delay: Duration, networks: InterfaceNetworks) -> FlowBatch {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
         match self {
             FlowSource::Disabled => std::future::pending().await,
             FlowSource::Aws(queue) => {
-                let batch = queue.receive().await;
+                let batch = queue.receive(&networks).await;
                 FlowBatch {
                     observations: batch.observations,
                     report: batch.report,

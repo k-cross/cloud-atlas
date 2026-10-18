@@ -12,6 +12,7 @@ use crate::cloud::definition::{
 use std::collections::HashMap;
 
 pub const REGION: &str = "us-east-1";
+pub const AWS_NETWORK: &str = "vpc-globex";
 const AVERAGE_PACKET_BYTES: u64 = 128;
 pub const GCP_PROJECT: &str = "globex-prod";
 pub const AZURE_SUBSCRIPTION: &str = "sub-globex";
@@ -71,8 +72,8 @@ pub fn flows() -> Vec<FlowObservation> {
                 action| FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
-        src: Node::ip(src),
-        dst: Node::ip(dst),
+        src: Node::ip(src, AWS_NETWORK),
+        dst: Node::ip(dst, AWS_NETWORK),
         src_port: Some(src_port),
         dst_port: Some(dst_port),
         resources,
@@ -200,10 +201,11 @@ pub fn flows() -> Vec<FlowObservation> {
             3_100,
             Some(FlowAction::Accepted),
         ),
-        // The other two clouds' compute, reached over the interconnect: an
-        // Azure VM by the private address its NIC holds, a GCE instance by the
-        // one-to-one NAT address its access config carries. Neither endpoint
-        // had an owner before their interfaces were collected.
+        // The other two clouds' compute: an Azure VM by the private address
+        // its NIC holds, reached over the interconnect, and a GCE instance by
+        // the one-to-one NAT address its access config carries. The NAT
+        // address is public, so it names the instance; the private one is read
+        // in this VPC, where nothing holds it.
         flow(
             ("10.10.1.10", 41000),
             ("10.20.1.4", 1433),
@@ -225,8 +227,8 @@ pub fn burst_flow() -> FlowObservation {
     FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
-        src: Node::ip("192.0.2.99"),
-        dst: Node::ip("10.10.1.10"),
+        src: Node::ip("192.0.2.99", AWS_NETWORK),
+        dst: Node::ip("10.10.1.10", AWS_NETWORK),
         src_port: Some(58000),
         dst_port: Some(22),
         resources: vec![
@@ -341,9 +343,20 @@ pub fn aws() -> Provider {
         .load_balancer_arn("arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1")
         .vpc_id("vpc-globex")
         .build();
+    let nlb = aws_sdk_elasticloadbalancingv2::types::LoadBalancer::builder()
+        .load_balancer_arn(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/globex-db/1",
+        )
+        .vpc_id("vpc-globex")
+        .build();
     let tg = aws_sdk_elasticloadbalancingv2::types::TargetGroup::builder()
         .target_group_arn("arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-web/1")
         .target_type(aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum::Instance)
+        .vpc_id("vpc-globex")
+        .build();
+    let tg_db = aws_sdk_elasticloadbalancingv2::types::TargetGroup::builder()
+        .target_group_arn("arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-db/1")
+        .target_type(aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum::Ip)
         .vpc_id("vpc-globex")
         .build();
     let listener = aws_sdk_elasticloadbalancingv2::types::Listener::builder()
@@ -352,6 +365,18 @@ pub fn aws() -> Provider {
             aws_sdk_elasticloadbalancingv2::types::Action::builder()
                 .target_group_arn(
                     "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-web/1",
+                )
+                .build(),
+        )
+        .build();
+    let listener_db = aws_sdk_elasticloadbalancingv2::types::Listener::builder()
+        .load_balancer_arn(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/globex-db/1",
+        )
+        .default_actions(
+            aws_sdk_elasticloadbalancingv2::types::Action::builder()
+                .target_group_arn(
+                    "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-db/1",
                 )
                 .build(),
         )
@@ -371,6 +396,18 @@ pub fn aws() -> Provider {
                 .target(
                     aws_sdk_elasticloadbalancingv2::types::TargetDescription::builder()
                         .id("i-globex-web-03")
+                        .build(),
+                )
+                .build(),
+        ],
+    );
+    target_health.insert(
+        "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-db/1".to_owned(),
+        vec![
+            aws_sdk_elasticloadbalancingv2::types::TargetHealthDescription::builder()
+                .target(
+                    aws_sdk_elasticloadbalancingv2::types::TargetDescription::builder()
+                        .id("10.10.2.30")
                         .build(),
                 )
                 .build(),
@@ -686,9 +723,9 @@ pub fn aws() -> Provider {
         (
             r.clone(),
             AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
-                load_balancers: vec![lb],
-                target_groups: vec![tg],
-                listeners: vec![listener],
+                load_balancers: vec![lb, nlb],
+                target_groups: vec![tg, tg_db],
+                listeners: vec![listener, listener_db],
                 target_health,
             }),
         ),
@@ -738,7 +775,7 @@ pub fn gcp() -> Provider {
     use crate::api::google::gke::Cluster;
     use crate::api::google::pubsub::{Subscription, Topic};
     use crate::api::google::run::Service;
-    use crate::api::google::sql::{SqlInstance, SqlIpAddress};
+    use crate::api::google::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
     use crate::api::google::storage::Bucket;
 
     let network_link = format!(
@@ -788,6 +825,14 @@ pub fn gcp() -> Provider {
             ip_type: Some("PRIVATE".to_owned()),
             ip_address: Some("10.20.0.5".to_owned()),
         }]),
+        settings: Some(SqlSettings {
+            ip_configuration: Some(SqlIpConfiguration {
+                private_network: Some(format!(
+                    "projects/{}/global/networks/vpc-globex",
+                    GCP_PROJECT
+                )),
+            }),
+        }),
         ..Default::default()
     };
 

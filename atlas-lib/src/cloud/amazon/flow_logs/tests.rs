@@ -12,16 +12,28 @@ use aws_smithy_types::body::SdkBody;
 use std::io::Write;
 
 const SCOPE: &str = "us-east-1";
+const NETWORK: &str = "vpc-flows";
+
+fn networks() -> InterfaceNetworks {
+    let mut builder = GraphBuilder::new();
+    let eni = builder.get_or_add_node(Node::AwsEc2Eni("eni-0abc".into()));
+    builder.link_to(eni, Node::ip("10.0.0.99", NETWORK), Edge::ConnectsTo);
+    InterfaceNetworks::read(&builder.graph)
+}
 
 fn parsed(text: &str) -> Parsed {
-    parse(text, SCOPE, usize::MAX)
+    parse(text, SCOPE, usize::MAX, &networks())
 }
 const BUCKET: &str = "globex-flow-logs";
 const KEY: &str = "AWSLogs/111111111111/vpcflowlogs/us-east-1/2026/09/04/flows.log.gz";
 
 fn default_record(src: &str, dst: &str, action: &str) -> String {
+    record_at("eni-0abc", src, dst, action)
+}
+
+fn record_at(interface: &str, src: &str, dst: &str, action: &str) -> String {
     format!(
-        "2 111111111111 eni-0abc {src} {dst} 51234 443 6 24 4800 1788436740 1788436800 {action} OK"
+        "2 111111111111 {interface} {src} {dst} 51234 443 6 24 4800 1788436740 1788436800 {action} OK"
     )
 }
 
@@ -37,8 +49,8 @@ fn a_default_format_record_becomes_a_flow_between_its_endpoints() {
     let [flow] = &observations[..] else {
         panic!("expected one observation, got {}", observations.len());
     };
-    assert_eq!(flow.src, Node::GenericIpAddress("10.10.1.10".into()));
-    assert_eq!(flow.dst, Node::GenericIpAddress("198.51.100.10".into()));
+    assert_eq!(flow.src, Node::ip("10.10.1.10", NETWORK));
+    assert_eq!(flow.dst, Node::public_ip("198.51.100.10").unwrap());
     assert_eq!(flow.packets, 24);
     assert_eq!(flow.bytes, 4800);
     assert_eq!(flow.action, Some(FlowAction::Accepted));
@@ -52,7 +64,7 @@ fn a_default_format_record_becomes_a_flow_between_its_endpoints() {
 fn a_header_is_not_mistaken_for_a_record() {
     let object = "\
 version srcaddr dstaddr end
-2 10.10.1.10 198.51.100.10 1788436800";
+2 203.0.113.10 198.51.100.10 1788436800";
 
     let Parsed { observations, .. } = parsed(object);
 
@@ -63,7 +75,7 @@ version srcaddr dstaddr end
 fn a_format_without_a_verdict_still_yields_liveness() {
     let object = "\
 version srcaddr dstaddr packets bytes end
-2 10.10.1.10 198.51.100.10 40 9000 1788436800";
+2 203.0.113.10 198.51.100.10 40 9000 1788436800";
 
     let Parsed { observations, .. } = parsed(object);
 
@@ -139,7 +151,7 @@ fn records_past_the_cap_are_counted_but_never_materialized() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    let parsed = parse(&object, SCOPE, 4);
+    let parsed = parse(&object, SCOPE, 4, &networks());
 
     assert_eq!(parsed.observations.len(), 4);
     assert_eq!(parsed.dropped, 6);
@@ -179,23 +191,93 @@ fn a_truncated_line_is_dropped_and_counted() {
 
 #[test]
 fn parsed_flows_become_traffic_edges_over_the_scanned_topology() {
-    let Parsed { observations, .. } =
-        parsed(&default_record("10.10.1.10", "198.51.100.10", "ACCEPT"));
+    let mut graph = fixture_topology();
+    let Parsed { observations, .. } = parse(
+        &record_at(
+            "eni-globex-web-01a",
+            "10.10.1.10",
+            "198.51.100.10",
+            "ACCEPT",
+        ),
+        SCOPE,
+        usize::MAX,
+        &InterfaceNetworks::read(&graph.graph),
+    );
 
     let mut index = FlowIndex::default();
     for observation in &observations {
         index.observe(observation);
     }
-
-    let mut graph = GraphBuilder::new();
-    projector::build(&mut graph, &crate::fixtures::aws(), &fixture_settings());
     index.overlay(&mut graph);
 
+    let held = Node::ip("10.10.1.10", crate::fixtures::AWS_NETWORK);
     assert!(graph.has_edge(
-        &Node::GenericIpAddress("10.10.1.10".into()),
-        &Node::GenericIpAddress("198.51.100.10".into()),
-        &Edge::TrafficFlow
+        &Node::AwsEc2Eni("eni-globex-web-01a".into()),
+        &held,
+        &Edge::ConnectsTo
     ));
+    assert!(
+        graph.has_edge(
+            &held,
+            &Node::public_ip("198.51.100.10").unwrap(),
+            &Edge::TrafficFlow
+        ),
+        "the record lands on the address its interface holds"
+    );
+}
+
+#[test]
+fn a_record_that_names_its_vpc_is_read_in_that_vpc() {
+    let object = "\
+version vpc-id interface-id srcaddr dstaddr end
+2 vpc-named eni-0abc 10.10.1.10 10.10.1.11 1788436800";
+
+    let Parsed { observations, .. } = parsed(object);
+
+    assert_eq!(observations[0].src, Node::ip("10.10.1.10", "vpc-named"));
+    assert_eq!(observations[0].dst, Node::ip("10.10.1.11", "vpc-named"));
+}
+
+#[test]
+fn a_private_address_seen_by_an_interface_the_scan_has_not_found_is_counted_not_guessed() {
+    let Parsed {
+        observations,
+        unplaced,
+        unusable,
+        ..
+    } = parsed(&record_at(
+        "eni-unscanned",
+        "10.10.1.10",
+        "198.51.100.10",
+        "ACCEPT",
+    ));
+
+    assert!(observations.is_empty());
+    assert_eq!(unplaced, 1);
+    assert_eq!(
+        unusable, 0,
+        "the record read fine; only its network is unknown"
+    );
+}
+
+#[test]
+fn a_flow_between_public_addresses_needs_no_network() {
+    let Parsed {
+        observations,
+        unplaced,
+        ..
+    } = parsed(&record_at(
+        "eni-unscanned",
+        "203.0.113.10",
+        "198.51.100.10",
+        "ACCEPT",
+    ));
+
+    assert_eq!(unplaced, 0);
+    assert_eq!(
+        observations[0].src,
+        Node::public_ip("203.0.113.10").unwrap()
+    );
 }
 
 fn notification(bucket: &str, key: &str) -> String {
@@ -330,8 +412,13 @@ fn a_parquet_object_says_what_is_wrong_with_it() {
 async fn a_queued_object_reaches_the_graph_as_traffic_edges() {
     let object = format!(
         "{}\n{}",
-        default_record("10.10.1.10", "198.51.100.10", "ACCEPT"),
-        default_record("10.10.1.11", "203.0.113.7", "REJECT"),
+        record_at(
+            "eni-globex-web-01a",
+            "10.10.1.10",
+            "198.51.100.10",
+            "ACCEPT"
+        ),
+        record_at("eni-globex-web-02a", "10.10.1.11", "203.0.113.7", "REJECT"),
     );
     let http = replay(vec![
         (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
@@ -339,8 +426,11 @@ async fn a_queued_object_reaches_the_graph_as_traffic_edges() {
         (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
     ]);
     let config = replay_config(http).await;
+    let mut graph = fixture_topology();
 
-    let batch = flow_queue(&config).receive().await;
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::read(&graph.graph))
+        .await;
 
     assert!(
         batch.report.is_complete(),
@@ -353,18 +443,54 @@ async fn a_queued_object_reaches_the_graph_as_traffic_edges() {
     for observation in &batch.observations {
         index.observe(observation);
     }
-    let mut graph = GraphBuilder::new();
-    projector::build(&mut graph, &crate::fixtures::aws(), &fixture_settings());
     index.overlay(&mut graph);
 
     assert!(graph.has_edge(
-        &Node::GenericIpAddress("10.10.1.10".into()),
-        &Node::GenericIpAddress("198.51.100.10".into()),
+        &Node::ip("10.10.1.10", crate::fixtures::AWS_NETWORK),
+        &Node::public_ip("198.51.100.10").unwrap(),
         &Edge::TrafficFlow
     ));
     assert!(
-        graph.contains(&Node::GenericIpAddress("203.0.113.7".into())),
+        graph.contains(&Node::public_ip("203.0.113.7").unwrap()),
         "an address no scan reported still earns the generic pivot node"
+    );
+}
+
+#[tokio::test]
+async fn a_record_with_no_network_is_reported_without_holding_the_feed_back() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (
+            OK,
+            gzip(&record_at(
+                "eni-unscanned",
+                "10.10.1.10",
+                "198.51.100.10",
+                "ACCEPT",
+            )),
+        ),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
+
+    assert!(batch.observations.is_empty());
+    assert!(
+        !batch.report.is_complete(),
+        "the dropped record is reported"
+    );
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        None,
+        "an unplaced record is Malformed, never an unreadable source"
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "redelivering the object would not place the record either"
     );
 }
 
@@ -376,7 +502,9 @@ async fn an_object_that_could_not_be_read_leaves_its_notification_on_the_queue()
     ]);
     let config = replay_config(http.clone()).await;
 
-    let batch = flow_queue(&config).receive().await;
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
 
     assert!(batch.observations.is_empty());
     assert_eq!(
@@ -399,7 +527,9 @@ async fn an_object_that_is_gone_releases_its_notification() {
     ]);
     let config = replay_config(http.clone()).await;
 
-    let batch = flow_queue(&config).receive().await;
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
 
     assert!(batch.observations.is_empty());
     assert_eq!(
@@ -423,7 +553,9 @@ async fn an_object_that_was_read_but_makes_no_sense_is_deleted_anyway() {
     ]);
     let config = replay_config(http.clone()).await;
 
-    let batch = flow_queue(&config).receive().await;
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
 
     assert!(batch.observations.is_empty());
     assert_eq!(
@@ -443,7 +575,9 @@ async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
     let http = replay(vec![(403, br#"{"__type":"AccessDenied"}"#.to_vec())]);
     let config = replay_config(http).await;
 
-    let batch = flow_queue(&config).receive().await;
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
 
     assert!(batch.observations.is_empty());
     assert!(!batch.report.is_complete());
@@ -458,6 +592,12 @@ const OK: u16 = 200;
 
 fn fixture_settings() -> Settings {
     crate::fixtures::settings()
+}
+
+fn fixture_topology() -> GraphBuilder {
+    let mut graph = GraphBuilder::new();
+    projector::build(&mut graph, &crate::fixtures::aws(), &fixture_settings());
+    graph
 }
 
 fn gzip(text: &str) -> Vec<u8> {

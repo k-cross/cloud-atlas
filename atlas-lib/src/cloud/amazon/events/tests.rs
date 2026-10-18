@@ -275,9 +275,9 @@ fn an_interface_event_carries_every_address_and_its_owner() {
         Node::AwsEc2Vpc("vpc-globex".into()),
         Node::AwsEc2SecurityGroup("sg-globex".into()),
         Node::AwsEc2NatGateway("nat-0globex".into()),
-        Node::ip("10.0.1.60"),
-        Node::ip("203.0.113.60"),
-        Node::ip("2001:db8::60"),
+        Node::ip("10.0.1.60", "vpc-globex"),
+        Node::ip("203.0.113.60", "vpc-globex"),
+        Node::ip("2001:db8::60", "vpc-globex"),
     ] {
         assert!(keys.contains(&node_key(&expected)), "missing {expected}");
     }
@@ -323,7 +323,7 @@ fn an_instance_event_carries_the_eni_pivot() {
         Node::AwsEc2Vpc("vpc-globex".into()),
         Node::AwsEc2SecurityGroup("sg-globex".into()),
         Node::AwsEc2AvailabilityZone("us-east-1a".into()),
-        Node::GenericIpAddress("10.0.1.20".into()),
+        Node::ip("10.0.1.20", "vpc-globex"),
         Node::AwsTag {
             key: "env".into(),
             value: "prod".into(),
@@ -334,7 +334,7 @@ fn an_instance_event_carries_the_eni_pivot() {
     assert!(
         typed.context.edge_references().any(|e| {
             typed.context[e.source()] == Node::AwsEc2Eni("eni-0abc123a".into())
-                && typed.context[e.target()] == Node::ip("10.0.1.20")
+                && typed.context[e.target()] == Node::ip("10.0.1.20", "vpc-globex")
                 && e.weight() == &Edge::ConnectsTo
         }),
         "the address belongs to the interface that holds it, not to the instance"

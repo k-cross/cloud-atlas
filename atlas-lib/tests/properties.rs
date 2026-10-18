@@ -7,7 +7,7 @@ use atlas_lib::atlas::flow::{FlowAction, FlowIndex, FlowObservation, Orientation
 use atlas_lib::atlas::graph_builder::GraphBuilder;
 use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff};
 use atlas_lib::atlas::util::{
-    canonical_address, canonical_hostname, mask_to_prefix, parse_address,
+    canonical_address, canonical_hostname, is_private, mask_to_prefix, parse_address,
 };
 use atlas_lib::cloud::amazon::flow_logs;
 use petgraph::graph::Graph;
@@ -17,6 +17,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 const T0: i64 = 1_788_436_800_000;
+const NETWORK: &str = "vpc-one";
+const OTHER_NETWORK: &str = "vpc-two";
 
 fn source() -> impl Strategy<Value = CollectionSource> {
     prop_oneof![
@@ -280,11 +282,80 @@ proptest! {
             .collect::<Vec<_>>()
             .join(":");
 
-        prop_assert_eq!(Node::ip(&long), Node::ip(&addr.to_string()));
+        prop_assert_eq!(Node::ip(&long, NETWORK), Node::ip(&addr.to_string(), NETWORK));
         prop_assert_eq!(
-            Node::ip(&addr.to_string().to_uppercase()),
-            Node::ip(&addr.to_string())
+            Node::ip(&addr.to_string().to_uppercase(), NETWORK),
+            Node::ip(&addr.to_string(), NETWORK)
         );
+    }
+}
+
+proptest! {
+    #[test]
+    fn only_a_private_address_depends_on_the_network_it_is_read_in(
+        text in address_text(),
+    ) {
+        let parsed = parse_address(&text);
+        let private = parsed.is_some_and(|(addr, prefix)| is_private(&addr, prefix));
+
+        prop_assert_eq!(
+            Node::ip(&text, NETWORK) == Node::ip(&text, OTHER_NETWORK),
+            !private
+        );
+        prop_assert_eq!(Node::public_ip(&text).is_some(), !private);
+        if !private {
+            prop_assert_eq!(Node::public_ip(&text), Some(Node::ip(&text, NETWORK)));
+        }
+    }
+}
+
+#[test]
+fn the_private_blocks_end_exactly_where_their_prefixes_say() {
+    let private = |value: &str| {
+        let (addr, prefix) = parse_address(value).expect("an address");
+        is_private(&addr, prefix)
+    };
+
+    for inside in [
+        "10.0.0.0",
+        "10.255.255.255",
+        "100.64.0.0",
+        "100.127.255.255",
+        "127.0.0.1",
+        "169.254.169.254",
+        "172.16.0.0",
+        "172.31.255.255",
+        "192.168.0.0",
+        "192.168.255.255",
+        "10.20.0.0/16",
+        "::ffff:10.0.0.1",
+        "::1",
+        "fc00::",
+        "fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "fe80::1",
+        "febf:ffff::",
+    ] {
+        assert!(private(inside), "{inside} is private");
+    }
+    for outside in [
+        "9.255.255.255",
+        "11.0.0.0",
+        "100.63.255.255",
+        "100.128.0.0",
+        "169.253.255.255",
+        "172.15.255.255",
+        "172.32.0.0",
+        "192.167.255.255",
+        "192.169.0.0",
+        "192.0.2.1",
+        "203.0.113.0/24",
+        "10.0.0.0/7",
+        "fbff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        "fe00::",
+        "fec0::",
+        "2001:db8::10",
+    ] {
+        assert!(!private(outside), "{outside} is public");
     }
 }
 
@@ -348,12 +419,17 @@ proptest! {
 
 // --------------------------------------------------------------- containment
 
+fn ten_slash_eight(bits: u32) -> IpAddr {
+    IpAddr::from(std::net::Ipv4Addr::from(0x0a00_0000 | (bits & 0x00ff_ffff)))
+}
+
 fn cidr() -> impl Strategy<Value = (IpAddr, u8)> {
     prop_oneof![
         (any::<u32>(), 8u8..=32)
             .prop_map(|(bits, p)| (IpAddr::from(std::net::Ipv4Addr::from(bits)), p)),
         (any::<u128>(), 16u8..=128)
             .prop_map(|(bits, p)| (IpAddr::from(std::net::Ipv6Addr::from(bits)), p)),
+        (any::<u32>(), 8u8..=32).prop_map(|(bits, p)| (ten_slash_eight(bits), p)),
     ]
 }
 
@@ -361,27 +437,44 @@ fn bare_address() -> impl Strategy<Value = IpAddr> {
     prop_oneof![
         any::<u32>().prop_map(|b| IpAddr::from(std::net::Ipv4Addr::from(b))),
         any::<u128>().prop_map(|b| IpAddr::from(std::net::Ipv6Addr::from(b))),
+        any::<u32>().prop_map(ten_slash_eight),
     ]
+}
+
+fn network() -> impl Strategy<Value = &'static str> {
+    prop_oneof![Just(NETWORK), Just(OTHER_NETWORK)]
+}
+
+fn address_value(node: &Node) -> Option<(Option<&str>, &str)> {
+    match node {
+        Node::GenericIpAddress(value) => Some((None, value)),
+        Node::GenericPrivateIpAddress { network, address } => Some((Some(network), address)),
+        _ => None,
+    }
+}
+
+fn scope_of<'a>(addr: &IpAddr, prefix: Option<u8>, network: &'a str) -> Option<&'a str> {
+    is_private(addr, prefix).then_some(network)
 }
 
 proptest! {
     #[test]
-    fn a_range_covers_exactly_the_addresses_inside_it(
-        ranges in prop::collection::vec(cidr(), 1..5),
-        addresses in prop::collection::vec(bare_address(), 1..5),
+    fn a_range_covers_exactly_the_addresses_inside_it_in_its_own_network(
+        ranges in prop::collection::vec((cidr(), network()), 1..5),
+        addresses in prop::collection::vec((bare_address(), network()), 1..5),
         junk in prop::collection::vec("pl-[0-9a-f]{8}|[A-Za-z]{2,8}", 0..3),
     ) {
         let mut builder = GraphBuilder::new();
-        for (addr, prefix) in &ranges {
-            builder.get_or_add_node(Node::ip(&format!("{addr}/{prefix}")));
+        for ((addr, prefix), network) in &ranges {
+            builder.get_or_add_node(Node::ip(&format!("{addr}/{prefix}"), network));
         }
-        for addr in &addresses {
-            builder.get_or_add_node(Node::ip(&addr.to_string()));
+        for (addr, network) in &addresses {
+            builder.get_or_add_node(Node::ip(&addr.to_string(), network));
         }
         // Prefix-list ids and service tags travel the same pivot; containment
         // has to walk past them rather than guess at them.
         for value in &junk {
-            builder.get_or_add_node(Node::ip(value));
+            builder.get_or_add_node(Node::ip(value, NETWORK));
         }
 
         derive::all(&mut builder, &FlowIndex::default());
@@ -394,8 +487,8 @@ proptest! {
                 continue;
             }
             let (from, to) = builder.graph.edge_endpoints(edge).expect("endpoints");
-            let (Node::GenericIpAddress(from), Node::GenericIpAddress(to)) =
-                (&builder.graph[from], &builder.graph[to])
+            let (Some((from_scope, from)), Some((to_scope, to))) =
+                (address_value(&builder.graph[from]), address_value(&builder.graph[to]))
             else {
                 prop_assert!(false, "Covers left the pivots");
                 unreachable!()
@@ -408,21 +501,26 @@ proptest! {
                 matches!(parse_address(to), Some((_, None))),
                 "{to} is not a bare address"
             );
+            prop_assert_eq!(from_scope, to_scope, "a range covers only its own network");
         }
 
-        for (range_addr, prefix) in &ranges {
-            let range = Node::ip(&format!("{range_addr}/{prefix}"));
-            for addr in &addresses {
+        for ((range_addr, prefix), range_network) in &ranges {
+            let range = Node::ip(&format!("{range_addr}/{prefix}"), range_network);
+            for (addr, network) in &addresses {
                 let inside = range_addr.is_ipv4() == addr.is_ipv4()
-                    && mask_to_prefix(addr, *prefix) == mask_to_prefix(range_addr, *prefix);
+                    && mask_to_prefix(addr, *prefix) == mask_to_prefix(range_addr, *prefix)
+                    && scope_of(range_addr, Some(*prefix), range_network)
+                        == scope_of(addr, None, network);
 
                 prop_assert_eq!(
-                    builder.has_edge(&range, &Node::ip(&addr.to_string()), &Edge::Covers),
+                    builder.has_edge(&range, &Node::ip(&addr.to_string(), network), &Edge::Covers),
                     inside,
-                    "{} vs {}/{}",
+                    "{} in {} vs {}/{} in {}",
                     addr,
+                    network,
                     range_addr,
-                    prefix
+                    prefix,
+                    range_network
                 );
             }
         }
@@ -438,10 +536,10 @@ proptest! {
     ) {
         let mut builder = GraphBuilder::new();
         for (addr, prefix) in &ranges {
-            builder.get_or_add_node(Node::ip(&format!("{addr}/{prefix}")));
+            builder.get_or_add_node(Node::ip(&format!("{addr}/{prefix}"), NETWORK));
         }
         for addr in &addresses {
-            builder.get_or_add_node(Node::ip(&addr.to_string()));
+            builder.get_or_add_node(Node::ip(&addr.to_string(), NETWORK));
         }
 
         let flows = FlowIndex::default();
@@ -611,8 +709,8 @@ fn observation(dst: u8, at: i64, action: Option<FlowAction>) -> FlowObservation 
     FlowObservation {
         source: CollectionSource::Aws,
         scope: "us-east-1".to_owned(),
-        src: Node::ip("10.0.0.1"),
-        dst: Node::ip(&format!("203.0.113.{dst}")),
+        src: Node::ip("10.0.0.1", NETWORK),
+        dst: Node::ip(&format!("203.0.113.{dst}"), NETWORK),
         src_port: None,
         dst_port: None,
         resources: Vec::new(),
@@ -676,7 +774,7 @@ proptest! {
         }
 
         let stats = index
-            .stats(&Node::ip("10.0.0.1"), &Node::ip("203.0.113.1"))
+            .stats(&Node::ip("10.0.0.1", NETWORK), &Node::ip("203.0.113.1", NETWORK))
             .expect("observed");
 
         let accepted = verdicts.contains(&Some(FlowAction::Accepted));
@@ -890,10 +988,27 @@ const FIELDS: &[&str] = &[
     "log-status",
 ];
 
+fn layout() -> impl Strategy<Value = Vec<&'static str>> {
+    any::<bool>().prop_flat_map(|names_vpc| {
+        let mut fields = FIELDS.to_vec();
+        if names_vpc {
+            fields.push("vpc-id");
+        }
+        Just(fields).prop_shuffle()
+    })
+}
+
+fn interface_networks(interface: &str, network: &str) -> flow_logs::InterfaceNetworks {
+    let mut builder = GraphBuilder::new();
+    let eni = builder.get_or_add_node(Node::AwsEc2Eni(interface.into()));
+    builder.link_to(eni, Node::ip("10.0.0.99", network), Edge::ConnectsTo);
+    flow_logs::InterfaceNetworks::read(&builder.graph)
+}
+
 proptest! {
     #[test]
     fn a_record_reads_the_same_whatever_order_its_own_header_declares(
-        order in Just(FIELDS.to_vec()).prop_shuffle(),
+        order in layout(),
         src in any::<u32>(),
         dst in any::<u32>(),
         src_port in 1u16..=u16::MAX,
@@ -911,6 +1026,7 @@ proptest! {
             "version" => "2".to_owned(),
             "account-id" => "111111111111".to_owned(),
             "interface-id" => "eni-0abc".to_owned(),
+            "vpc-id" => "vpc-named".to_owned(),
             "instance-id" => "i-0abc".to_owned(),
             "srcaddr" => src.clone(),
             "dstaddr" => dst.clone(),
@@ -932,7 +1048,13 @@ proptest! {
             order.iter().map(|f| cell(f)).collect::<Vec<_>>().join(" ")
         );
 
-        let parsed = flow_logs::parse(&object, "us-east-1", usize::MAX);
+        let parsed = flow_logs::parse(
+            &object,
+            "us-east-1",
+            usize::MAX,
+            &interface_networks("eni-0abc", NETWORK),
+        );
+        let network = if order.contains(&"vpc-id") { "vpc-named" } else { NETWORK };
 
         prop_assert_eq!(parsed.unusable, 0);
         prop_assert!(!parsed.unusable_layout);
@@ -943,8 +1065,8 @@ proptest! {
 
         // Field order is the object's own business; what the projector reads
         // has to come out identical regardless.
-        prop_assert_eq!(&flow.src, &Node::ip(&src));
-        prop_assert_eq!(&flow.dst, &Node::ip(&dst));
+        prop_assert_eq!(&flow.src, &Node::ip(&src, network));
+        prop_assert_eq!(&flow.dst, &Node::ip(&dst, network));
         prop_assert_eq!(flow.src_port, Some(src_port));
         prop_assert_eq!(flow.dst_port, Some(dst_port));
         prop_assert_eq!(flow.packets, packets);
@@ -998,7 +1120,16 @@ fn top_of(stack: Stack) -> Node {
 }
 
 fn pivot_of(stack: Stack) -> Node {
-    Node::ip(&format!("10.{}.0.1", stack.id))
+    pivot_in(stack, NETWORK)
+}
+
+fn pivot_in(stack: Stack, network: &str) -> Node {
+    Node::ip(&format!("10.{}.0.1", stack.id), network)
+}
+
+fn wire_twin(builder: &mut GraphBuilder, stack: Stack) {
+    let twin = builder.get_or_add_node(Node::AwsEc2Instance(format!("i-twin-{}", stack.id).into()));
+    builder.link_to(twin, pivot_in(stack, OTHER_NETWORK), Edge::ConnectsTo);
 }
 
 fn wire(builder: &mut GraphBuilder, stack: Stack) {
@@ -1036,6 +1167,20 @@ fn wire(builder: &mut GraphBuilder, stack: Stack) {
     builder.link_to(claimer_index, pivot_of(stack), edge);
 }
 
+fn served_pairs(builder: &GraphBuilder) -> HashSet<(String, String)> {
+    builder
+        .graph
+        .edge_indices()
+        .filter(|e| builder.graph[*e] == Edge::Serves)
+        .filter_map(|e| {
+            builder
+                .graph
+                .edge_endpoints(e)
+                .map(|(a, b)| (node_key(&builder.graph[a]), node_key(&builder.graph[b])))
+        })
+        .collect()
+}
+
 proptest! {
     #[test]
     fn an_address_is_served_by_whatever_ultimately_holds_it(
@@ -1049,6 +1194,7 @@ proptest! {
         let mut builder = GraphBuilder::new();
         for stack in &stacks {
             wire(&mut builder, *stack);
+            wire_twin(&mut builder, *stack);
         }
 
         // An ephemeral source port against a service port orients every record
@@ -1081,25 +1227,52 @@ proptest! {
         flows.overlay(&mut builder);
         derive::all(&mut builder, &flows);
 
-        let served: HashSet<(String, String)> = builder
-            .graph
-            .edge_indices()
-            .filter(|e| builder.graph[*e] == Edge::Serves)
-            .filter_map(|e| {
-                builder.graph.edge_endpoints(e).map(|(a, b)| {
-                    (
-                        node_key(&builder.graph[a]),
-                        node_key(&builder.graph[b]),
-                    )
-                })
-            })
-            .collect();
-
         prop_assert_eq!(
-            served,
+            served_pairs(&builder),
             expected,
             "an address resolves to the top of its holder stack, and to nothing else"
         );
+    }
+
+    #[test]
+    fn an_ip_target_chain_resolves_to_whatever_ultimately_holds_the_address(
+        stacks in prop::collection::vec(stack(), 1..5),
+    ) {
+        let mut seen = HashSet::new();
+        let stacks: Vec<Stack> = stacks.into_iter().filter(|s| seen.insert(s.id)).collect();
+
+        let mut builder = GraphBuilder::new();
+        let lb = Node::AwsElbLoadBalancer("arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/lb/1".into());
+        let tg = Node::AwsElbTargetGroup("arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/tg/1".into());
+        let lb_idx = builder.get_or_add_ref(&lb);
+        let tg_idx = builder.link_to(lb_idx, tg, Edge::ConnectsTo);
+
+        // An address no resource in the scan holds must never become a target.
+        builder.link_to(tg_idx, Node::ip("10.255.0.1", NETWORK), Edge::RoutesTo);
+
+        let balancer_own_address = Node::ip("10.254.0.1", NETWORK);
+        let balancer_eni = builder.link_to(lb_idx, Node::AwsEc2Eni("eni-lb".into()), Edge::HasIp);
+        builder.link_to(balancer_eni, balancer_own_address.clone(), Edge::ConnectsTo);
+        builder.link_to(tg_idx, balancer_own_address, Edge::RoutesTo);
+
+        let mut expected: HashSet<(String, String)> = HashSet::new();
+        for stack in &stacks {
+            wire(&mut builder, *stack);
+            wire_twin(&mut builder, *stack);
+            builder.link_to(tg_idx, pivot_of(*stack), Edge::RoutesTo);
+            if stack.owns {
+                expected.insert((node_key(&lb), node_key(&top_of(*stack))));
+            }
+        }
+
+        let flows = FlowIndex::default();
+        derive::all(&mut builder, &flows);
+
+        prop_assert_eq!(served_pairs(&builder), expected);
+        for observation in derive::derived_observations(&builder.graph, &flows) {
+            prop_assert_eq!(observation.status, "inferred");
+            prop_assert_eq!(observation.last_seen, 0);
+        }
     }
 }
 

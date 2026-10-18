@@ -59,3 +59,17 @@ Test: `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.
 The owner rule above passes vacuously for an edge with no owned endpoint, and such an edge anchors its own endpoints. Cloudflare projected `hostname -ResolvesTo-> target`, so while *any* provider was unreadable a healthy zone's repointed or deleted records kept their old answers. DNS now reads `hostname -ResolvesTo-> record -ResolvesTo-> target` for Cloudflare and Route 53 alike (the record-to-name edge was also `RoutesTo`, which means traffic).
 
 Tests: `every_projected_edge_has_an_owned_endpoint`, `carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records`.
+
+## Derivation (service topology)
+
+### A private address is the same address only inside one network
+
+`GenericIpAddress` was keyed by value alone, so every resource holding `10.0.1.5` in any VPC, account, region or cloud shared one pivot. Default VPCs reuse `172.31.0.0/16` everywhere, so a single IP target group drew `inferred` `Serves` edges to unrelated interfaces with no traffic at all, and a flow confirmed edges to all of them. Private values are now `GenericPrivateIpAddress { network, address }`, built by `Node::ip(value, network)` with the network the address was read in; flow records are read in the network of the interface that captured them, and dropped and reported when it is unknown. Containment scopes the same way.
+
+Tests: `an_ip_target_is_served_only_by_the_holder_in_its_own_network`, `a_private_address_is_one_node_per_network_it_is_read_in`, `only_a_private_address_depends_on_the_network_it_is_read_in`, `a_range_covers_exactly_the_addresses_inside_it_in_its_own_network`, `a_private_address_seen_by_an_interface_the_scan_has_not_found_is_counted_not_guessed`.
+
+### Gate an IP target on the scan, as an instance target is
+
+`link_instance_targets` refused a registration naming a stopped instance by id, but an IP target naming the same instance by its interface's address went through, and the interface — holder gone — resolved as its own owner: `NLB -Serves-> AwsEc2Eni`, `inferred`. `link_targets` now handles both kinds after the parallel pass and skips an address held by an interface attached to an instance the scan dropped.
+
+Tests: `a_stopped_ip_target_is_not_inferred`, `an_ip_target_on_a_stopped_instances_interface_is_not_linked`.

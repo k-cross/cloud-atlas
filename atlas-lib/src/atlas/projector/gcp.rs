@@ -56,8 +56,9 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                                 );
                             }
 
+                            let scope = network_scope(net.network.as_deref(), id);
                             for address in interface_addresses(net) {
-                                builder.link_to(idx, Node::ip(address), Edge::ConnectsTo);
+                                builder.link_to(idx, Node::ip(address, scope), Edge::ConnectsTo);
                             }
                         }
                     }
@@ -81,9 +82,10 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         && direction == "EGRESS"
                         && let Some(ranges) = &fw.destination_ranges
                     {
+                        let scope = network_scope(fw.network.as_deref(), id);
                         for range in ranges {
                             if !is_large_cidr(range) {
-                                builder.link_to(idx, Node::ip(range), Edge::RoutesTo);
+                                builder.link_to(idx, Node::ip(range, scope), Edge::RoutesTo);
                             }
                         }
                     }
@@ -95,10 +97,16 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                 if let Some(name) = &sql.name {
                     let idx = builder.get_or_add_node(Node::GcpSqlInstance(name.as_str().into()));
 
+                    let private_network = sql
+                        .settings
+                        .as_ref()
+                        .and_then(|s| s.ip_configuration.as_ref())
+                        .and_then(|c| c.private_network.as_deref());
+                    let scope = network_scope(private_network, name);
                     if let Some(ips) = &sql.ip_addresses {
                         for ip in ips {
                             if let Some(ip_addr) = &ip.ip_address {
-                                builder.link_to(idx, Node::ip(ip_addr), Edge::ConnectsTo);
+                                builder.link_to(idx, Node::ip(ip_addr, scope), Edge::ConnectsTo);
                             }
                         }
                     }
@@ -189,11 +197,21 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         builder.get_or_add_node(Node::GcpComputeForwardingRule(id.as_str().into()));
 
                     if let Some(ip) = &rule.ip_address {
-                        builder.link_to(idx, Node::ip(ip), Edge::ConnectsTo);
+                        let scope = network_scope(rule.network.as_deref(), id);
+                        builder.link_to(idx, Node::ip(ip, scope), Edge::ConnectsTo);
                     }
                 }
             }
         }
+    }
+}
+
+fn network_scope<'a>(network: Option<&'a str>, owner: &'a str) -> &'a str {
+    match network {
+        Some(network) => network
+            .find("projects/")
+            .map_or(network, |at| &network[at..]),
+        None => owner,
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::atlas::collection::CollectionSource;
-use crate::atlas::util::{canonical_address, canonical_hostname};
+use crate::atlas::util::{canonical_hostname, format_address, is_private, parse_address};
 use std::fmt;
 use std::sync::Arc;
 
@@ -67,6 +67,7 @@ macro_rules! nodes {
 nodes!(
     None => [
         GenericIpAddress(id) => "Generic::IpAddress({id})",
+        GenericPrivateIpAddress { network, address } => "Generic::PrivateIpAddress({address}@{network})",
         GenericHostname(id) => "Generic::Hostname({id})",
         ExternalService(id) => "External::Service({id})",
     ],
@@ -152,8 +153,28 @@ nodes!(
 // `HashMap<Node, NodeIndex>`, so every producer must spell one address the same
 // way. Build them here, never by naming the variant.
 impl Node {
-    pub fn ip(value: &str) -> Node {
-        Node::GenericIpAddress(intern(canonical_address(value), value))
+    pub fn ip(value: &str, network: &str) -> Node {
+        match parse_address(value) {
+            Some((addr, prefix)) => {
+                let address: Arc<str> = format_address(&addr, prefix).into();
+                if is_private(&addr, prefix) {
+                    Node::GenericPrivateIpAddress {
+                        network: network.into(),
+                        address,
+                    }
+                } else {
+                    Node::GenericIpAddress(address)
+                }
+            }
+            None => Node::GenericIpAddress(value.into()),
+        }
+    }
+
+    pub fn public_ip(value: &str) -> Option<Node> {
+        match Node::ip(value, "") {
+            Node::GenericPrivateIpAddress { .. } => None,
+            public => Some(public),
+        }
     }
 
     pub fn hostname(value: &str) -> Node {

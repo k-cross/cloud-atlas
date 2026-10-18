@@ -13,7 +13,7 @@ pub fn graph(tick: u64) -> GraphBuilder {
     let mut builder = fixtures::topology();
     if tick % 2 == 1 {
         let host = builder.get_or_add_node(Node::hostname(SENTINEL_HOSTNAME));
-        let ip = builder.get_or_add_node(Node::ip(SENTINEL_ADDRESS));
+        let ip = builder.get_or_add_node(Node::ip(SENTINEL_ADDRESS, SENTINEL_HOSTNAME));
         builder.add_edge(host, ip, Edge::ResolvesTo);
     }
     builder

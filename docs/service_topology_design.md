@@ -36,11 +36,15 @@ An unrecognised description means no owner edge, never a guessed one. The load b
 
 **Stopped instances.** `DescribeInstances` is filtered to running/pending, but stopped instances stay attached to ENIs and registered in target groups. Edges from those mentions are gated on `scanned_instances`, or they would invent bare instance nodes. Pinned by `an_interface_attached_to_an_instance_the_scan_dropped_invents_no_instance` and `a_stopped_target_is_not_inferred`.
 
+An IP target names the instance by address instead, and its interface keeps that address while stopped. The interface has no holder once the instance is gone, so it would resolve as its own owner — the rule meant for RDS and Lambda interfaces — and the target group would read as serving a standalone interface. `link_targets` therefore skips an IP target held by an interface attached to an instance the scan dropped. Pinned by `a_stopped_ip_target_is_not_inferred` and `an_ip_target_on_a_stopped_instances_interface_is_not_linked`.
+
+Known gap: the interface itself stays in the graph with its address (the event path must agree with the scan on it, and "attached to a stopped instance" is state rule 6 keeps off the node). A client still sending to that address — retrying a stopped backend — gets a `confirmed` `Serves` edge to the interface, since the traffic is real and the interface holds the address.
+
 **Tier 1.** `AWS::EC2::NetworkInterface` Config items now map through `project_interface`/`InterfaceFacts`, which was unsafe until the scan produced every ENI. Both deferred owner edges are omitted from events, since each needs a collection the event lacks. Pinned by `an_interface_event_produces_only_what_a_full_scan_would` and `a_balancer_interface_event_does_not_invent_the_balancer`.
 
 ### GCP (done)
 
-GCE has no separate interface resource, so an instance holds its addresses directly: `GcpComputeInstance -ConnectsTo-> GenericIpAddress`, for each interface's `networkIP` and `ipv6Address` and each access config's `natIP` and `externalIpv6`. The NAT address matters most — it is the one a peer's flow log records for egress. Forwarding rules and Cloud SQL instances already carried theirs.
+GCE has no separate interface resource, so an instance holds its addresses directly: `GcpComputeInstance -ConnectsTo-> GenericIpAddress`, for each interface's `networkIP` and `ipv6Address` and each access config's `natIP` and `externalIpv6`. A private one is read in the interface's network, as are a firewall's ranges, an internal forwarding rule's address and a Cloud SQL private IP (`settings.ipConfiguration.privateNetwork`); all are cut to `projects/…/global/networks/…`, since instances report a full URL and Cloud SQL a path. The NAT address matters most — it is the one a peer's flow log records for egress. Forwarding rules and Cloud SQL instances already carried theirs.
 
 ### Azure (done)
 
@@ -48,7 +52,7 @@ GCE has no separate interface resource, so an instance holds its addresses direc
 
 | Field | Edge |
 |---|---|
-| `privateIPAddress` | `-ConnectsTo-> GenericIpAddress` |
+| `privateIPAddress` | `-ConnectsTo-> GenericPrivateIpAddress`, in the VNet of `subnet.id` |
 | `publicIPAddress.id` | `-HasIp-> AzurePublicIpAddress` |
 | `subnet.id` | `-AttachedTo-> AzureSubnet` |
 
@@ -62,7 +66,7 @@ Cloudflare is absent from this phase because it has no per-resource address to c
 
 - **Workers and Durable Objects** run on shared anycast. The addresses Cloudflare publishes are network-wide ranges fronting every zone on the platform, so pinning one to a worker or a zone would be the same guess the RDS ENI case rejects — worse, since one address really does front millions of tenants.
 - **KV, R2 and D1** are reached through the Workers runtime or an account-level API host. There is no per-namespace or per-bucket endpoint for a flow record to name.
-- **The one address Cloudflare knows** is the `A`/`AAAA` content of a DNS record, and it is already in the graph: `GenericHostname -ResolvesTo-> CloudflareDnsRecord -ResolvesTo-> GenericIpAddress`. That is an *origin* address, held by whatever actually answers on it — often an ENI in the same graph. `ResolvesTo` confers no ownership (architecture rule 5), so the record never becomes a `Serves` endpoint; the fixture's `v6.globex.io` names `2001:db8::10`, which is also a flow source, and draws no edge. Pinned by `naming_an_address_is_not_holding_it`.
+- **The one address Cloudflare knows** is the `A`/`AAAA` content of a DNS record, and it is already in the graph: `GenericHostname -ResolvesTo-> CloudflareDnsRecord -ResolvesTo-> GenericIpAddress`. That is an *origin* address, held by whatever actually answers on it — often an ENI in the same graph. A private answer is read in the zone, since a public record cannot say which network's `10.x` it means, so it reaches no holder. `ResolvesTo` confers no ownership (architecture rule 5), so the record never becomes a `Serves` endpoint; the fixture's `v6.globex.io` names `2001:db8::10`, which is also a flow source, and draws no edge. Pinned by `naming_an_address_is_not_holding_it`.
 
 So the invariant holds for Cloudflare vacuously: no Cloudflare resource can be the thing a flow endpoint resolves to. If that changes — Workers with dedicated egress IPs, or Spectrum's per-application addresses — the resource would carry them with `ConnectsTo` like any other.
 
@@ -105,13 +109,13 @@ Hence `Edge::is_projected()` is false for `Serves`, and no event adapter may emi
 
 ### Derivation
 
-- **Ownership.** A pivot is owned by what `ConnectsTo` it, resolved transitively up `HasIp` (a visited set breaks cycles), so `Eni -Serves-> Eni` becomes `ALB -Serves-> Instance` and an Elastic IP held by an interface (`Instance -HasIp-> Eni -HasIp-> Eip`) isn't a second owner. An interface nothing holds owns itself — `Instance -Serves-> AwsEc2Eni(rds)` is the honest answer when the database can't be named. `ResolvesTo` never confers ownership, so a DNS record is never a `Serves` endpoint; this is an edge-kind rule, not a blocklist, which keeps the pass provider-agnostic.
+- **Ownership.** A pivot is owned by what `ConnectsTo` it, resolved transitively up `HasIp` (a visited set breaks cycles), so `Eni -Serves-> Eni` becomes `ALB -Serves-> Instance` and an Elastic IP held by an interface (`Instance -HasIp-> Eni -HasIp-> Eip`) isn't a second owner. Ownership never crosses a network: a private address carries the network it was read in, so an IP target or a flow record finds the holder in its own VPC, never a resource elsewhere that reuses the range. An interface nothing holds owns itself — `Instance -Serves-> AwsEc2Eni(rds)` is the honest answer when the database can't be named. `ResolvesTo` never confers ownership, so a DNS record is never a `Serves` endpoint; this is an edge-kind rule, not a blocklist, which keeps the pass provider-agnostic.
 - **Observed pairs.** For each flow, emit `Serves` for every pair of resolved owners, uncapped (below). An unowned endpoint (internet addresses, a NAT gateway's peers) produces nothing.
 - **Orientation.** A flow log writes request and reply as separate records, so packet direction draws every relationship both ways. `FlowObservation` carries ports; `flow::orientation` treats the non-ephemeral (or lower) port as the service, falls back to packet direction when ambiguous, and `FlowStats` keeps a per-pair majority. Pinned by `a_reply_does_not_reverse_the_relationship`.
-- **Chains.** `CHAINS` lists `Node::kind()` sequences, checked against `ALL_KINDS`; the matcher walks projected edges only, so it can't read its own output. Only `[AwsElbLoadBalancer, AwsElbTargetGroup, AwsEc2Instance]` exists; GCP (backend service) and Azure (a backend pool under `AzureLoadBalancer`) lack the kinds, so their `Serves` edges come from traffic alone.
-- **Targets.** Projected by `target_type`: `instance` via `link_instance_targets`; `ip` as `RoutesTo` a pivot (`ConnectsTo` would make the group an address holder); Lambda/ALB targets skipped.
+- **Chains.** `CHAINS` lists `Node::kind()` sequences, checked against `ALL_KINDS`; the matcher walks projected edges only, so it can't read its own output. Three AWS rows exist: `[AwsElbLoadBalancer, AwsElbTargetGroup, AwsEc2Instance]`, and the same ending in `GenericPrivateIpAddress` or `GenericIpAddress` for IP targets (an ownerless endpoint resolves through `address_owners`, so an IP target names whatever holds the address in the group's VPC, and nothing if nothing does). Pinned by `an_ip_target_is_served_only_by_the_holder_in_its_own_network`. GCP (backend service) and Azure (a backend pool under `AzureLoadBalancer`) lack the kinds, so their `Serves` edges come from traffic alone.
+- **Targets.** Projected by `target_type` in `link_targets`, after the parallel pass: `instance` gated on `scanned_instances`; `ip` as `RoutesTo` a pivot in the group's VPC (`ConnectsTo` would make the group an address holder), gated on the address not belonging to a dropped instance's interface; Lambda/ALB targets skipped.
 
-The Globex fixture derives ten edges, printed by `cargo run --example demo`: the ALB to web-01 and web-02 (`confirmed`) and to web-03 (registered and idle, `inferred`); plus `confirmed` web-01 → web-02, web-01 → the RDS ENI, NAT → web-02, and four cross-cloud hops — web-01 to the Azure load balancer (its frontend public IP) and to the Azure VM (its NIC's private address), web-02 to the GCE instance (its NAT address) and to the GCP SQL instance. Phase 1d added the two middle ones; the GCP SQL hop predates it, and the Azure balancer hop is the one that used to land on a bare `AzurePublicIpAddress`.
+The Globex fixture derives nine edges, printed by `cargo run --example demo`: the ALB to web-01 and web-02 (`confirmed`) and to web-03 (registered and idle, `inferred`); the NLB to the RDS ENI (`inferred`, via its IP target group); plus `confirmed` web-01 → web-02, web-01 → the RDS ENI, NAT → web-02, and two cross-cloud hops over public addresses — web-01 to the Azure load balancer (its frontend public IP) and web-02 to the GCE instance (its NAT address). The fixture's two private hops over the interconnect, web-01 to the Azure VM's NIC and web-02 to the Cloud SQL instance, derive nothing: their addresses are read in `vpc-globex`, where nothing holds them (`a_private_address_seen_from_another_network_names_nothing_there`). They return once interconnects are modelled.
 
 ### Rendering
 
@@ -137,4 +141,6 @@ The Globex fixture derives ten edges, printed by `cargo run --example demo`: the
 | 2b | `Serves` from traffic | Done |
 | 2c | Control-plane chains, `inferred` status | Done |
 | 2d | Frontend status styling, service view | Done |
-| — | IP targets in chains (`[LB, TargetGroup, <address>]`), e.g. NLB → RDS | Not started |
+| 2e | IP targets in chains (`[LB, TargetGroup, <address>]`), e.g. NLB → RDS | Done |
+| 2f | Private addresses scoped to their network; IP targets gated on `scanned_instances` | Done |
+| — | Interconnect-aware resolution (peering, Transit Gateway, VPN, interconnect) | Not started |
