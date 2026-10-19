@@ -1247,7 +1247,6 @@ proptest! {
         let lb_idx = builder.get_or_add_ref(&lb);
         let tg_idx = builder.link_to(lb_idx, tg, Edge::ConnectsTo);
 
-        // An address no resource in the scan holds must never become a target.
         builder.link_to(tg_idx, Node::ip("10.255.0.1", NETWORK), Edge::RoutesTo);
 
         let balancer_own_address = Node::ip("10.254.0.1", NETWORK);
@@ -1273,6 +1272,85 @@ proptest! {
             prop_assert_eq!(observation.status, "inferred");
             prop_assert_eq!(observation.last_seen, 0);
         }
+    }
+}
+
+proptest! {
+    #[test]
+    fn an_unheld_address_resolves_through_exactly_one_joined_holder(
+        (holds, peerings, reader) in prop::collection::vec(any::<bool>(), 2..6)
+            .prop_flat_map(|holds| {
+                let networks = holds.len();
+                (
+                    Just(holds),
+                    prop::collection::vec((0..networks, 0..networks), 0..8),
+                    0..networks,
+                )
+            }),
+    ) {
+        let vpc = |index: usize| format!("vpc-{index}");
+        let peerings: Vec<(usize, usize)> =
+            peerings.into_iter().filter(|(a, b)| a != b).collect();
+
+        let mut builder = GraphBuilder::new();
+        for (index, (a, b)) in peerings.iter().enumerate() {
+            let pcx = builder
+                .get_or_add_node(Node::AwsEc2VpcPeeringConnection(format!("pcx-{index}").into()));
+            builder.link_to(pcx, Node::AwsEc2Vpc(vpc(*a).into()), Edge::AttachedTo);
+            builder.link_to(pcx, Node::AwsEc2Vpc(vpc(*b).into()), Edge::AttachedTo);
+        }
+        for (network, _) in holds.iter().enumerate().filter(|(_, holds)| **holds) {
+            let holder = builder
+                .get_or_add_node(Node::AwsEc2Instance(format!("i-{network}").into()));
+            builder.link_to(holder, Node::ip("10.9.9.9", &vpc(network)), Edge::ConnectsTo);
+        }
+        let balancer = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/lb/1".into(),
+        );
+        let balancer_idx = builder.get_or_add_node(balancer.clone());
+        let group = builder.link_to(
+            balancer_idx,
+            Node::AwsElbTargetGroup(
+                "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/tg/1".into(),
+            ),
+            Edge::ConnectsTo,
+        );
+        builder.link_to(group, Node::ip("10.9.9.9", &vpc(reader)), Edge::RoutesTo);
+
+        derive::all(&mut builder, &FlowIndex::default());
+
+        let peers: HashSet<usize> = peerings
+            .iter()
+            .filter_map(|(a, b)| match (*a == reader, *b == reader) {
+                (true, _) => Some(*b),
+                (_, true) => Some(*a),
+                _ => None,
+            })
+            .collect();
+        let holder = if holds[reader] {
+            Some(reader)
+        } else {
+            let holding: Vec<usize> = peers.into_iter().filter(|peer| holds[*peer]).collect();
+            match holding[..] {
+                [only] => Some(only),
+                _ => None,
+            }
+        };
+        let expected: HashSet<(String, String)> = holder
+            .map(|network| {
+                (
+                    node_key(&balancer),
+                    node_key(&Node::AwsEc2Instance(format!("i-{network}").into())),
+                )
+            })
+            .into_iter()
+            .collect();
+
+        prop_assert_eq!(
+            served_pairs(&builder),
+            expected,
+            "a local holder wins; otherwise exactly one directly joined holder, never a chain"
+        );
     }
 }
 

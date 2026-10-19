@@ -272,14 +272,7 @@ mod tests {
         let project = Node::GcpProject(fixtures::GCP_PROJECT.into());
         let zone = Node::GcpComputeZone("us-central1-a".into());
         let instance = Node::GcpComputeInstance("7000000000000000001".into());
-        let network = Node::GcpComputeNetwork(
-            format!(
-                "https://www.googleapis.com/compute/v1/projects/{}/global/networks/vpc-globex",
-                fixtures::GCP_PROJECT
-            )
-            .as_str()
-            .into(),
-        );
+        let network = Node::GcpComputeNetwork(gcp_network().as_str().into());
 
         assert_edge(&builder, &project, &instance, &Edge::DependsOn);
         assert_edge(&builder, &zone, &instance, &Edge::Contains);
@@ -371,6 +364,21 @@ mod tests {
             &Edge::ConnectsTo,
         );
 
+        assert_edge(
+            &builder,
+            &network,
+            &Node::GcpComputeNetwork(
+                "projects/globex-sql-tenant/global/networks/servicenetworking".into(),
+            ),
+            &Edge::ConnectsTo,
+        );
+        assert!(
+            !builder.contains(&Node::GcpComputeNetwork(
+                "projects/globex-legacy/global/networks/legacy".into()
+            )),
+            "an inactive peering joins nothing"
+        );
+
         assert_has_node(&builder, &Node::GcpDnsManagedZone("globex-internal".into()));
         assert_has_node(&builder, &Node::GcpStorageBucket("globex-datalake".into()));
         assert_has_node(
@@ -409,6 +417,18 @@ mod tests {
 
         assert_edge(&builder, &vm, &nic, &Edge::HasIp);
         assert_edge(&builder, &vnet, &subnet, &Edge::Contains);
+
+        let hub = Node::AzureVirtualNetwork(azure_networking_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex-hub",
+        ));
+        assert_edge(&builder, &vnet, &hub, &Edge::ConnectsTo);
+        assert_edge(&builder, &hub, &vnet, &Edge::ConnectsTo);
+        assert!(
+            !builder.contains(&Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/vnet-globex-dr",
+            ))),
+            "a peering only one side has created joins nothing"
+        );
         assert_edge(&builder, &subnet, &nsg, &Edge::ConnectsTo);
 
         assert_edge(
@@ -610,6 +630,204 @@ mod tests {
             "data.globex.io",
             &Node::CloudflareDnsRecord("rec-data".into()),
             &Node::hostname("run.globex.app"),
+        );
+    }
+
+    #[test]
+    fn aws_connectivity_projection() {
+        let mut builder = GraphBuilder::new();
+        projector::build(&mut builder, &fixtures::aws(), &fixtures::settings());
+
+        let region = Node::AwsRegion(fixtures::REGION.into());
+        let vpc = |id: &str| Node::AwsEc2Vpc(id.into());
+        for id in [
+            fixtures::AWS_NETWORK,
+            "vpc-globex-data",
+            "vpc-globex-shared",
+            "vpc-globex-staging",
+        ] {
+            assert_edge(&builder, &region, &vpc(id), &Edge::Contains);
+        }
+
+        let pcx = Node::AwsEc2VpcPeeringConnection("pcx-globex-data".into());
+        assert_edge(
+            &builder,
+            &pcx,
+            &vpc(fixtures::AWS_NETWORK),
+            &Edge::AttachedTo,
+        );
+        assert_edge(&builder, &pcx, &vpc("vpc-globex-data"), &Edge::AttachedTo);
+        assert!(
+            !builder.contains(&Node::AwsEc2VpcPeeringConnection(
+                "pcx-globex-staging".into()
+            )),
+            "a rejected peering request connects nothing"
+        );
+
+        let tgw = Node::AwsEc2TransitGateway("tgw-globex".into());
+        assert_edge(&builder, &region, &tgw, &Edge::Contains);
+        assert_edge(
+            &builder,
+            &tgw,
+            &vpc(fixtures::AWS_NETWORK),
+            &Edge::AttachedTo,
+        );
+        assert_edge(&builder, &tgw, &vpc("vpc-globex-shared"), &Edge::AttachedTo);
+        assert!(!builder.has_edge(&tgw, &vpc("vpc-globex-staging"), &Edge::AttachedTo));
+
+        let private_rt = Node::AwsEc2RouteTable("rtb-private".into());
+        assert_edge(&builder, &private_rt, &pcx, &Edge::RoutesTo);
+        assert_edge(&builder, &private_rt, &tgw, &Edge::RoutesTo);
+    }
+
+    #[test]
+    fn only_live_routes_and_attachments_join_networks() {
+        use crate::cloud::definition::{AWSConnectivity, AWSNetworking, AmazonCollection};
+        use aws_sdk_ec2::types::{
+            Route, RouteState, RouteTable, TransitGateway, TransitGatewayAttachment,
+            TransitGatewayAttachmentResourceType, TransitGatewayAttachmentState,
+            TransitGatewayState,
+        };
+
+        let builder = project_aws(vec![
+            AmazonCollection::AmazonNetworking(AWSNetworking {
+                route_tables: vec![
+                    RouteTable::builder()
+                        .route_table_id("rtb-1")
+                        .vpc_id("vpc-a")
+                        .routes(
+                            Route::builder()
+                                .destination_cidr_block("10.9.0.0/16")
+                                .vpc_peering_connection_id("pcx-gone")
+                                .state(RouteState::Blackhole)
+                                .build(),
+                        )
+                        .routes(
+                            Route::builder()
+                                .destination_cidr_block("0.0.0.0/0")
+                                .nat_gateway_id("nat-gone")
+                                .state(RouteState::Blackhole)
+                                .build(),
+                        )
+                        .build(),
+                ],
+                internet_gateways: Vec::new(),
+                nat_gateways: Vec::new(),
+                addresses: Vec::new(),
+            }),
+            AmazonCollection::AmazonConnectivity(AWSConnectivity {
+                transit_gateways: vec![
+                    TransitGateway::builder()
+                        .transit_gateway_id("tgw-new")
+                        .state(TransitGatewayState::Pending)
+                        .build(),
+                ],
+                transit_gateway_attachments: vec![
+                    TransitGatewayAttachment::builder()
+                        .transit_gateway_id("tgw-1")
+                        .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+                        .resource_id("vpc-a")
+                        .state(TransitGatewayAttachmentState::PendingAcceptance)
+                        .build(),
+                    TransitGatewayAttachment::builder()
+                        .transit_gateway_id("tgw-1")
+                        .resource_type(TransitGatewayAttachmentResourceType::Vpn)
+                        .resource_id("vpn-1")
+                        .state(TransitGatewayAttachmentState::Available)
+                        .build(),
+                ],
+                ..Default::default()
+            }),
+        ]);
+
+        assert!(
+            !builder.contains(&Node::AwsEc2VpcPeeringConnection("pcx-gone".into())),
+            "a blackhole route names a peering that no longer exists"
+        );
+        assert!(
+            !builder.contains(&Node::AwsEc2NatGateway("nat-gone".into())),
+            "a blackhole route draws nothing, whatever its target"
+        );
+        assert!(!builder.contains(&Node::AwsEc2TransitGateway("tgw-new".into())));
+        assert!(
+            !builder
+                .graph
+                .node_weights()
+                .any(|n| matches!(n, Node::AwsEc2TransitGateway(_))),
+            "neither a pending attachment nor a VPN attachment draws the gateway"
+        );
+    }
+
+    #[test]
+    fn a_gateway_being_modified_still_joins_its_networks() {
+        use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
+        use aws_sdk_ec2::types::{
+            TransitGateway, TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
+            TransitGatewayAttachmentState, TransitGatewayState,
+        };
+
+        let attachment = |vpc: &str| {
+            TransitGatewayAttachment::builder()
+                .transit_gateway_id("tgw-1")
+                .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+                .resource_id(vpc)
+                .state(TransitGatewayAttachmentState::Modifying)
+                .build()
+        };
+        let builder = project_aws(vec![AmazonCollection::AmazonConnectivity(
+            AWSConnectivity {
+                transit_gateways: vec![
+                    TransitGateway::builder()
+                        .transit_gateway_id("tgw-1")
+                        .state(TransitGatewayState::Modifying)
+                        .build(),
+                ],
+                transit_gateway_attachments: vec![attachment("vpc-a"), attachment("vpc-b")],
+                ..Default::default()
+            },
+        )]);
+
+        let tgw = Node::AwsEc2TransitGateway("tgw-1".into());
+        assert_edge(
+            &builder,
+            &Node::AwsRegion("us-east-1".into()),
+            &tgw,
+            &Edge::Contains,
+        );
+        for vpc in ["vpc-a", "vpc-b"] {
+            assert_edge(
+                &builder,
+                &tgw,
+                &Node::AwsEc2Vpc(vpc.into()),
+                &Edge::AttachedTo,
+            );
+        }
+    }
+
+    #[test]
+    fn a_gke_network_named_bare_is_the_same_network_instances_name_by_url() {
+        use crate::api::google::gke::Cluster;
+        use crate::cloud::definition::{GoogleCollection, Provider};
+
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::GCP(vec![(
+                "p".to_owned(),
+                GoogleCollection::GoogleGke(vec![Cluster {
+                    name: Some("c".to_owned()),
+                    network: Some("default".to_owned()),
+                    ..Default::default()
+                }]),
+            )]),
+            &Settings::default(),
+        );
+
+        assert_edge(
+            &builder,
+            &Node::GcpComputeNetwork("projects/p/global/networks/default".into()),
+            &Node::GcpGkeCluster("c".into()),
+            &Edge::Contains,
         );
     }
 

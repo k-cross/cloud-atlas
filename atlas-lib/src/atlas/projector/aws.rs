@@ -1,10 +1,16 @@
 use super::{project_leaf, project_parallel};
 use crate::Settings;
 use crate::atlas::definition::{Edge, Node};
+use crate::atlas::derive::{self, HeldAddresses};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
-use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection};
-use aws_sdk_ec2::types::NetworkInterface;
+use crate::cloud::definition::{
+    AWSConnectivity, AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection,
+};
+use aws_sdk_ec2::types::{
+    NetworkInterface, RouteState, TransitGatewayAttachmentResourceType,
+    TransitGatewayAttachmentState, TransitGatewayState, VpcPeeringConnectionStateReasonCode,
+};
 use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
@@ -49,6 +55,8 @@ fn link_targets(
     scanned: &HashSet<&str>,
 ) {
     let held_by_unscanned = addresses_of_unscanned_instances(aws_data, scanned);
+    let held = derive::held_addresses(&builder.graph);
+    let mut linked: Vec<(&str, Node, Edge)> = Vec::new();
     for (_, collection) in aws_data {
         let AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
             target_groups,
@@ -69,33 +77,53 @@ fn link_targets(
                 .iter()
                 .filter_map(|h| h.target())
                 .filter_map(|t| t.id());
-            let linked: Vec<(Node, Edge)> = match tg.target_type() {
-                Some(TargetTypeEnum::Instance) => targets
-                    .filter(|id| scanned.contains(id))
-                    .map(|id| (Node::AwsEc2Instance(id.into()), Edge::ConnectsTo))
-                    .collect(),
+            match tg.target_type() {
+                Some(TargetTypeEnum::Instance) => linked.extend(
+                    targets
+                        .filter(|id| scanned.contains(id))
+                        .map(|id| (arn, Node::AwsEc2Instance(id.into()), Edge::ConnectsTo)),
+                ),
                 // The group routes to this address; it does not hold it.
                 // `ConnectsTo` to a pivot means holding, and would make the
                 // group a Serves endpoint.
                 Some(TargetTypeEnum::Ip) => {
                     let network = tg.vpc_id().unwrap_or(arn);
-                    targets
-                        .map(|address| Node::ip(address, network))
-                        .filter(|address| !held_by_unscanned.contains(address))
-                        .map(|address| (address, Edge::RoutesTo))
-                        .collect()
+                    linked.extend(
+                        targets
+                            .map(|address| Node::ip(address, network))
+                            .filter(|target| {
+                                !resolves_to_unscanned(builder, &held, &held_by_unscanned, target)
+                            })
+                            .map(|target| (arn, target, Edge::RoutesTo)),
+                    );
                 }
                 // A Lambda target is a function ARN and an ALB target a
                 // balancer ARN. Neither is an instance, and an unknown type is
                 // not evidence of one.
-                _ => Vec::new(),
-            };
-            for (target, edge) in linked {
-                let tg_idx = builder.get_or_add_node(Node::AwsElbTargetGroup(arn.into()));
-                builder.link_to(tg_idx, target, edge);
+                _ => {}
             }
         }
     }
+    for (arn, target, edge) in linked {
+        let tg_idx = builder.get_or_add_node(Node::AwsElbTargetGroup(arn.into()));
+        builder.link_to(tg_idx, target, edge);
+    }
+}
+
+fn resolves_to_unscanned(
+    builder: &GraphBuilder,
+    held: &HeldAddresses,
+    held_by_unscanned: &HashSet<Node>,
+    target: &Node,
+) -> bool {
+    if held_by_unscanned.contains(target) {
+        return true;
+    }
+    let Node::GenericPrivateIpAddress { network, address } = target else {
+        return false;
+    };
+    held.holder(network, address)
+        .is_some_and(|pivot| held_by_unscanned.contains(&builder.graph[pivot]))
 }
 
 fn addresses_of_unscanned_instances(
@@ -573,7 +601,11 @@ fn project_amazon_collection(
                         }
                     }
 
-                    for route in rt.routes() {
+                    for route in rt
+                        .routes()
+                        .iter()
+                        .filter(|route| route.state() != Some(&RouteState::Blackhole))
+                    {
                         if let Some(nat_id) = route.nat_gateway_id() {
                             builder.link_to(
                                 rt_idx,
@@ -588,8 +620,81 @@ fn project_amazon_collection(
                                 Node::AwsEc2InternetGateway(gw_id.into()),
                                 Edge::RoutesTo,
                             );
+                        } else if let Some(pcx_id) = route.vpc_peering_connection_id() {
+                            builder.link_to(
+                                rt_idx,
+                                Node::AwsEc2VpcPeeringConnection(pcx_id.into()),
+                                Edge::RoutesTo,
+                            );
+                        } else if let Some(tgw_id) = route.transit_gateway_id() {
+                            builder.link_to(
+                                rt_idx,
+                                Node::AwsEc2TransitGateway(tgw_id.into()),
+                                Edge::RoutesTo,
+                            );
                         }
                     }
+                }
+            }
+        }
+        AmazonCollection::AmazonConnectivity(AWSConnectivity {
+            vpcs,
+            peering_connections,
+            transit_gateways,
+            transit_gateway_attachments,
+        }) => {
+            for vpc_id in vpcs.iter().filter_map(|vpc| vpc.vpc_id()) {
+                builder.link_to(region_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
+            }
+
+            for pcx in peering_connections.iter().filter(|pcx| {
+                pcx.status().and_then(|status| status.code())
+                    == Some(&VpcPeeringConnectionStateReasonCode::Active)
+            }) {
+                let Some(pcx_id) = pcx.vpc_peering_connection_id() else {
+                    continue;
+                };
+                let pcx_idx =
+                    builder.get_or_add_node(Node::AwsEc2VpcPeeringConnection(pcx_id.into()));
+                for side in [pcx.requester_vpc_info(), pcx.accepter_vpc_info()] {
+                    if let Some(vpc_id) = side.and_then(|info| info.vpc_id()) {
+                        builder.link_to(pcx_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::AttachedTo);
+                    }
+                }
+            }
+
+            for tgw_id in transit_gateways
+                .iter()
+                .filter(|tgw| {
+                    matches!(
+                        tgw.state(),
+                        Some(TransitGatewayState::Available | TransitGatewayState::Modifying)
+                    )
+                })
+                .filter_map(|tgw| tgw.transit_gateway_id())
+            {
+                builder.link_to(
+                    region_idx,
+                    Node::AwsEc2TransitGateway(tgw_id.into()),
+                    Edge::Contains,
+                );
+            }
+
+            for attachment in transit_gateway_attachments.iter().filter(|attachment| {
+                matches!(
+                    attachment.state(),
+                    Some(
+                        TransitGatewayAttachmentState::Available
+                            | TransitGatewayAttachmentState::Modifying
+                    )
+                ) && attachment.resource_type() == Some(&TransitGatewayAttachmentResourceType::Vpc)
+            }) {
+                if let (Some(tgw_id), Some(vpc_id)) =
+                    (attachment.transit_gateway_id(), attachment.resource_id())
+                {
+                    let tgw_idx =
+                        builder.get_or_add_node(Node::AwsEc2TransitGateway(tgw_id.into()));
+                    builder.link_to(tgw_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::AttachedTo);
                 }
             }
         }
@@ -842,6 +947,9 @@ pub(crate) fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
         "AWS::RDS::DBSubnetGroup" => true,
         "AWS::EC2::Subnet" => true,
         "AWS::EC2::InternetGateway" => false,
+        "AWS::EC2::VPCPeeringConnection" => false,
+        "AWS::EC2::TransitGateway" => false,
+        "AWS::EC2::TransitGatewayAttachment" => false,
         "AWS::ECS::Cluster" => true,
         "AWS::Lambda::Function" => true,
         "AWS::RDS::DBInstance" => true,

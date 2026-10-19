@@ -1,4 +1,6 @@
-use crate::cloud::definition::{AWSLoadBalancing, AWSNetworking, AWSRoute53, TableName};
+use crate::cloud::definition::{
+    AWSConnectivity, AWSLoadBalancing, AWSNetworking, AWSRoute53, TableName,
+};
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
@@ -201,6 +203,85 @@ async fn ec2_networking_plane() {
     assert_eq!(internet_gateways[0].internet_gateway_id(), Some("igw-1"));
     assert_eq!(nat_gateways[0].nat_gateway_id(), Some("nat-1"));
     assert_eq!(addresses[0].public_ip(), Some("52.1.2.3"));
+}
+
+#[tokio::test]
+async fn ec2_connectivity_follows_every_page() {
+    let vpcs_first = r#"<DescribeVpcsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <vpcSet><item><vpcId>vpc-a</vpcId><cidrBlock>10.0.0.0/16</cidrBlock></item></vpcSet>
+  <nextToken>page-2</nextToken>
+</DescribeVpcsResponse>"#;
+    let vpcs_second = r#"<DescribeVpcsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <vpcSet><item><vpcId>vpc-b</vpcId><cidrBlock>10.1.0.0/16</cidrBlock></item></vpcSet>
+</DescribeVpcsResponse>"#;
+    let peerings = r#"<DescribeVpcPeeringConnectionsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <vpcPeeringConnectionSet><item>
+    <vpcPeeringConnectionId>pcx-1</vpcPeeringConnectionId>
+    <requesterVpcInfo><vpcId>vpc-a</vpcId></requesterVpcInfo>
+    <accepterVpcInfo><vpcId>vpc-b</vpcId></accepterVpcInfo>
+    <status><code>active</code><message>Active</message></status>
+  </item></vpcPeeringConnectionSet>
+</DescribeVpcPeeringConnectionsResponse>"#;
+    let gateways = r#"<DescribeTransitGatewaysResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <transitGatewaySet><item><transitGatewayId>tgw-1</transitGatewayId><state>available</state></item></transitGatewaySet>
+</DescribeTransitGatewaysResponse>"#;
+    let attachments = r#"<DescribeTransitGatewayAttachmentsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <transitGatewayAttachments><item>
+    <transitGatewayAttachmentId>tgw-attach-1</transitGatewayAttachmentId>
+    <transitGatewayId>tgw-1</transitGatewayId>
+    <resourceType>vpc</resourceType>
+    <resourceId>vpc-b</resourceId>
+    <state>available</state>
+  </item></transitGatewayAttachments>
+</DescribeTransitGatewayAttachmentsResponse>"#;
+    let cfg = replay_config(&[
+        (XML, vpcs_first),
+        (XML, vpcs_second),
+        (XML, peerings),
+        (XML, gateways),
+        (XML, attachments),
+    ])
+    .await;
+
+    let AWSConnectivity {
+        vpcs,
+        peering_connections,
+        transit_gateways,
+        transit_gateway_attachments,
+    } = super::connectivity::collector::runner(&cfg).await.unwrap();
+
+    let vpc_ids: Vec<_> = vpcs.iter().filter_map(|vpc| vpc.vpc_id()).collect();
+    assert_eq!(vpc_ids, vec!["vpc-a", "vpc-b"], "the second page is read");
+    let pcx = &peering_connections[0];
+    assert_eq!(pcx.vpc_peering_connection_id(), Some("pcx-1"));
+    assert_eq!(
+        pcx.status().and_then(|status| status.code()),
+        Some(&aws_sdk_ec2::types::VpcPeeringConnectionStateReasonCode::Active)
+    );
+    assert_eq!(
+        pcx.requester_vpc_info().and_then(|info| info.vpc_id()),
+        Some("vpc-a")
+    );
+    assert_eq!(
+        pcx.accepter_vpc_info().and_then(|info| info.vpc_id()),
+        Some("vpc-b")
+    );
+    assert_eq!(transit_gateways[0].transit_gateway_id(), Some("tgw-1"));
+    assert_eq!(
+        transit_gateways[0].state(),
+        Some(&aws_sdk_ec2::types::TransitGatewayState::Available)
+    );
+    let attachment = &transit_gateway_attachments[0];
+    assert_eq!(attachment.transit_gateway_id(), Some("tgw-1"));
+    assert_eq!(
+        attachment.resource_type(),
+        Some(&aws_sdk_ec2::types::TransitGatewayAttachmentResourceType::Vpc)
+    );
+    assert_eq!(attachment.resource_id(), Some("vpc-b"));
+    assert_eq!(
+        attachment.state(),
+        Some(&aws_sdk_ec2::types::TransitGatewayAttachmentState::Available)
+    );
 }
 
 #[tokio::test]

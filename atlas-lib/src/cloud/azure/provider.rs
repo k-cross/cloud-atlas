@@ -205,11 +205,37 @@ pub fn map_resources(
                         });
                     }
                 }
+                let peerings = res
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.get("virtualNetworkPeerings"))
+                    .and_then(|p| p.as_array())
+                    .map(|peerings| {
+                        peerings
+                            .iter()
+                            .map(|peering| {
+                                let properties = peering.get("properties");
+                                VirtualNetworkPeering {
+                                    remote_id: properties
+                                        .and_then(|p| p.get("remoteVirtualNetwork"))
+                                        .and_then(|remote| remote.get("id"))
+                                        .and_then(|id| id.as_str())
+                                        .map(str::to_owned),
+                                    state: properties
+                                        .and_then(|p| p.get("peeringState"))
+                                        .and_then(|state| state.as_str())
+                                        .map(str::to_owned),
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 vnets.push(VirtualNetwork {
                     id: res.id,
                     name: res.name,
                     location: res.location,
                     subnets: subnet_ids,
+                    peerings,
                 });
             }
             AzureType::NetworkInterfaces => {

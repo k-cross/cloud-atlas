@@ -6,8 +6,8 @@ use crate::atlas::flow::{FlowAction, FlowIndex, FlowObservation};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
-    AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection, CloudflareCollection,
-    GoogleCollection, MicrosoftCollection, Provider, QueueUrl, TableName,
+    AWSConnectivity, AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection,
+    CloudflareCollection, GoogleCollection, MicrosoftCollection, Provider, QueueUrl, TableName,
 };
 use std::collections::HashMap;
 
@@ -220,6 +220,20 @@ pub fn flows() -> Vec<FlowObservation> {
             18_300,
             Some(FlowAction::Accepted),
         ),
+        flow(
+            ("10.10.1.10", 41500),
+            ("10.40.1.20", 5439),
+            web01(),
+            15_200,
+            Some(FlowAction::Accepted),
+        ),
+        flow(
+            ("10.10.1.11", 42500),
+            ("10.50.0.10", 636),
+            web02(),
+            8_400,
+            Some(FlowAction::Accepted),
+        ),
     ]
 }
 
@@ -254,8 +268,12 @@ pub fn aws() -> Provider {
         Address, GroupIdentifier, InstanceNetworkInterface, InternetGateway,
         InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway, NatGatewayAddress,
         NetworkInterface, NetworkInterfaceAssociation, NetworkInterfaceAttachment,
-        NetworkInterfacePrivateIpAddress, NetworkInterfaceType, Placement, Route, RouteTable,
-        RouteTableAssociation, SecurityGroup, Tag, UserIdGroupPair, builders::InstanceBuilder,
+        NetworkInterfacePrivateIpAddress, NetworkInterfaceType, Placement, Route, RouteState,
+        RouteTable, RouteTableAssociation, SecurityGroup, Tag, TransitGateway,
+        TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
+        TransitGatewayAttachmentState, TransitGatewayState, UserIdGroupPair, Vpc,
+        VpcPeeringConnection, VpcPeeringConnectionStateReason, VpcPeeringConnectionStateReasonCode,
+        VpcPeeringConnectionVpcInfo, builders::InstanceBuilder,
     };
 
     let sg_web = GroupIdentifier::builder()
@@ -263,13 +281,14 @@ pub fn aws() -> Provider {
         .group_name("globex-web")
         .build();
 
-    let eni = |id: &str, subnet: &str| {
+    let eni_in = |vpc: &str, id: &str, subnet: &str| {
         InstanceNetworkInterface::builder()
             .network_interface_id(id)
             .subnet_id(subnet)
-            .vpc_id("vpc-globex")
+            .vpc_id(vpc)
             .build()
     };
+    let eni = |id: &str, subnet: &str| eni_in(AWS_NETWORK, id, subnet);
 
     let i1 = InstanceBuilder::default()
         .set_instance_id(Some("i-globex-web-01".to_owned()))
@@ -309,6 +328,28 @@ pub fn aws() -> Provider {
         ))
         .set_security_groups(Some(vec![sg_web]))
         .set_network_interfaces(Some(vec![eni("eni-globex-web-03a", "subnet-public-1a")]))
+        .build();
+    let warehouse = InstanceBuilder::default()
+        .set_instance_id(Some("i-globex-warehouse".to_owned()))
+        .set_vpc_id(Some("vpc-globex-data".to_owned()))
+        .set_subnet_id(Some("subnet-data-1a".to_owned()))
+        .set_private_ip_address(Some("10.40.1.20".to_owned()))
+        .set_network_interfaces(Some(vec![eni_in(
+            "vpc-globex-data",
+            "eni-globex-warehouse",
+            "subnet-data-1a",
+        )]))
+        .build();
+    let staging_web = InstanceBuilder::default()
+        .set_instance_id(Some("i-globex-staging-web".to_owned()))
+        .set_vpc_id(Some("vpc-globex-staging".to_owned()))
+        .set_subnet_id(Some("subnet-staging-1a".to_owned()))
+        .set_private_ip_address(Some("10.10.1.10".to_owned()))
+        .set_network_interfaces(Some(vec![eni_in(
+            "vpc-globex-staging",
+            "eni-globex-staging-web",
+            "subnet-staging-1a",
+        )]))
         .build();
 
     let ecs = aws_sdk_ecs::types::Cluster::builder()
@@ -632,13 +673,83 @@ pub fn aws() -> Provider {
                 .nat_gateway_id("nat-globex")
                 .build(),
         )
+        .routes(
+            Route::builder()
+                .destination_cidr_block("10.40.0.0/16")
+                .vpc_peering_connection_id("pcx-globex-data")
+                .state(RouteState::Active)
+                .build(),
+        )
+        .routes(
+            Route::builder()
+                .destination_cidr_block("10.50.0.0/16")
+                .transit_gateway_id("tgw-globex")
+                .state(RouteState::Active)
+                .build(),
+        )
         .build();
 
-    let interface = |id: &str, subnet: &str, ip: &str| {
+    let vpc = |id: &str, cidr: &str| Vpc::builder().vpc_id(id).cidr_block(cidr).build();
+    let vpcs = vec![
+        vpc(AWS_NETWORK, "10.10.0.0/16"),
+        vpc("vpc-globex-data", "10.40.0.0/16"),
+        vpc("vpc-globex-shared", "10.50.0.0/16"),
+        vpc("vpc-globex-staging", "10.10.0.0/16"),
+    ];
+    let peering = |id: &str, code: VpcPeeringConnectionStateReasonCode, accepter: &str| {
+        let side = |vpc_id: &str| {
+            VpcPeeringConnectionVpcInfo::builder()
+                .vpc_id(vpc_id)
+                .build()
+        };
+        VpcPeeringConnection::builder()
+            .vpc_peering_connection_id(id)
+            .status(
+                VpcPeeringConnectionStateReason::builder()
+                    .code(code)
+                    .build(),
+            )
+            .requester_vpc_info(side(AWS_NETWORK))
+            .accepter_vpc_info(side(accepter))
+            .build()
+    };
+    let peering_connections = vec![
+        peering(
+            "pcx-globex-data",
+            VpcPeeringConnectionStateReasonCode::Active,
+            "vpc-globex-data",
+        ),
+        peering(
+            "pcx-globex-staging",
+            VpcPeeringConnectionStateReasonCode::Rejected,
+            "vpc-globex-staging",
+        ),
+    ];
+    let transit_gateways = vec![
+        TransitGateway::builder()
+            .transit_gateway_id("tgw-globex")
+            .state(TransitGatewayState::Available)
+            .build(),
+    ];
+    let attachment = |id: &str, vpc_id: &str| {
+        TransitGatewayAttachment::builder()
+            .transit_gateway_attachment_id(id)
+            .transit_gateway_id("tgw-globex")
+            .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+            .resource_id(vpc_id)
+            .state(TransitGatewayAttachmentState::Available)
+            .build()
+    };
+    let transit_gateway_attachments = vec![
+        attachment("tgw-attach-globex-prod", AWS_NETWORK),
+        attachment("tgw-attach-globex-shared", "vpc-globex-shared"),
+    ];
+
+    let interface_in = |vpc: &str, id: &str, subnet: &str, ip: &str| {
         NetworkInterface::builder()
             .network_interface_id(id)
             .subnet_id(subnet)
-            .vpc_id("vpc-globex")
+            .vpc_id(vpc)
             .groups(GroupIdentifier::builder().group_id("sg-web").build())
             .private_ip_addresses(
                 NetworkInterfacePrivateIpAddress::builder()
@@ -646,8 +757,9 @@ pub fn aws() -> Provider {
                     .build(),
             )
     };
-    let attached = |id: &str, subnet: &str, ip: &str, instance: &str| {
-        interface(id, subnet, ip)
+    let interface = |id: &str, subnet: &str, ip: &str| interface_in(AWS_NETWORK, id, subnet, ip);
+    let attached_in = |vpc: &str, id: &str, subnet: &str, ip: &str, instance: &str| {
+        interface_in(vpc, id, subnet, ip)
             .interface_type(NetworkInterfaceType::Interface)
             .attachment(
                 NetworkInterfaceAttachment::builder()
@@ -655,6 +767,9 @@ pub fn aws() -> Provider {
                     .build(),
             )
             .build()
+    };
+    let attached = |id: &str, subnet: &str, ip: &str, instance: &str| {
+        attached_in(AWS_NETWORK, id, subnet, ip, instance)
     };
     let interfaces = vec![
         attached(
@@ -704,6 +819,29 @@ pub fn aws() -> Provider {
         interface("eni-globex-rds-1a", "subnet-private-1a", "10.10.2.30")
             .description("RDSNetworkInterface")
             .build(),
+        attached_in(
+            "vpc-globex-data",
+            "eni-globex-warehouse",
+            "subnet-data-1a",
+            "10.40.1.20",
+            "i-globex-warehouse",
+        ),
+        interface_in(
+            "vpc-globex-shared",
+            "eni-globex-ldap",
+            "subnet-shared-1a",
+            "10.50.0.10",
+        )
+        .interface_type(NetworkInterfaceType::VpcEndpoint)
+        .description("VPC Endpoint Interface vpce-globex-ldap")
+        .build(),
+        attached_in(
+            "vpc-globex-staging",
+            "eni-globex-staging-web",
+            "subnet-staging-1a",
+            "10.10.1.10",
+            "i-globex-staging-web",
+        ),
     ];
 
     let r = REGION.to_owned();
@@ -714,7 +852,7 @@ pub fn aws() -> Provider {
         ),
         (
             r.clone(),
-            AmazonCollection::AmazonInstances(vec![i1, i2, i3]),
+            AmazonCollection::AmazonInstances(vec![i1, i2, i3, warehouse, staging_web]),
         ),
         (r.clone(), AmazonCollection::AmazonClusters(vec![ecs])),
         (r.clone(), AmazonCollection::AmazonLambdas(vec![lambda])),
@@ -756,6 +894,15 @@ pub fn aws() -> Provider {
         ),
         (r.clone(), AmazonCollection::AmazonSecurityGroups(vec![sg])),
         (
+            r.clone(),
+            AmazonCollection::AmazonConnectivity(AWSConnectivity {
+                vpcs,
+                peering_connections,
+                transit_gateways,
+                transit_gateway_attachments,
+            }),
+        ),
+        (
             r,
             AmazonCollection::AmazonNetworking(AWSNetworking {
                 route_tables: vec![public_rt, private_rt],
@@ -769,10 +916,12 @@ pub fn aws() -> Provider {
 
 pub fn gcp() -> Provider {
     use crate::api::google::compute::{AccessConfig, Firewall, Instance, NetworkInterface};
-    use crate::api::google::compute_network::{ForwardingRule, Network, Subnetwork};
+    use crate::api::google::compute_network::{
+        ForwardingRule, Network, NetworkPeering, Subnetwork,
+    };
     use crate::api::google::dns::ManagedZone;
     use crate::api::google::functions::CloudFunction;
-    use crate::api::google::gke::Cluster;
+    use crate::api::google::gke::{Cluster, NetworkConfig};
     use crate::api::google::pubsub::{Subscription, Topic};
     use crate::api::google::run::Service;
     use crate::api::google::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
@@ -844,7 +993,13 @@ pub fn gcp() -> Provider {
 
     let gke = Cluster {
         name: Some("gke-globex".to_owned()),
-        network: Some(network_link.clone()),
+        network: Some("vpc-globex".to_owned()),
+        network_config: Some(NetworkConfig {
+            network: Some(format!(
+                "projects/{}/global/networks/vpc-globex",
+                GCP_PROJECT
+            )),
+        }),
         ..Default::default()
     };
 
@@ -882,8 +1037,24 @@ pub fn gcp() -> Provider {
         ..Default::default()
     };
 
+    let peering = |name: &str, project: &str, network: &str, state: &str| NetworkPeering {
+        name: Some(name.to_owned()),
+        network: Some(format!(
+            "https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{network}"
+        )),
+        state: Some(state.to_owned()),
+    };
     let net = Network {
         self_link: Some(network_link.clone()),
+        peerings: Some(vec![
+            peering(
+                "servicenetworking-googleapis-com",
+                "globex-sql-tenant",
+                "servicenetworking",
+                "ACTIVE",
+            ),
+            peering("peer-legacy", "globex-legacy", "legacy", "INACTIVE"),
+        ]),
         ..Default::default()
     };
     let subnet = Subnetwork {
@@ -935,6 +1106,12 @@ pub fn azure() -> Provider {
         network_interfaces: vec![azure_id("Microsoft.Network/networkInterfaces/nic-worker")],
     };
 
+    let peering = |remote: &str, state: &str| VirtualNetworkPeering {
+        remote_id: Some(azure_id(&format!(
+            "Microsoft.Network/virtualNetworks/{remote}"
+        ))),
+        state: Some(state.to_owned()),
+    };
     let vnet = VirtualNetwork {
         id: Some(azure_id("Microsoft.Network/virtualNetworks/vnet-globex")),
         name: Some("vnet-globex".to_owned()),
@@ -942,6 +1119,19 @@ pub fn azure() -> Provider {
         subnets: vec![azure_id(
             "Microsoft.Network/virtualNetworks/vnet-globex/subnets/default",
         )],
+        peerings: vec![
+            peering("vnet-globex-hub", "Connected"),
+            peering("vnet-globex-dr", "Initiated"),
+        ],
+    };
+    let hub = VirtualNetwork {
+        id: Some(azure_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex-hub",
+        )),
+        name: Some("vnet-globex-hub".to_owned()),
+        location: Some("eastus".to_owned()),
+        subnets: Vec::new(),
+        peerings: vec![peering("vnet-globex", "Connected")],
     };
 
     let subnet = Subnet {
@@ -1126,7 +1316,7 @@ pub fn azure() -> Provider {
 
     Provider::Azure(vec![
         MicrosoftCollection::AzureVirtualMachines(vec![vm]),
-        MicrosoftCollection::AzureVirtualNetworks(vec![vnet]),
+        MicrosoftCollection::AzureVirtualNetworks(vec![vnet, hub]),
         MicrosoftCollection::AzureSubnets(vec![subnet]),
         MicrosoftCollection::AzureNetworkInterfaces(vec![nic]),
         MicrosoftCollection::AzureLoadBalancers(vec![balancer]),

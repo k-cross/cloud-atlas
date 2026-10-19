@@ -502,6 +502,37 @@ fn state_change(state: &str) -> String {
 }
 
 #[test]
+fn a_peering_config_item_is_not_also_a_generic_resource() {
+    let events = parse_ok(
+        r#"{
+          "version": "0",
+          "id": "cfg-event-pcx",
+          "detail-type": "Config Configuration Item Change Notification",
+          "source": "aws.config",
+          "account": "111111111111",
+          "time": "2026-09-03T12:00:00Z",
+          "region": "us-east-1",
+          "detail": {
+            "messageType": "ConfigurationItemChangeNotification",
+            "configurationItem": {
+              "configurationItemStatus": "OK",
+              "configurationItemCaptureTime": "2026-09-03T12:00:00.000Z",
+              "resourceType": "AWS::EC2::VPCPeeringConnection",
+              "resourceId": "pcx-0abc",
+              "awsRegion": "us-east-1"
+            }
+          }
+        }"#,
+    );
+
+    assert!(
+        events.is_empty(),
+        "the scan models a peering as AwsEc2VpcPeeringConnection, so a generic \
+         AwsConfigResource here would be a second node for it: {events:?}"
+    );
+}
+
+#[test]
 fn a_termination_deletes_the_instance() {
     let events = parse_ok(&state_change("terminated"));
     assert_eq!(events.len(), 1);

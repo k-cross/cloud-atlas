@@ -9,6 +9,13 @@ pub struct Cluster {
     pub endpoint: Option<String>,
     pub network: Option<String>,
     pub subnetwork: Option<String>,
+    pub network_config: Option<NetworkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkConfig {
+    pub network: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

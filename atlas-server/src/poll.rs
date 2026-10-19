@@ -146,7 +146,7 @@ pub async fn run(
     ticker.tick().await;
 
     let mut drain = Box::pin(events.next(backoff.delay()));
-    let mut flow_drain = Box::pin(flows.next(flow_backoff.delay(), networks(&state).await));
+    let mut flow_drain = Box::pin(flows.next(flow_backoff.delay(), networks(&state)));
 
     loop {
         tokio::select! {
@@ -162,7 +162,7 @@ pub async fn run(
             batch = &mut flow_drain => {
                 flow_backoff.record(healthy(&batch.report));
                 ingest_flows(&state, batch).await;
-                flow_drain = Box::pin(flows.next(flow_backoff.delay(), networks(&state).await));
+                flow_drain = Box::pin(flows.next(flow_backoff.delay(), networks(&state)));
             }
         }
     }

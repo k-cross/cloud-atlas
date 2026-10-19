@@ -4,6 +4,7 @@ use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::GoogleCollection;
+use std::sync::Arc;
 
 pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[(String, GoogleCollection)]) {
     project_parallel(builder, gcp_data, |local, (project, collection)| {
@@ -43,7 +44,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                             if let Some(network) = &net.network {
                                 builder.link_from(
                                     idx,
-                                    Node::GcpComputeNetwork(network.as_str().into()),
+                                    Node::GcpComputeNetwork(canonical_network(network, project)),
                                     Edge::Contains,
                                 );
                             }
@@ -56,9 +57,9 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                                 );
                             }
 
-                            let scope = network_scope(net.network.as_deref(), id);
+                            let scope = address_scope(net.network.as_deref(), project, id);
                             for address in interface_addresses(net) {
-                                builder.link_to(idx, Node::ip(address, scope), Edge::ConnectsTo);
+                                builder.link_to(idx, Node::ip(address, &scope), Edge::ConnectsTo);
                             }
                         }
                     }
@@ -73,7 +74,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                     if let Some(network) = &fw.network {
                         builder.link_from(
                             idx,
-                            Node::GcpComputeNetwork(network.as_str().into()),
+                            Node::GcpComputeNetwork(canonical_network(network, project)),
                             Edge::Contains,
                         );
                     }
@@ -82,10 +83,10 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         && direction == "EGRESS"
                         && let Some(ranges) = &fw.destination_ranges
                     {
-                        let scope = network_scope(fw.network.as_deref(), id);
+                        let scope = address_scope(fw.network.as_deref(), project, id);
                         for range in ranges {
                             if !is_large_cidr(range) {
-                                builder.link_to(idx, Node::ip(range, scope), Edge::RoutesTo);
+                                builder.link_to(idx, Node::ip(range, &scope), Edge::RoutesTo);
                             }
                         }
                     }
@@ -102,11 +103,11 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         .as_ref()
                         .and_then(|s| s.ip_configuration.as_ref())
                         .and_then(|c| c.private_network.as_deref());
-                    let scope = network_scope(private_network, name);
+                    let scope = address_scope(private_network, project, name);
                     if let Some(ips) = &sql.ip_addresses {
                         for ip in ips {
                             if let Some(ip_addr) = &ip.ip_address {
-                                builder.link_to(idx, Node::ip(ip_addr, scope), Edge::ConnectsTo);
+                                builder.link_to(idx, Node::ip(ip_addr, &scope), Edge::ConnectsTo);
                             }
                         }
                     }
@@ -121,10 +122,15 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                 if let Some(name) = &cluster.name {
                     let idx = builder.get_or_add_node(Node::GcpGkeCluster(name.as_str().into()));
 
-                    if let Some(network) = &cluster.network {
+                    let network = cluster
+                        .network_config
+                        .as_ref()
+                        .and_then(|config| config.network.as_deref())
+                        .or(cluster.network.as_deref());
+                    if let Some(network) = network {
                         builder.link_from(
                             idx,
-                            Node::GcpComputeNetwork(network.as_str().into()),
+                            Node::GcpComputeNetwork(canonical_network(network, project)),
                             Edge::Contains,
                         );
                     }
@@ -172,7 +178,27 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
             }
         }
         GoogleCollection::GoogleNetworks(networks) => {
-            project_leaf!(builder, networks, self_link, Node::GcpComputeNetwork)
+            for network in networks {
+                let Some(self_link) = &network.self_link else {
+                    continue;
+                };
+                let idx = builder.get_or_add_node(Node::GcpComputeNetwork(canonical_network(
+                    self_link, project,
+                )));
+                for peer in network
+                    .peerings
+                    .iter()
+                    .flatten()
+                    .filter(|peering| peering.state.as_deref() == Some("ACTIVE"))
+                    .filter_map(|peering| peering.network.as_deref())
+                {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeNetwork(canonical_network(peer, project)),
+                        Edge::ConnectsTo,
+                    );
+                }
+            }
         }
         GoogleCollection::GoogleSubnetworks(subnetworks) => {
             for subnetwork in subnetworks {
@@ -183,7 +209,7 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                     if let Some(network) = &subnetwork.network {
                         builder.link_from(
                             idx,
-                            Node::GcpComputeNetwork(network.as_str().into()),
+                            Node::GcpComputeNetwork(canonical_network(network, project)),
                             Edge::Contains,
                         );
                     }
@@ -197,8 +223,8 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                         builder.get_or_add_node(Node::GcpComputeForwardingRule(id.as_str().into()));
 
                     if let Some(ip) = &rule.ip_address {
-                        let scope = network_scope(rule.network.as_deref(), id);
-                        builder.link_to(idx, Node::ip(ip, scope), Edge::ConnectsTo);
+                        let scope = address_scope(rule.network.as_deref(), project, id);
+                        builder.link_to(idx, Node::ip(ip, &scope), Edge::ConnectsTo);
                     }
                 }
             }
@@ -206,13 +232,18 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
     }
 }
 
-fn network_scope<'a>(network: Option<&'a str>, owner: &'a str) -> &'a str {
-    match network {
-        Some(network) => network
-            .find("projects/")
-            .map_or(network, |at| &network[at..]),
-        None => owner,
+fn canonical_network(network: &str, project: &str) -> Arc<str> {
+    match network.find("projects/") {
+        Some(at) => network[at..].into(),
+        None => format!("projects/{project}/global/networks/{network}").into(),
     }
+}
+
+fn address_scope(network: Option<&str>, project: &str, owner: &str) -> Arc<str> {
+    network.map_or_else(
+        || owner.into(),
+        |network| canonical_network(network, project),
+    )
 }
 
 // GCE has no separate interface resource, so unlike an ENI there is nothing

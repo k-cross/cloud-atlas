@@ -1,5 +1,6 @@
 pub mod api_gateway;
 pub mod cloudfront;
+pub mod connectivity;
 pub mod container_service;
 pub mod dynamodb;
 pub mod eks;

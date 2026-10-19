@@ -68,14 +68,18 @@ impl FlowSource {
         !matches!(self, FlowSource::Disabled)
     }
 
-    pub async fn next(&self, delay: Duration, networks: InterfaceNetworks) -> FlowBatch {
+    pub async fn next(
+        &self,
+        delay: Duration,
+        networks: impl Future<Output = InterfaceNetworks>,
+    ) -> FlowBatch {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
         match self {
             FlowSource::Disabled => std::future::pending().await,
             FlowSource::Aws(queue) => {
-                let batch = queue.receive(&networks).await;
+                let batch = queue.receive(&networks.await).await;
                 FlowBatch {
                     observations: batch.observations,
                     report: batch.report,

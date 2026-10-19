@@ -109,11 +109,22 @@ fn vnet_extracts_inline_subnets_with_nsg() {
         "name": "vnet1",
         "type": "microsoft.network/virtualnetworks",
         "location": "eastus",
-        "properties": { "subnets": [ {
-            "id": "/subscriptions/s/.../subnets/sn1",
-            "name": "sn1",
-            "properties": { "networkSecurityGroup": { "id": "/subscriptions/s/.../nsg1" } }
-        } ] }
+        "properties": {
+            "subnets": [ {
+                "id": "/subscriptions/s/.../subnets/sn1",
+                "name": "sn1",
+                "properties": { "networkSecurityGroup": { "id": "/subscriptions/s/.../nsg1" } }
+            } ],
+            "virtualNetworkPeerings": [ {
+                "id": "/subscriptions/s/.../virtualNetworks/vnet1/virtualNetworkPeerings/to-hub",
+                "name": "to-hub",
+                "properties": {
+                    "peeringState": "Connected",
+                    "remoteVirtualNetwork": { "id": "/subscriptions/s/.../virtualNetworks/hub" },
+                    "allowForwardedTraffic": true
+                }
+            } ]
+        }
     })]);
 
     let vnets = variant!(cols, AzureVirtualNetworks);
@@ -121,6 +132,11 @@ fn vnet_extracts_inline_subnets_with_nsg() {
         vnets[0].subnets,
         vec!["/subscriptions/s/.../subnets/sn1".to_string()]
     );
+    assert_eq!(
+        vnets[0].peerings[0].remote_id.as_deref(),
+        Some("/subscriptions/s/.../virtualNetworks/hub")
+    );
+    assert_eq!(vnets[0].peerings[0].state.as_deref(), Some("Connected"));
 
     let subnets = variant!(cols, AzureSubnets);
     assert_eq!(subnets[0].name.as_deref(), Some("sn1"));

@@ -36,11 +36,27 @@ async fn compute_networks() {
     use atlas_lib::api::google::compute_network::list_networks;
     let (_s, c) = serve(
         "/compute/v1/projects/p/global/networks",
-        json!({ "items": [ { "id": "n1", "name": "vpc", "selfLink": "https://x/networks/vpc" } ] }),
+        json!({ "items": [ {
+            "id": "n1", "name": "vpc", "selfLink": "https://x/networks/vpc",
+            "peerings": [ {
+                "name": "servicenetworking-googleapis-com",
+                "network": "https://www.googleapis.com/compute/v1/projects/tenant/global/networks/servicenetworking",
+                "state": "ACTIVE",
+                "exportCustomRoutes": false
+            } ]
+        } ] }),
     )
     .await;
     let nets = list_networks(&c, "p").await.expect("ok");
     assert_eq!(nets[0].self_link.as_deref(), Some("https://x/networks/vpc"));
+    let peering = &nets[0].peerings.as_ref().expect("peerings")[0];
+    assert_eq!(
+        peering.network.as_deref(),
+        Some(
+            "https://www.googleapis.com/compute/v1/projects/tenant/global/networks/servicenetworking"
+        )
+    );
+    assert_eq!(peering.state.as_deref(), Some("ACTIVE"));
 }
 
 #[tokio::test]
@@ -106,11 +122,21 @@ async fn gke_clusters() {
     use atlas_lib::api::google::gke::list_clusters;
     let (_s, c) = serve(
         "/v1/projects/p/locations/-/clusters",
-        json!({ "clusters": [ { "name": "c1", "network": "vpc", "selfLink": "https://x/c1" } ] }),
+        json!({ "clusters": [ {
+            "name": "c1", "network": "vpc", "selfLink": "https://x/c1",
+            "networkConfig": { "network": "projects/host/global/networks/vpc" }
+        } ] }),
     )
     .await;
     let clusters = list_clusters(&c, "p").await.expect("ok");
     assert_eq!(clusters[0].network.as_deref(), Some("vpc"));
+    assert_eq!(
+        clusters[0]
+            .network_config
+            .as_ref()
+            .and_then(|config| config.network.as_deref()),
+        Some("projects/host/global/networks/vpc")
+    );
 }
 
 #[tokio::test]

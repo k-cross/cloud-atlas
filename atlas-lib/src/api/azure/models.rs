@@ -27,6 +27,14 @@ pub struct VirtualNetwork {
     pub name: Option<String>,
     pub location: Option<String>,
     pub subnets: Vec<String>,
+    pub peerings: Vec<VirtualNetworkPeering>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualNetworkPeering {
+    pub remote_id: Option<String>,
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

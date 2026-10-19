@@ -7,6 +7,15 @@ pub struct Network {
     pub id: Option<String>,
     pub name: Option<String>,
     pub self_link: Option<String>,
+    pub peerings: Option<Vec<NetworkPeering>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPeering {
+    pub name: Option<String>,
+    pub network: Option<String>,
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

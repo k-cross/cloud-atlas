@@ -1,5 +1,9 @@
 mod containment;
+mod networks;
 mod service;
+
+pub(crate) use networks::HeldAddresses;
+pub(crate) use service::held_addresses;
 
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::RenderObservation;

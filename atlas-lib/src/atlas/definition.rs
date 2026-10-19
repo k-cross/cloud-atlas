@@ -84,6 +84,8 @@ nodes!(
         AwsEc2InternetGateway(id) => "AWS::EC2::InternetGateway({id})",
         AwsEc2NatGateway(id) => "AWS::EC2::NatGateway({id})",
         AwsEc2Eip(id) => "AWS::EC2::Eip({id})",
+        AwsEc2VpcPeeringConnection(id) => "AWS::EC2::VPCPeeringConnection({id})",
+        AwsEc2TransitGateway(id) => "AWS::EC2::TransitGateway({id})",
         AwsEcsCluster(id) => "AWS::EcsCluster({id})",
         AwsLambdaFunction(id) => "AWS::Lambda::Function({id})",
         AwsIamRole(id) => "AWS::IAM::Role({id})",
@@ -174,6 +176,15 @@ impl Node {
         match Node::ip(value, "") {
             Node::GenericPrivateIpAddress { .. } => None,
             public => Some(public),
+        }
+    }
+
+    pub fn network_scope(&self) -> Option<&str> {
+        match self {
+            Node::AwsEc2Vpc(id) | Node::AzureVirtualNetwork(id) | Node::GcpComputeNetwork(id) => {
+                Some(id)
+            }
+            _ => None,
         }
     }
 

@@ -69,6 +69,7 @@ pub enum AmazonCollection {
     AmazonSecurityGroups(Vec<aws_sdk_ec2::types::SecurityGroup>),
     AmazonNetworking(AWSNetworking),
     AmazonNetworkInterfaces(Vec<aws_sdk_ec2::types::NetworkInterface>),
+    AmazonConnectivity(AWSConnectivity),
 }
 
 #[derive(Debug)]
@@ -91,6 +92,14 @@ pub struct AWSNetworking {
     pub internet_gateways: Vec<aws_sdk_ec2::types::InternetGateway>,
     pub nat_gateways: Vec<aws_sdk_ec2::types::NatGateway>,
     pub addresses: Vec<aws_sdk_ec2::types::Address>,
+}
+
+#[derive(Debug, Default)]
+pub struct AWSConnectivity {
+    pub vpcs: Vec<aws_sdk_ec2::types::Vpc>,
+    pub peering_connections: Vec<aws_sdk_ec2::types::VpcPeeringConnection>,
+    pub transit_gateways: Vec<aws_sdk_ec2::types::TransitGateway>,
+    pub transit_gateway_attachments: Vec<aws_sdk_ec2::types::TransitGatewayAttachment>,
 }
 
 #[derive(Debug)]

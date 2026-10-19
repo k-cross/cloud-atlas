@@ -17,16 +17,17 @@ The credential-free demo is the only way to see Cloud Atlas without cloud accoun
 |---|---|---|
 | Every node and edge kind projected | Yes — exhaustiveness guards and the CLI example | |
 | Cross-cloud stitching on public addresses and DNS | Yes, static: Route 53 and Cloudflare onto Azure App Service and Cloud Run; AWS traffic onto the Azure balancer's frontend and the GCE NAT address | |
-| Private addresses scoped per network | Present, not legible: `10.20.0.5` is three nodes (Azure NSG rule, Cloud SQL, AWS flow), and the two interconnect flows end at addresses nothing holds | F2 |
+| Private addresses scoped per network | Yes, static: `vpc-globex-staging` reuses prod's `10.10.0.0/16` with its own `10.10.1.10` node and is joined to nothing (its peering request was rejected). The two interconnect flows still end at addresses nothing holds | F2 |
+| Joined networks resolve private addresses | Yes, static: web-01 → the warehouse across `pcx-globex-data`, web-02 → the shared-services endpoint across `tgw-globex`; Azure and GCP peerings are drawn | |
 | Tier 3 scan → diff → patch | Trivially: the canary record | F1 |
-| Tier 2 traffic overlay | Yes: 15 steady flows with verdicts, volume and beads; the burst comes and goes | |
+| Tier 2 traffic overlay | Yes: 17 steady flows with verdicts, volume and beads; the burst comes and goes | |
 | `Covers` | Yes, static: `203.0.113.0/24` covers `203.0.113.77` | |
-| `Serves`, inferred vs confirmed | Static, 7 confirmed / 2 inferred; no transition is ever shown | F1 |
+| `Serves`, inferred vs confirmed | Static, 9 confirmed / 2 inferred; no transition is ever shown | F1 |
 | Service view | Yes | |
 | Failure semantics (`CollectionReport`, carry-forward, retention) | No: the demo's report is always complete, and the UI has no view of `/collection.json` | F1, F5 |
 | Tier 1 events | No: `--aws-event-queue` is ignored in demo mode | F6 |
 
-Baseline, 2026-10-18, for the follow-ups to move: 124 nodes in 18 components (the largest 93), 13 with no edges, 8 more hanging only off a region; labels up to 149 characters.
+Baseline, 2026-10-18 after network connectivity phase 1, for the follow-ups to move: 144 nodes in 18 components (the largest 112), 13 with no edges, 8 more hanging only off a region; labels up to 149 characters.
 
 ## Constraints on any demo change
 
@@ -51,7 +52,7 @@ Done when each step is visible within one poll at the default 5 s, the `Serves` 
 
 ### F2. Make per-network addresses legible
 
-A second AWS VPC (staging, say) reusing `10.10.0.0/16`, with an instance at `10.10.1.10`: two nodes for one value, side by side. Retell the two interconnect flows: while interconnects are unmodelled they are honest but read as broken. When interconnect-aware resolution lands (`checkpoint.md` backlog), they should resolve; update this row then.
+Partly done by network connectivity phase 1: the staging VPC shows one value as two nodes, and peering and the transit gateway show resolution across joins. What remains are the two interconnect flows, honest but reading as broken until connectivity phase 2 joins AWS to Azure and GCP (`network_connectivity_design.md`); update this row then.
 
 ### F3. Filler that pushes the story off-screen
 

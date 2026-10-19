@@ -1,3 +1,4 @@
+use super::networks::{HeldAddresses, Joins};
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::export::{RenderObservation, edge_key, node_key};
 use crate::atlas::flow::{FlowIndex, Orientation};
@@ -217,6 +218,17 @@ fn walk(
 // Fan-out is deliberately uncapped: an address with several owners is a real
 // statement about the estate, not a budget to protect.
 fn address_owners(graph: &Graph<Node, Edge>) -> HashMap<NodeIndex, Vec<NodeIndex>> {
+    let mut owners = local_owners(graph);
+    let reached = across_joins(graph, &owners);
+    owners.extend(reached);
+    owners
+}
+
+pub(crate) fn held_addresses(graph: &Graph<Node, Edge>) -> HeldAddresses<'_> {
+    HeldAddresses::new(graph, Joins::of(graph), local_owners(graph).into_keys())
+}
+
+fn local_owners(graph: &Graph<Node, Edge>) -> HashMap<NodeIndex, Vec<NodeIndex>> {
     let mut held_by: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
     for edge in graph
         .edge_references()
@@ -244,7 +256,30 @@ fn address_owners(graph: &Graph<Node, Edge>) -> HashMap<NodeIndex, Vec<NodeIndex
         claimers.sort_by_key(|index| index.index());
         claimers.dedup();
     }
+    owners.retain(|_, claimers| !claimers.is_empty());
     owners
+}
+
+fn across_joins(
+    graph: &Graph<Node, Edge>,
+    owners: &HashMap<NodeIndex, Vec<NodeIndex>>,
+) -> Vec<(NodeIndex, Vec<NodeIndex>)> {
+    let joins = Joins::of(graph);
+    if joins.is_empty() {
+        return Vec::new();
+    }
+    let held = HeldAddresses::new(graph, joins, owners.keys().copied());
+
+    graph
+        .node_indices()
+        .filter(|pivot| !owners.contains_key(pivot))
+        .filter_map(|pivot| match &graph[pivot] {
+            Node::GenericPrivateIpAddress { network, address } => held
+                .holder(network, address)
+                .map(|holder| (pivot, owners[&holder].clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 fn holders(
@@ -677,10 +712,42 @@ mod tests {
     }
 
     fn overlapping_estate(target_running: bool) -> GraphBuilder {
-        use crate::cloud::definition::{AWSLoadBalancing, AmazonCollection, Provider};
+        let mut running = vec!["i-other"];
+        if target_running {
+            running.push("i-target");
+        }
+        ip_target_estate(
+            &[
+                ("eni-target", "vpc-a", "i-target"),
+                ("eni-other", "vpc-b", "i-other"),
+            ],
+            &running,
+            None,
+        )
+    }
+
+    fn peered_estate(target_running: bool) -> GraphBuilder {
+        let running: &[&str] = if target_running { &["i-target"] } else { &[] };
+        ip_target_estate(
+            &[("eni-target", "vpc-b", "i-target")],
+            running,
+            Some(("vpc-a", "vpc-b")),
+        )
+    }
+
+    fn ip_target_estate(
+        holders: &[(&str, &str, &str)],
+        running: &[&str],
+        peering: Option<(&str, &str)>,
+    ) -> GraphBuilder {
+        use crate::cloud::definition::{
+            AWSConnectivity, AWSLoadBalancing, AmazonCollection, Provider,
+        };
         use aws_sdk_ec2::types::{
             Instance, NetworkInterface, NetworkInterfaceAttachment,
-            NetworkInterfacePrivateIpAddress,
+            NetworkInterfacePrivateIpAddress, VpcPeeringConnection,
+            VpcPeeringConnectionStateReason, VpcPeeringConnectionStateReasonCode,
+            VpcPeeringConnectionVpcInfo,
         };
         use aws_sdk_elasticloadbalancingv2::types::{
             Action, Listener, LoadBalancer, TargetDescription, TargetGroup,
@@ -706,21 +773,43 @@ mod tests {
                 )
                 .build()
         };
-        let mut running = vec![Instance::builder().instance_id("i-other").build()];
-        if target_running {
-            running.push(Instance::builder().instance_id("i-target").build());
-        }
+        let running = running
+            .iter()
+            .map(|id| Instance::builder().instance_id(*id).build())
+            .collect();
+        let side = |vpc: &str| VpcPeeringConnectionVpcInfo::builder().vpc_id(vpc).build();
+        let peering_connections = peering
+            .map(|(requester, accepter)| {
+                VpcPeeringConnection::builder()
+                    .vpc_peering_connection_id("pcx-ab")
+                    .status(
+                        VpcPeeringConnectionStateReason::builder()
+                            .code(VpcPeeringConnectionStateReasonCode::Active)
+                            .build(),
+                    )
+                    .requester_vpc_info(side(requester))
+                    .accepter_vpc_info(side(accepter))
+                    .build()
+            })
+            .into_iter()
+            .collect();
 
         let mut builder = GraphBuilder::new();
         crate::atlas::projector::build(
             &mut builder,
             &Provider::AWS(
                 [
-                    AmazonCollection::AmazonNetworkInterfaces(vec![
-                        interface("eni-target", "vpc-a", "i-target"),
-                        interface("eni-other", "vpc-b", "i-other"),
-                    ]),
+                    AmazonCollection::AmazonNetworkInterfaces(
+                        holders
+                            .iter()
+                            .map(|(id, vpc, instance)| interface(id, vpc, instance))
+                            .collect(),
+                    ),
                     AmazonCollection::AmazonInstances(running),
+                    AmazonCollection::AmazonConnectivity(AWSConnectivity {
+                        peering_connections,
+                        ..Default::default()
+                    }),
                     AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
                         load_balancers: vec![
                             LoadBalancer::builder()
@@ -791,6 +880,182 @@ mod tests {
             !serves_any(&builder, |source, _| source == &front()),
             "the stopped instance's interface is not a service of its own"
         );
+    }
+
+    #[test]
+    fn an_ip_target_across_a_peering_is_served_by_its_running_holder() {
+        let builder = peered_estate(true);
+
+        assert!(serves(
+            &builder,
+            &front(),
+            &Node::AwsEc2Instance("i-target".into())
+        ));
+    }
+
+    #[test]
+    fn a_stopped_ip_target_across_a_peering_is_not_inferred() {
+        let builder = peered_estate(false);
+
+        assert!(
+            !serves_any(&builder, |source, _| source == &front()),
+            "the join must not hand the stopped instance's interface the address"
+        );
+    }
+
+    #[test]
+    fn a_private_address_resolves_across_a_peering() {
+        let builder = fixtures::build_graph();
+
+        assert!(serves(
+            &builder,
+            &Node::AwsEc2Instance("i-globex-web-01".into()),
+            &Node::AwsEc2Instance("i-globex-warehouse".into()),
+        ));
+    }
+
+    #[test]
+    fn a_private_address_resolves_across_a_transit_gateway() {
+        let builder = fixtures::build_graph();
+
+        assert!(serves(
+            &builder,
+            &Node::AwsEc2Instance("i-globex-web-02".into()),
+            &Node::AwsEc2Eni("eni-globex-ldap".into()),
+        ));
+    }
+
+    #[test]
+    fn a_network_reusing_the_range_but_joined_to_nothing_is_never_a_holder() {
+        let builder = fixtures::build_graph();
+        let staging = Node::AwsEc2Instance("i-globex-staging-web".into());
+
+        assert!(!serves_any(&builder, |source, target| {
+            source == &staging || target == &staging
+        }));
+    }
+
+    fn connect(builder: &mut GraphBuilder, connector: Node, networks: &[&str]) {
+        let index = builder.get_or_add_node(connector);
+        for network in networks {
+            builder.link_to(index, Node::AwsEc2Vpc((*network).into()), Edge::AttachedTo);
+        }
+    }
+
+    fn hold(builder: &mut GraphBuilder, instance: &str, address: &str, network: &str) {
+        let index = builder.get_or_add_node(Node::AwsEc2Instance(instance.into()));
+        let eni = builder.link_to(
+            index,
+            Node::AwsEc2Eni(format!("eni-{instance}").into()),
+            Edge::HasIp,
+        );
+        builder.link_to(eni, Node::ip(address, network), Edge::ConnectsTo);
+    }
+
+    fn balancer_targeting(builder: &mut GraphBuilder, address: &str, network: &str) -> Node {
+        let balancer = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/peer/1".into(),
+        );
+        let balancer_idx = builder.get_or_add_node(balancer.clone());
+        let group = builder.link_to(
+            balancer_idx,
+            Node::AwsElbTargetGroup(
+                "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/peer/1".into(),
+            ),
+            Edge::ConnectsTo,
+        );
+        builder.link_to(group, Node::ip(address, network), Edge::RoutesTo);
+        balancer
+    }
+
+    fn derived(mut builder: GraphBuilder) -> GraphBuilder {
+        super::super::all(&mut builder, &FlowIndex::default());
+        builder
+    }
+
+    #[test]
+    fn an_ip_target_in_a_peered_vpc_is_inferred() {
+        let mut builder = GraphBuilder::new();
+        connect(
+            &mut builder,
+            Node::AwsEc2VpcPeeringConnection("pcx-ab".into()),
+            &["vpc-a", "vpc-b"],
+        );
+        hold(&mut builder, "i-b", "10.0.1.5", "vpc-b");
+        let balancer = balancer_targeting(&mut builder, "10.0.1.5", "vpc-a");
+        let builder = derived(builder);
+
+        assert!(serves(
+            &builder,
+            &balancer,
+            &Node::AwsEc2Instance("i-b".into())
+        ));
+        assert!(
+            observations(&builder.graph, &FlowIndex::default())
+                .iter()
+                .all(|o| o.status == INFERRED)
+        );
+    }
+
+    #[test]
+    fn peering_does_not_chain() {
+        let mut builder = GraphBuilder::new();
+        connect(
+            &mut builder,
+            Node::AwsEc2VpcPeeringConnection("pcx-ab".into()),
+            &["vpc-a", "vpc-b"],
+        );
+        connect(
+            &mut builder,
+            Node::AwsEc2VpcPeeringConnection("pcx-bc".into()),
+            &["vpc-b", "vpc-c"],
+        );
+        hold(&mut builder, "i-c", "10.0.1.5", "vpc-c");
+        let balancer = balancer_targeting(&mut builder, "10.0.1.5", "vpc-a");
+        let builder = derived(builder);
+
+        assert!(!serves_any(&builder, |source, _| source == &balancer));
+    }
+
+    #[test]
+    fn an_address_two_joined_networks_hold_resolves_to_neither() {
+        let mut builder = GraphBuilder::new();
+        connect(
+            &mut builder,
+            Node::AwsEc2TransitGateway("tgw-1".into()),
+            &["vpc-a", "vpc-b", "vpc-c"],
+        );
+        hold(&mut builder, "i-b", "10.0.1.5", "vpc-b");
+        hold(&mut builder, "i-c", "10.0.1.5", "vpc-c");
+        let balancer = balancer_targeting(&mut builder, "10.0.1.5", "vpc-a");
+        let builder = derived(builder);
+
+        assert!(!serves_any(&builder, |source, _| source == &balancer));
+    }
+
+    #[test]
+    fn a_holder_in_the_reading_network_wins_over_any_joined_one() {
+        let mut builder = GraphBuilder::new();
+        connect(
+            &mut builder,
+            Node::AwsEc2TransitGateway("tgw-1".into()),
+            &["vpc-a", "vpc-b"],
+        );
+        hold(&mut builder, "i-a", "10.0.1.5", "vpc-a");
+        hold(&mut builder, "i-b", "10.0.1.5", "vpc-b");
+        let balancer = balancer_targeting(&mut builder, "10.0.1.5", "vpc-a");
+        let builder = derived(builder);
+
+        assert!(serves(
+            &builder,
+            &balancer,
+            &Node::AwsEc2Instance("i-a".into())
+        ));
+        assert!(!serves(
+            &builder,
+            &balancer,
+            &Node::AwsEc2Instance("i-b".into())
+        ));
     }
 
     #[test]

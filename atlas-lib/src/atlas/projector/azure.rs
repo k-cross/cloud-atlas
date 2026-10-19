@@ -62,6 +62,24 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                             Edge::Contains,
                         );
                     }
+
+                    for remote_id in vnet
+                        .peerings
+                        .iter()
+                        .filter(|peering| {
+                            peering
+                                .state
+                                .as_deref()
+                                .is_some_and(|state| state.eq_ignore_ascii_case("Connected"))
+                        })
+                        .filter_map(|peering| peering.remote_id.as_deref())
+                    {
+                        builder.link_to(
+                            idx,
+                            Node::AzureVirtualNetwork(canonical_azure_id(remote_id)),
+                            Edge::ConnectsTo,
+                        );
+                    }
                 }
             }
         }
