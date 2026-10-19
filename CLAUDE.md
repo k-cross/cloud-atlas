@@ -2,180 +2,137 @@
 
 ## Project
 
-Cloud Atlas builds a **continuous live property graph** of multi-cloud infrastructure: an in-memory digital twin kept in sync by event streams, not a point-in-time snapshot. Write code for long-running daemons.
+Cloud Atlas maintains a **continuous live property graph** of multi-cloud infrastructure: an in-memory digital twin synchronized by event streams, flow logs, and periodic scans. Write code for long-running daemons.
 
 ## Architecture Rules
 
-1. **Strongly typed enums only.** The graph is `petgraph::Graph<Node, Edge>`; both enums live in `atlas-lib/src/atlas/definition.rs`. Never represent resources with raw strings or hashmaps.
-2. **ENI is the networking pivot:** `Instance -HasIp-> ENI -AttachedTo-> Subnet`. `Node::AwsEc2Eni` is keyed by its own `eni-` id — the id `DescribeInstances`, Config items and flow logs all carry. The owning instance is the `HasIp` edge, never part of the key: ENIs get reattached, instances are multi-homed, and most ENIs (NAT, LB, RDS, in-VPC Lambda) have no instance. An instance that reports no interfaces gets no ENI and no subnet path — never a direct `Instance -> Subnet` edge.
-3. **`Display` on every type**, in the `Type::SubType(id)` form, for clean `.dot` output.
-4. **A failure must never look like an absence.** "Could not read" and "is gone" stay distinct all the way to the differ — see `CollectionReport` under Live Server.
-5. **Cross-cloud stitching goes through generic pivots** (`GenericIpAddress`, `GenericPrivateIpAddress`, `GenericHostname`), built only via `Node::ip`/`Node::public_ip`/`Node::hostname` (see Helpers). **A private address is unique to its network**: RFC 1918, RFC 6598 shared space, link-local, loopback and ULA values are `GenericPrivateIpAddress { network, address }`, so `10.0.1.5` in one VPC is not `10.0.1.5` in another, nor in a VNet the traffic reached over an interconnect. Only public addresses stitch across networks and clouds; a private one reaches another network only through a modelled join (peering, a transit gateway), resolved at derive time (see `docs/network_connectivity_design.md`). Edge kind is load-bearing: `RoutesTo` = traffic, `ResolvesTo` = DNS, `ConnectsTo` = the resource *holds* this address. `derive::service` treats `ConnectsTo` as ownership, so DNS producers must use `ResolvesTo`, in one shape: `GenericHostname(name) -ResolvesTo-> <record> -ResolvesTo-> target`. **Every projected edge needs an owned endpoint** — `carry_forward` scopes edges by their owners, so an edge between two pivots would survive any provider's outage (`every_projected_edge_has_an_owned_endpoint`). `GraphBuilder` dedups identical pivots across clouds via its `HashMap<Node, NodeIndex>`.
-6. **`Node` and `Edge` carry identity, never mutable state.** Their `Hash + Eq` *is* identity: `GraphBuilder` dedups on it, `patch::diff` compares on it, `node_key`/`edge_key` derive the wire id from it. A changing field (counter, `last_seen`, status) would dodge dedup and turn every diff into remove-then-add. Such data lives beside the graph keyed by the stable key — `atlas::flow::FlowIndex`, which is why `Edge::TrafficFlow` and `Edge::Serves` are payload-free.
+1. **Strongly typed enums only.** The graph is `petgraph::Graph<Node, Edge>` (`atlas-lib/src/atlas/definition.rs`). Never represent resources with raw strings or hashmaps.
+2. **ENI is the networking pivot:** `Instance -HasIp-> ENI -AttachedTo-> Subnet`. `Node::AwsEc2Eni` is keyed by its `eni-` ID (carried by `DescribeInstances`, Config items, and flow logs). The owning instance is the `HasIp` edge, never part of the key: ENIs reattach, instances are multi-homed, and managed ENIs (NAT, LB, RDS, VPC Lambda) have no instance. Instances with no interfaces get no ENI and no direct `Instance -> Subnet` edge.
+3. **`Display` on every type** in `Type::SubType(id)` form for `.dot` export.
+4. **Failure ≠ absence.** "Could not read" and "is gone" stay distinct through `CollectionReport`, `carry_forward`, and `Retention`. Never swallow collector errors with `.ok()` or `if let Ok(..)`.
+5. **Cross-cloud stitching uses generic pivots** (`GenericIpAddress`, `GenericPrivateIpAddress`, `GenericHostname`), built only via `Node::ip` / `Node::public_ip` / `Node::hostname` (`GraphBuilder` deduplicates via `HashMap<Node, NodeIndex>`).
+   - **Private addresses are network-scoped:** RFC 1918, RFC 6598, link-local, loopback, and ULA values (`util::is_private`) build `GenericPrivateIpAddress { network, address }`. Only public addresses stitch directly across networks; private addresses resolve across networks only through modelled joins at derive time (`docs/network_connectivity_design.md`).
+   - **Edge kinds are load-bearing:** `RoutesTo` = traffic/rules, `ResolvesTo` = DNS, `ConnectsTo` = resource *holds* the address (used by `derive::service` for ownership). DNS always projects `GenericHostname(name) -ResolvesTo-> <record> -ResolvesTo-> target`.
+   - **Every projected edge needs an owned endpoint:** `carry_forward` scopes edges by owner, so an edge between two ownerless pivots would survive any outage (`every_projected_edge_has_an_owned_endpoint`).
+6. **`Node` and `Edge` carry identity, never mutable state.** `Hash + Eq` is identity for `GraphBuilder` dedup, `patch::diff`, and `node_key`/`edge_key`. Changing fields (counters, `last_seen`, status) live beside the graph in `atlas::flow::FlowIndex` and derived observations, keeping `Edge::TrafficFlow` and `Edge::Serves` payload-free.
 
 ## Testing Without Cloud Credentials
 
-No live credentials exist locally; never write tests that call real cloud APIs. Projection tests run against the fake "Globex" estate in `atlas-lib/src/fixtures.rs`, which populates every collection variant of every provider plus deliberate cross-cloud seams.
+Never call live cloud APIs in tests. Projectors test against the "Globex" estate (`atlas-lib/src/fixtures.rs`), which populates every provider collection and cross-cloud seam.
 
-- `cargo nextest run` includes exhaustiveness guards: every `Node`/`Edge` kind must appear in the fixture graph.
-- `cargo run --example demo` projects the fixtures, folds in the Tier-2 overlay, writes `multi_cloud_demo.{dot,json}`, prints kind coverage, observed flows and derived service edges, and exits non-zero if any kind is missing or the overlay is empty. `fixtures::build_graph()` is topology + overlay; `fixtures::topology()` and `fixtures::observed()` are each half.
+- `cargo nextest run` enforces exhaustiveness guards: every `Node` and `Edge` kind must appear in the fixture graph.
+- `cargo run --example demo` projects fixtures + Tier-2 overlay (`fixtures::build_graph()`, combining `fixtures::topology()` and `fixtures::observed()`), writes `multi_cloud_demo.{dot,json}`, prints kind coverage, flows, and derived `Serves` edges, and exits non-zero if any kind is missing or the overlay is empty.
+- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also exclude the Config type in `use_aws_resource` so the catch-all does not duplicate it as `AwsConfigResource`.
 
-Adding a resource type = one `nodes!` line + projector mapping + fixture data; the guards enforce all three. The `nodes!` line (`Variant(id) => "Provider::SubType({id})"`; struct variants name every field in the label) generates the variant, `Display`, `kind()`, `ALL_KINDS` and `owner()`. File it under the `CollectionSource` whose scan is authoritative for it — that grouping scopes carry-forward on an incomplete scan. For AWS, also exclude the resource's Config type in `use_aws_resource`, or Config's catch-all draws it a second time as an `AwsConfigResource`.
+### Collector Tests (HTTP → Struct)
 
-### Collector tests (HTTP → struct)
+All model fields are `Option<T>` and serde ignores unknown fields, so a drifted schema parses as all-`None`. **Always assert that fields read by the projector are populated.**
 
-Fixtures test projectors; collectors are tested by replaying canned responses:
+- **reqwest clients** (`GoogleApiClient`, `CloudflareApiClient`, `AzureApiClient`): `wiremock` + `with_base_url(token, url)` in `atlas-lib/tests/{gcp,cloudflare,azure}_collectors.rs`. Pair a realistic contract test with pagination/error tests (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare `{success,result}`).
+- **`cloudflare` crate** (zone/dns/kv): `Environment::Custom(format!("{}/client/v4/", server.uri()))` via `serve_crate`/`crate_client`.
+- **AWS SDK:** `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig` in unit module `cloud/amazon/collector_tests.rs` (`replay_config` feeds responses in order; unit test because `aws-config` is a normal dependency).
+- **Azure mapping:** `provider::map_resources` returns `(collections, CollectionReport)` without failing the batch; undeserializable ARG rows are skipped and reported as `Malformed` (capped at `MAX_REPORTED_ROWS` + tail count).
 
-- **reqwest clients** (`GoogleApiClient`, `CloudflareApiClient`, `AzureApiClient`): `wiremock` + each client's `with_base_url(token, url)` constructor. Tests in `atlas-lib/tests/{gcp,cloudflare,azure}_collectors.rs` pair a contract test (realistic body) with a pagination/error test (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare's `{success,result}` envelope).
-- **`cloudflare` crate** collectors (zone/dns/kv): seam is `Environment::Custom(format!("{}/client/v4/", server.uri()))` (`serve_crate`/`crate_client` helpers). The crate's structs are strict, so a drifted body fails outright.
-- **AWS SDK**: `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig`, which exercises the real SDK deserializer. All AWS collectors are in the unit module `cloud/amazon/collector_tests.rs` (`replay_config` feeds one response per request, in order); it can't be an integration test because `aws-config` is a normal dep.
-- **Azure mapping**: `provider::map_resources` is split from the fetch and returns `(collections, CollectionReport)` without failing — an undeserializable row is skipped and reported (capped at `MAX_REPORTED_ROWS` plus a tail count), since ARG returns the whole tenant in one response.
-
-**Our models are all `Option<T>` and serde ignores unknown fields**, so a mismatched struct parses as all-`None`. Assert the fields the projector reads are populated, not just that parsing succeeded.
-
-## Build & Run
-
-The root is a virtual workspace with several binaries, so name one:
+## Build, Run & Dev Orchestration
 
 ```bash
+# CLI (writes gitignored atlas.dot and atlas.json)
 cargo build --release                              # target/release/atlas
 cargo run --bin atlas -- --regions us-east-1 us-west-2
 cargo run --bin atlas -- --gcp-projects my-project
-cargo run --bin atlas -- --cloudflare              # needs CLOUDFLARE_API_TOKEN
+cargo run --bin atlas -- --cloudflare              # requires CLOUDFLARE_API_TOKEN
 cargo run --bin atlas -- --azure-subscriptions sub-id
-cargo run --bin atlas -- --daemon                  # re-scans every 60s
-cargo run --bin atlas -- --verbose
+cargo run --bin atlas -- --daemon --verbose        # re-scans every 60s
+
+# Orchestration (prefer over manual commands)
+cargo xtask dev --demo      # wasm (if stale) → atlas-server :4681 → frontend :4680
+cargo xtask dev             # real collection; forwards provider flags + --demo only
+cargo xtask wasm [--force]  # rebuild atlas-web/static/pkg/ (required after SNAPSHOT_VERSION bump)
+cargo xtask demo            # regenerate multi_cloud_demo.json and atlas-web/static/snapshot.json
+cargo xtask test [--e2e]    # nextest (root) → nextest (atlas-render) → biome → svelte-check → bun unit [→ playwright]
 ```
 
-Writes `atlas.dot` and render snapshot `atlas.json` (both gitignored) to the working directory.
-
-## Dev Orchestration (`cargo xtask`)
-
-Prefer these over running pieces by hand:
-
-```bash
-cargo xtask dev --demo    # credential-free: wasm (if stale) → atlas-server :4681 → frontend :4680; Ctrl-C stops all
-cargo xtask dev           # real collection; pass provider flags
-cargo xtask wasm [--force]  # rebuild atlas-web/static/pkg/ if atlas-layout is newer (always after a SNAPSHOT_VERSION bump)
-cargo xtask demo          # regenerate multi_cloud_demo.json and the UI's offline static/snapshot.json
-cargo xtask test [--e2e]  # nextest (root) → nextest (atlas-render) → biome → svelte-check → bun unit [→ playwright]
-```
-
-`xtask dev` forwards only provider flags and `--demo`; run `atlas-server` directly for `--aws-event-queue`, `--aws-flow-log-queue`, `--retain-scans` or `--flow-ttl-secs`.
-
-**nextest is the test runner** (`cargo nextest run --all-targets`, falling back to `cargo test --all-targets` if not installed). `--all-targets` matters: nextest skips `examples/` otherwise, and that is what compile-checks `demo.rs` and `layout_demo.rs`. nextest never runs doctests (there are none; add `cargo test --doc` if that changes). Config is `.config/nextest.toml` in each workspace: `default` is fail-fast with a 30s slow warning, `ci` (`-P ci`) runs everything with one retry.
+**Test runner:** `cargo nextest run --all-targets` (falls back to `cargo test --all-targets`; `--all-targets` compile-checks `examples/demo.rs` and `layout_demo.rs`; add `cargo test --doc` if doctests are introduced). Configured in `.config/nextest.toml` (`default`: fail-fast, 30 s slow warning; `-P ci`: full run, 1 retry).
 
 ## Live Server (`atlas-server/`)
 
-`atlas-cli` is the one-shot path. `atlas-server` owns a persistent graph, reconciles it against providers on an interval (Tier 3, via `AtlasEngine::collect`), diffs each scan (`patch::diff`), and pushes `GraphPatch`es over WebSocket. It never wipes the graph.
+`atlas-server` owns a persistent graph, reconciles on an interval (Tier 3 via `AtlasEngine::collect`), diffs (`patch::diff`), and broadcasts `GraphPatch`es over WebSocket without ever wiping the graph.
 
 ```bash
-cargo run -p atlas-server -- --demo                  # Globex fixtures, port 4681
-cargo run -p atlas-server -- --regions us-east-1     # same provider flags as the CLI
-cargo run -p atlas-server -- --poll-secs 30 --port 8080
-cargo run -p atlas-server -- --retain-scans 3
-cargo run -p atlas-server -- --aws-event-queue <sqs-url>      # Tier 1
-cargo run -p atlas-server -- --aws-flow-log-queue <sqs-url>   # Tier 2
-cargo run -p atlas-server -- --flow-ttl-secs 300     # unset: the source chooses
+cargo run -p atlas-server -- --demo
+cargo run -p atlas-server -- --regions us-east-1 --poll-secs 30 --port 8080 --retain-scans 3
+cargo run -p atlas-server -- --aws-event-queue <sqs-url> --aws-flow-log-queue <sqs-url> --flow-ttl-secs 300
 ```
 
-**Collection outcomes are part of the contract.** `AtlasEngine::collect` returns `Scan { builder, report }`; the `CollectionReport` (`atlas::collection`) names every source that could not be read. A failed fetch must never reach the projector as an empty collection, or the differ broadcasts a removal for everything that source owns. `poll::reconcile` folds the live graph forward for **unreadable sources only** (`patch::carry_forward` + `report.unreadable_sources()`), so a failed provider is additive-only while healthy providers stay authoritative — otherwise one permanently failing collector would block deletions everywhere. Ownership is `Node::owner()`; ownerless pivots (`GenericIpAddress`/`GenericHostname`/`ExternalService`) are retained on any incomplete scan. The CLI daemon applies the same policy in `AtlasEngine::install`.
+### Collection Outcomes & Retention
 
-**Retention is a budget** (`patch::Retention`). A source is held for `--retain-scans` consecutive incomplete scans (default 10) and then released so the differ can delete what could not be confirmed; recovery resets the streak. The CLI daemon uses `Retention::default()`. The budget depends on `collection::FailureKind`, classified once where the error is still typed — never parsed from a message:
+- **`AtlasEngine::collect`** returns `Scan { builder, report }`. `build_*` is infallible, returning `ProviderScan { provider, report }`.
+- **Per-source carry-forward:** `poll::reconcile` (and CLI `AtlasEngine::install`) folds the prior graph forward for **unreadable sources only** (`patch::carry_forward` + `report.unreadable_sources()`) via `Node::owner()`, keeping healthy providers authoritative for deletions. Ownerless pivots (`Generic*`, `ExternalService`) are retained during any incomplete scan.
+- **Retention budget (`patch::Retention`):** Unreadable sources are held for `--retain-scans` consecutive scans (default 10) before release; recovery resets the streak. Classified once while errors are still typed (`collection::FailureKind`):
+  - `Unavailable` (throttling, timeouts, 5xx, boxed errors in `run_all`): full `--retain-scans` budget.
+  - `Unauthorized` (bad/missing credentials, probed pre-fan-out in GCP `authenticate()`, Cloudflare `clients()`, `AzureApiClient::new()`, and per-region `amazon::resolve_credentials`): `Retention::AUTH_BUDGET` (2), capped by `--retain-scans`. Applies only when *every* failure for that source was `Unauthorized` (`report.unreadable_kind`).
+  - `Malformed` (drifted row in a readable response): **never enters `unreadable_sources()`** and holds nothing (`is_complete()` is false, but removals remain authoritative).
 
-- `Unavailable` — throttling, timeouts, 5xx. Full budget. `run_all` records this, since boxed errors have lost their kind.
-- `Unauthorized` — bad/missing credentials. `Retention::AUTH_BUDGET` (2), capped by `--retain-scans`. Diagnosed before fan-out: GCP `authenticate()`, Cloudflare `clients()`, `AzureApiClient::new()`, and `amazon::resolve_credentials` (probed once per region, since the SDK resolves credentials lazily).
-- `Malformed` — a drifted row in a response that was read. **Not unreadable**: never enters `unreadable_sources()`, holds nothing. Otherwise one bad ARG row would freeze deletions across all of Azure.
+### Demo Mode (`atlas-server/src/demo.rs`)
 
-A source is `Unauthorized` only if *every* failure was a refusal (`report.unreadable_kind`); mixed evidence gets the longer budget. `is_complete()` is stricter than "authoritative": a `Malformed`-only scan is incomplete but trusted for removals. Retention is per provider, so a long outage releases that provider's whole estate at once; finer retention would need per-node provenance (an `AwsEc2Vpc` comes from five collectors).
+All credential-free behaviour (canary DNS parity toggle, 1-in-4 burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `canary`) lives in `atlas-lib/src/fixtures.rs`. Tracked in `docs/demo_design.md`.
 
-**`build_*` is infallible** and returns `ProviderScan { provider, report }`. A provider that fails at credentials returns an empty scan explained by its report (`"credentials"`, `"auth"`); a partial read returns what it got plus one failure per unreachable scope. Never swallow a collector error with `.ok()` or `if let Ok(..)` — record it.
+- **No demo leakage into production defaults:** `Source::default_poll` / `default_flow_ttl` return 60 s and `FlowIndex::DEFAULT_TTL` (15 min) for `Live`, and `demo::POLL` / `demo::flow_ttl(poll)` for `Demo`.
+- **Projector shapes only:** Demo mutations run through projectors (`the_live_change_is_a_shape_a_scan_produces`).
+- **Flows via `FlowIndex`:** `demo::graph` returns `fixtures::topology()`, and `Source::seed_flows` primes `FlowIndex` (`the_scan_graph_carries_no_traffic_of_its_own`).
 
-### Demo mode lives in `atlas-server/src/demo.rs`
+### Tier 1: Live Event Feed (`--aws-event-queue`)
 
-All credential-free behaviour — the canary DNS record flipping by tick parity, the burst-flow cadence (one tick in four), the seed graph, the demo poll (5 s) and flow TTL — is in `demo.rs`. `poll::Source` only picks `Live` or `Demo` and delegates; `main.rs` has no demo constants. What the demo shows, what it doesn't, and the follow-ups are tracked in `docs/demo_design.md`; a change that adds or alters a capability updates its coverage table.
+`atlas::event::ChangeEvent` + `EventApplier`; `cloud/amazon/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
 
-**A demo detail must never become a production default.** `--poll-secs` and `--flow-ttl-secs` are unset-able, and `Source::default_poll`/`default_flow_ttl` ask the source: live answers 60 s and `FlowIndex::DEFAULT_TTL` (15 min), demo answers `demo::POLL` and `demo::flow_ttl(poll)`. Fixture *data* (`fixtures::flows`, `fixtures::burst_flow`, `fixtures::canary`) stays in `atlas-lib`; only the *behaviour* lives in `demo.rs`. **The demo produces only shapes a scan produces**: its changes go through the projectors (`the_live_change_is_a_shape_a_scan_produces`).
+1. **Projector parity:** Adapters must emit only what the full-scan projector emits (`project_instance`/`InstanceFacts`, `project_interface`/`InterfaceFacts`, `use_aws_resource`/`use_global`). Differently keyed Config types (Route 53 `/hostedzone/` prefix, SQS URLs) and deferred `link_interface_owners` edges are omitted (`an_instance_event_produces_only_what_a_full_scan_would`, `an_interface_event_produces_only_what_a_full_scan_would`).
+2. **Additive only:** Creates/modifies never remove unmentioned edges; deletes remove only the named node.
+3. **Last-writer-wins on cloud record time** per resource (bounded table; never substitute arrival time for unparseable timestamps).
+4. **Separate health:** `AppState::stream_report` (`/collection.json` → `stream`) never enters `unreadable_sources()`. Unparseable messages are `Malformed`, reported, and deleted.
 
-`demo::graph` returns `fixtures::topology()`, not `build_graph()`: traffic baked into a scan can never be removed by the differ or expired by a TTL. Demo flows reach the graph through `FlowIndex` like real ones, and `Source::seed_flows` primes the index so the first snapshot has them. Pinned by `the_scan_graph_carries_no_traffic_of_its_own`.
+### Tier 2: Liveness Overlay (`--aws-flow-log-queue`)
 
-### Tier 1: live event feed (`--aws-event-queue`)
+`atlas::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `cloud/amazon/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
 
-`atlas::event` is the normalized model (`ChangeEvent`: one resource, what happened, and the neighbourhood the payload described); `EventApplier` folds events in between scans. `cloud/amazon/events.rs` reads AWS Config items, EC2 state changes and CloudTrail management events off an EventBridge-fed SQS queue. `poll::run` `select!`s over the reconcile ticker and both live feeds, so all tiers share one writer. Rules:
+1. **Metrics beside the graph:** Flow edges carry `FlowStats` (`last_seen`, `packets`, `bytes`); nodes carry `Liveness` (`last_seen`, verdict, no volume to avoid multi-counting across up to 4 keys per record).
+2. **Ownerless pivots only:** Never invents typed nodes; creates only generic IP pivots.
+3. **Expiry via Tier 3:** `poll::reconcile` folds `FlowIndex::overlay` into each scan before diffing; `patch::carry_forward` never holds `TrafficFlow`.
+4. **Separate health:** `AppState::flow_report` (`/collection.json` → `flows`) never enters `unreadable_sources()`.
+5. **Parsing & scoping:** Reads each object's header line (falling back to v2 default); missing `action` → `None` (`observed`). `interface-id` and `instance-id` are read independently. Private IPs take the record's `vpc-id` column, else the `interface-id`'s network in `InterfaceNetworks` (snapshotted by `poll::run`); private records with neither are dropped and reported as `Malformed`.
 
-1. **An adapter may only produce what the full-scan projector produces**, or reconciliation deletes it and the next event re-adds it forever. Instances go through `projector::aws::project_instance`/`InstanceFacts`, ENIs through `project_interface`/`InterfaceFacts`, and the Config catch-all reuses `use_aws_resource`/`use_global`. Types Config keys differently are left unmapped (Route 53 zones' `/hostedzone/` prefix, SQS URLs). ENI events omit both `link_interface_owners` edges: a balancer ARN would need a guessed partition, and an attachment needs the scan's running/pending instance list. Pinned by `an_instance_event_produces_only_what_a_full_scan_would` and `an_interface_event_produces_only_what_a_full_scan_would`.
-2. **Events add; only Tier 3 garbage-collects.** A create/modify never removes an unmentioned edge; a delete removes only the named node. That is what makes an at-least-once, unordered feed safe.
-3. **Last-writer-wins on the cloud's record time**, per resource, so a redelivered create can't resurrect a deleted resource. Never substitute arrival time for an unparseable timestamp. The ordering table is bounded.
-4. **Stream health is not scan health.** Feed failures live in `AppState::stream_report` (`/collection.json` → `stream`) and never enter `unreadable_sources()`. An unparseable message is `Malformed`, reported and deleted.
+### Frontend Overlay & API
 
-Known, tested race: a reconciliation installs the estate as of scan *start*, so a resource created by an event mid-scan is removed that tick and re-added by the next. Adapter tests replay EventBridge bodies (`cloud/amazon/events/tests.rs`); the SQS path is covered end to end with `StaticReplayClient`.
-
-### Tier 2: liveness overlay (`--aws-flow-log-queue`)
-
-`atlas::flow`: `FlowObservation` is the normalized record, `FlowIndex` the bounded, expiring store beside the graph (`AppState::flows`). `cloud/amazon/flow_logs.rs` drains an SQS queue of S3 notifications for VPC Flow Log objects, gunzips and parses them. Rules:
-
-1. **Metrics beside the graph** (rule 6). Flow edges get `FlowStats` (`last_seen`, `packets`, `bytes`); nodes get `Liveness` (`last_seen`, verdict) and no volume — one record names up to four keys, so per-node volume would multiply-count. `last_seen` composes as a max, so it's safe everywhere.
-2. **Observations create only ownerless nodes.** A record has an IP and interface id, not a type, tags or subnet, so a typed endpoint the scan hasn't found is skipped, never invented. Generic pivots are the exception, which is how cross-cloud flows land as real edges.
-3. **Expiry deletes via Tier 3.** `poll::reconcile` folds `FlowIndex::overlay` into the scanned graph before diffing; a quiet flow is simply absent and the differ removes it. Hence `patch::carry_forward` never holds `TrafficFlow`.
-4. **Flow health is its own report** (`AppState::flow_report`, `/collection.json` → `flows`) and never enters `unreadable_sources()`.
-
-Parsing reads each object's header line for field order, falling back to the v2 default only when absent — custom formats are chosen field by field. No `action` column → `action == None` (status `observed`). `interface-id` and `instance-id` are read independently, never derived from each other, and neither creates a node. A record's private addresses are read in the network that captured it: its `vpc-id` column if the format has one, else the network of its `interface-id` in the live graph (`InterfaceNetworks`, snapshotted by `poll::run` each time it re-arms the drain). A record with a private endpoint and neither is dropped and reported (`Malformed`), never placed by guess; one between public addresses needs no network. Tests: `cloud/amazon/flow_logs/tests.rs` (objects and a full SQS+S3 replay); overlay policy in `atlas/flow.rs`.
-
-### Frontend rendering of the overlay
-
-Flow edges take their verdict colour and a log-scaled width from `packets`; nodes heard from get a pulsing halo; packets animate as beads on a separate `canvas.traffic-layer` (bead count and transit time log-scaled). That canvas is excluded from the "settled graph is still" e2e test, and a separate test asserts it moves.
-
-`Edge::Serves` is styled by status (`SERVES_STATUS_COLORS`, `servesColor`/`servesSize` in `style.ts`): `confirmed` saturated, `inferred` receding. No observation (not yet arrived, or expired) → `inferred` styling. The traffic canvas keys off `FLOW_KIND`, so it never animates `Serves` (`service.test.ts`: "never animates packets along a derived edge").
-
-**Service view** (`GraphController::setServiceView`) *hides* — not dims — every non-`Serves` edge and every node no `Serves` edge touches, via Sigma reducers. The traffic canvas already skips hidden endpoints.
-
-### API
-
-- `GET /snapshot.json` — snapshot v3: nodes, edges, `observations`.
-- `GET /collection.json` — `complete`, `unreadable`, `failures` (source/scope + `kind`), `stream`, `flows` (+ observed count). The only way to tell "holds nothing" from "unreachable" from "dropped a row".
-- `GET /ws` — bidirectional: server pushes `snapshot` then `patch`es; client may send `subscribe`, `get_snapshot`, `get_neighbors`.
-- Frontend: `bun dev` in `atlas-render/atlas-web/` (:4680) connects to `ws://<host>:4681/ws`; override with `?server=ws://…`, force offline with `?static`.
+- **Overlay rendering:** Flow edges use verdict colour and log-scaled `packets` width; active nodes show a pulsing halo; packets animate on `canvas.traffic-layer` (excluded from the settled-graph stability test, verified by its own animation test). `Edge::Serves` styles by `inferred`/`confirmed` status (`SERVES_STATUS_COLORS`, `servesColor`/`servesSize` in `style.ts`) and never animates beads (`FLOW_KIND` filter). `GraphController::setServiceView` hides all non-`Serves` edges and untouched nodes via Sigma reducers.
+- **Endpoints:** `GET /snapshot.json` (v3: `nodes`, `edges`, `observations`), `GET /collection.json` (`complete`, `unreadable`, `failures`, `stream`, `flows`), `GET /ws` (server pushes `snapshot`/`patch`; client sends `subscribe`, `get_snapshot`, `get_neighbors`). Frontend (`bun dev` on `:4680`) connects to `ws://<host>:4681/ws` (override with `?server=ws://…` or offline `?static`).
 
 ## Rendering Workspace (`atlas-render/`)
 
-A **separate cargo workspace**, `exclude`d from the root, that must never depend on `atlas-lib` (the SDK tree doesn't build for wasm). The only contract is the versioned snapshot JSON and the same-shaped `GraphPatch`. `SNAPSHOT_VERSION` (currently **3**) is pinned in `atlas-lib/src/atlas/export.rs`, `atlas-render/atlas-layout/src/graph.rs` and `atlas-render/atlas-web/src/lib/graph.ts`. On a shape change, bump all three and rebuild the wasm — the compiled engine rejects mismatched snapshots.
+Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas-lib`. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `atlas-lib/src/atlas/export.rs`, `atlas-render/atlas-layout/src/graph.rs`, and `atlas-render/atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`).
 
-- `atlas-layout` — pure-Rust ForceAtlas2 (Barnes-Hut, deterministic, flat `f32` buffer); `parallel` feature uses rayon.
-- `atlas-layout-wasm` — wasm-bindgen bridge (`cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown`).
-- `atlas-web` — SvelteKit + Sigma.js, a **bun** app: `bun install && bun run wasm && bun dev`.
-- Test with `cargo nextest run` **inside `atlas-render/`**; the root run doesn't cover it.
-- Static e2e: `cargo run --example demo` (root) → `cargo run --example layout_demo -- ../multi_cloud_demo.json` (in `atlas-render/`) → `bun dev`, open `/?static`.
+- `atlas-layout`: deterministic ForceAtlas2 (Barnes-Hut, flat `f32` buffer, optional `parallel` rayon feature).
+- `atlas-layout-wasm`: `wasm-bindgen` bridge.
+- `atlas-web`: SvelteKit + Sigma.js Bun app (`bun install && bun run wasm && bun dev`).
+- Test inside `atlas-render/` with `cargo nextest run`.
 
-## Auth (reference only — unavailable locally)
+## Auth & Toolchain
 
-| Provider | Mechanism |
-|---|---|
-| AWS | Standard credential chain |
-| GCP | OAuth2 browser flow (`yup-oauth2`) |
-| Cloudflare | `CLOUDFLARE_API_TOKEN` (hard error if missing) |
-| Azure | `az login` (`AzureCliCredential`) |
+- **Auth (unavailable locally):** AWS standard credential chain; GCP OAuth2 (`yup-oauth2`); Cloudflare `CLOUDFLARE_API_TOKEN`; Azure `az login` (`AzureCliCredential`).
+- **Toolchain:** Rust **2024 edition** (let-chains), stable ≥ 1.85. VCS is **jj** on git (`jj describe` → `jj new` → `jj squash` → `jj git push --change <id>`).
 
-## Toolchain & VCS
+## Established Helpers
 
-Rust **2024 edition** (let-chains), stable ≥ 1.85. VCS is **jj** on git: `jj describe` → `jj new` → `jj squash` → `jj git push --change <id>`.
+- **Fan-out (`cloud::collector::run_all`):** Runs `Vec<NamedCollector<'_, T>>` concurrently, reporting `{scope}/{name}` failures. AWS and GCP use a local `collectors!` macro (`"name" => Collection::Variant, call(..)`); multi-field payloads use named structs (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `cloud/definition.rs`).
+- **Provider clients:**
+  - **AWS:** `cloud/amazon.rs::load_config(region)` once per region; register in `amazon/provider.rs`.
+  - **GCP:** `GoogleApiClient::paginated_list` (`api/google/client.rs`); register in `google/provider.rs`.
+  - **Azure:** `AzureApiClient::query_graph` errors on missing/non-array `data` or `totalRecords > rows.len()`. `azure_types!` in `azure/provider.rs` drives the ARG filter and exhaustive `map_resources` dispatch (`leaf!` for `{id, name, location}`).
+  - **Cloudflare:** `CloudflareApiClient::get` / `get_paged` (cursor endpoints like R2) and `cloudflare::paginate(per_page, |page| ..)`. **Never stop paging on a short page.**
+- **Projectors:** `projector::project_parallel` (per-scope rayon fan-out + ordered merge); `project_leaf!` for leaf nodes; `GraphBuilder::link_to` / `link_from` (use `get_or_add_node`/`get_or_add_ref` only when reusing the index).
+- **Graph mutation:** `add_edge` deduplicates; `GraphBuilder::merge(&graph)` folds by node identity; `GraphBuilder::remove_node` repairs `node_map` after petgraph swap-remove (never call `graph.remove_node` directly); `patch::merge_additions` merges a subgraph and returns only newly added elements.
+- **Pivots (`Node::ip(value, network)`, `Node::public_ip(value)`, `Node::hostname(value)`):** Canonicalise via `util::canonical_address` / `canonical_hostname`. `network` equals the owning network node's ID (`Node::network_scope()`): AWS VPC ID, lowercased Azure VNet ID (from subnet), or GCP `projects/P/global/networks/N` (`projector/gcp.rs::canonical_network`). Azure NSG rules use each attached subnet's VNet. When no network exists (DNS records, unattached NSGs, non-VPC resources), the naming resource's ID stands in as `network`.
+- **AWS interfaces & `scanned_instances` gate:** `DescribeNetworkInterfaces` projects all ENIs and their private IPs (`project_instance` falls back to `facts.private_ip` only when an instance has no ENIs) and links EIPs (`Eni -HasIp-> Eip` via `network_interface_id`). `DescribeInstances` filters to running/pending, so post-parallel passes (`link_interface_owners` and `link_targets`) gate instance references on `scanned_instances`. `link_targets` links `instance` targets via `ConnectsTo` and `ip` targets via `RoutesTo` a VPC pivot, consulting `derive::held_addresses` to skip IPs held (locally or across a join) by an ENI attached to an unscanned instance (`a_stopped_ip_target_is_not_inferred`, `a_stopped_ip_target_across_a_peering_is_not_inferred`).
+- **Derived edges (`atlas::derive::all(&mut builder, &flows)`):** Single entry point called after `carry_forward` and `FlowIndex::overlay`. Stateless, idempotent, and excluded from `Edge::is_projected()` (`TrafficFlow`, `Covers`, `Serves`).
+  - `derive::containment`: links host IPs into covering CIDR pivots (`Edge::Covers`) within the same network.
+  - `derive::service`: emits `Edge::Serves` in traffic direction (`inferred` from `CHAINS` over projected edges, `confirmed` from active `FlowIndex` records, oriented by `flow::orientation` port heuristics and `FlowStats` majority). `address_owners` walks `ConnectsTo` + transitive `HasIp` and resolves unheld private pivots across single unambiguous network joins (`JOINS` in `derive/networks.rs`: `Through` peering/TGW hubs or `Direct` VNet/GCP peerings, non-transitive). Snapshots emit `derive::observations`; patches emit `derive::DerivedObservations::changed`.
 
-## Established Helpers (use these, don't re-duplicate)
-
-- **Fan-out**: `cloud::collector::run_all` takes a `Vec<NamedCollector<'_, T>>` and runs them concurrently, reporting failures as `{scope}/{name}`. AWS and GCP build the list with a local `collectors!` macro, one `"name" => Collection::Variant, call(..)` line each. The macro applies the variant, so a collector returns its natural type and a mismatched registration fails to compile. Multi-field payloads therefore need a named struct (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `cloud/definition.rs`).
-- **AWS**: `cloud/amazon.rs::load_config(region)` once per region; collectors take `&SdkConfig`. Register in `amazon/provider.rs`'s `collectors!`.
-- **GCP**: every list endpoint goes through `GoogleApiClient::paginated_list` (`api/google/client.rs`). Register in `google/provider.rs`'s `collectors!`.
-- **Azure**: `AzureApiClient::query_graph` treats a missing/non-array `data` as an error, never an empty tenant, and errors when `totalRecords` exceeds rows returned (too few is data loss; too many is harmless). The `azure_types!` list in `azure/provider.rs` drives both the ARG `type in~` filter and `map_resources`' exhaustive dispatch; `leaf!` covers `{id, name, location}`.
-- **Cloudflare**: `CloudflareApiClient::get` for raw REST (`get_paged` also returns `result_info` for cursor endpoints like R2); `cloudflare::paginate(per_page, |page| ..)` for page-numbered crate endpoints. **Never stop paging on a short page** — a clamped `per_page` makes that normal, and truncation reads as mass deletion.
-- **Projectors**: `projector::project_parallel` is the per-scope rayon fan-out + ordered merge (AWS, GCP, Azure). `project_leaf!` (`use super::project_leaf;`) for node-only resources: `(builder, items, field, Node::Variant)` for serde models, `(builder, items, accessor(), Node::Variant, parent, edge)` for AWS SDK models. Link with `GraphBuilder::link_to(from, node, edge)` / `link_from(node, to, edge)`; use `get_or_add_node`/`get_or_add_ref` only when the index is needed for several edges.
-- **Graph mutation**: `add_edge` dedups. `GraphBuilder::merge(&graph)` is the one node-identity fold (`patch::carry_forward` wraps it). `GraphBuilder::remove_node` reports the edges that died and repairs `node_map` after petgraph's swap-remove — never call `graph.remove_node` directly. `patch::merge_additions` folds a subgraph into the live graph and reports only what was new (measured before merging); both live tiers use it.
-- **Event/flow adapters**: `EventApplier` is the only applier of `ChangeEvent`s (idempotency + ordering), and `FlowIndex` the only store of `FlowObservation`s (admission, expiry, capacity). Adapters build context with the projector's own functions.
-- **Pivots**: `Node::ip(value, network)` / `Node::hostname(value)` are the only constructors for `GenericIpAddress`/`GenericPrivateIpAddress`/`GenericHostname`; `Node::public_ip(value)` is `None` for a private value, for a caller with no network to offer. They canonicalise via `util::canonical_address` / `canonical_hostname`, since pivots match by exact value (`2001:0db8:…:0010` ≠ `2001:db8::10` otherwise), and `util::is_private` decides whether `network` is part of the identity. Unparseable values (prefix-list ids, service tags) pass through untouched. **`network` is the network the address was read in**, and equals the id of its network node, so `Node::network_scope()` reads one off the other: the VPC id (AWS), the lowercased VNet id derived from the subnet (Azure), `projects/P/global/networks/N` (GCP — `projector/gcp.rs::canonical_network` cuts any URL form and qualifies a bare name with the scanning project; every `GcpComputeNetwork` and every GCP address scope goes through it). An Azure NSG's rules are read in the VNet of each subnet it is attached to. Where no network is known, the resource that names the address stands in, so the address joins nothing: a DNS record (Route 53 record name, Cloudflare zone), an NSG on no subnet, a resource with no VPC.
-- **AWS interfaces** (`cloud/amazon/network_interface.rs`, `DescribeNetworkInterfaces`) make every ENI a node. A private IP belongs to its interface; `project_instance` falls back to `facts.private_ip` only for an instance with no interfaces. Owner edges only where the description is unambiguous: NAT gateway in the projector arm, load balancer in `link_interface_owners` (needs the balancer collection to build the ARN). Lambda, VPC endpoint and RDS interfaces stay unowned. An Elastic IP is held by its interface (`Eni -HasIp-> Eip`, from `network_interface_id`), never by `instance_id`. Target-group targets by `target_type`, all in `link_targets`: `ip` → `RoutesTo` a pivot in the group's VPC (never `ConnectsTo`), `instance` → `ConnectsTo` the instance, Lambda/ALB skipped.
-- **`scanned_instances` gates every edge built from another collection's mention of an instance.** `DescribeInstances` is filtered to running/pending, but stopped instances stay attached to ENIs and registered in target groups, and `link_to` would invent a bare node the scan excluded. `link_interface_owners` and `link_targets` run after `project_parallel` and take the set, computed once in `aws_projector`. New edges that name an instance by id belong there too. An IP target names an instance by address: one held by an interface attached to an instance the scan dropped is not linked, or the interface would resolve as its own owner and read as a service (`a_stopped_ip_target_is_not_inferred`). The gate asks derive's own resolver (`derive::held_addresses`) where the address lands, so it also covers the one joined holder (`a_stopped_ip_target_across_a_peering_is_not_inferred`).
-- **Derived edges**: `atlas::derive::all(&mut builder, &flows)` is the **only** entry point — its passes are private modules, so the compiler rejects direct calls. The one other export is `held_addresses`, read-only, for that gate. Call it wherever a graph is finalized, after `carry_forward` and `FlowIndex::overlay` (`poll::reconcile`, `AtlasEngine::install`, `fixtures::build_graph`, `examples/demo.rs`); the CLI passes `FlowIndex::default()`. Add new passes inside `derive::all`. Derived edges are pure functions of graph + index: stateless, idempotent, lifecycle via the differ, and never carried forward — `Edge::is_projected()` is the exhaustive match (`TrafficFlow`, `Covers`, `Serves` are not projected), so a new `Edge` must declare its side.
-  - `derive::containment`: links each bare `GenericIpAddress` into every CIDR pivot covering it (`Edge::Covers`), so a flow confirms the rule that allowed it.
-  - `derive::service`: collapses a path into `Edge::Serves` between typed resources, in traffic direction (`ALB -Serves-> Instance`). One kind, two provenances: a control-plane chain → `inferred`; observed traffic → `confirmed`. A lapsed flow drops a wired target back to `inferred` rather than deleting it. Chains are `Node::kind()` sequences in `CHAINS` (AWS LB → TargetGroup → `AwsEc2Instance`, `GenericPrivateIpAddress` or `GenericIpAddress`), checked against `ALL_KINDS`; the matcher walks projected edges only, and an ownerless endpoint resolves through `address_owners`. **Direction comes from ports**: request and reply are separate records, so `flow::orientation` picks the service end (one ephemeral port → the other end; neither → the lower port; ambiguous → packet direction) and `FlowStats` keeps a per-pair majority. `TrafficFlow` edges keep packet direction. Confirmation is read from the index, not the edge (an evicted flow's edge can outlive its record).
-  - **Address ownership**: a pivot is owned by what `ConnectsTo` it, resolved transitively up `HasIp` (`Instance -HasIp-> Eni -HasIp-> Eip`) with a visited set. A private pivot carries its network; one nothing holds where it was read takes the owners of the same address in a joined network, when exactly one joined network holds it. Joins are the `JOINS` rows in `derive/networks.rs`: networks beside the same connector (`Through` a peering connection or transit gateway) or with an edge between them (`Direct`: VNet and GCP network peering), over projected edges in either direction and never chained. A connector stays a hub, never expanded into pairs, so a transit gateway costs its attachments rather than their square. An interface nothing holds is its own owner. `ResolvesTo` never confers ownership; an unowned endpoint yields no edge, which keeps internet and NAT peers out.
-  - **Status rides the observation channel** (rule 6). Snapshots use `derive::observations` instead of `FlowIndex::observations`; patches use `derive::DerivedObservations::changed`, owned by the reconcile loop, which compares values and sends only what moved. A `Serves` observation has `last_seen` (max over confirming flows; `0` when `inferred`) and status, never `packets`/`bytes`.
-
-`docs/audit_findings.md` records resolved findings as patterns to avoid reintroducing.
+Historical findings and decisions live in [`docs/audit_findings.md`](docs/audit_findings.md).

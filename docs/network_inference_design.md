@@ -1,48 +1,42 @@
-# Cross-Cloud Network Inference and Telemetry
+# Cross-Cloud Network Inference & Telemetry
 
-How separately scanned clouds are joined into one graph, and how observed traffic is laid over it.
+How separately scanned clouds join into one graph and how observed traffic overlays it.
 
-## 1. Universal pivot nodes
+## 1. Universal Pivot Nodes
 
-`GenericIpAddress` and `GenericHostname` are the shared vocabulary between clouds. Producers build them only through `Node::ip`/`Node::hostname`, which canonicalise spelling (`util::canonical_address`: `IpAddr` round-trip, `::ffff:` unmapping, CIDR re-basing; `util::canonical_hostname`: lowercase, no trailing dot). Unparseable values pass through untouched. Because `GraphBuilder` dedups by value, an AWS interface that `ConnectsTo` an address and a Cloudflare record that `ResolvesTo` it meet at the same node with no API-level correlation.
+`GenericIpAddress`, `GenericPrivateIpAddress`, and `GenericHostname` are the shared vocabulary across clouds, built exclusively via `Node::ip` / `Node::public_ip` / `Node::hostname`:
 
-**Only public addresses are shared vocabulary.** A private value — RFC 1918, RFC 6598 shared space, link-local, loopback, ULA (`util::is_private`) — names a different host in every network that uses it, and default VPCs number themselves from `172.31.0.0/16` in every account and region. So `Node::ip(value, network)` builds `GenericPrivateIpAddress { network, address }` for a private value and ignores `network` for a public one. `network` is where the address was read: the VPC, VNet or GCP network of the resource that holds or names it, or of the interface that captured a flow record. Where nothing names a network — a DNS record with a private answer, an NSG attached to no subnet — the naming resource stands in, so the address is unique to it and joins nothing. A CIDR is private only if it lies wholly inside one block; rules narrower than `/16` (the only ones `is_large_cidr` keeps) never straddle one.
+- **Canonicalisation:** `util::canonical_address` round-trips `IpAddr`, unmaps `::ffff:`, and zeroes host bits on CIDRs; `util::canonical_hostname` lowercases and strips trailing dots. Unparseable values pass through untouched. `GraphBuilder` deduplicates by value, so an AWS ENI (`ConnectsTo`) and a Cloudflare DNS record (`ResolvesTo`) naming the same public IP meet at one node without API correlation.
+- **Public vs. private scope:** Only public addresses join across networks. Private ranges—RFC 1918, RFC 6598, link-local, loopback, and ULA (`util::is_private`)—build `GenericPrivateIpAddress { network, address }`, where `network` is the VPC, VNet, or GCP network in which the address was read (or the capturing interface's network for flow logs). When no network exists (e.g. a DNS record with a private answer or an unattached NSG), the naming resource's own ID stands in as `network` so it joins nothing. A CIDR is private only if it lies wholly within a private block; CIDRs wider than `/16` are dropped by `util::is_large_cidr`.
+- **Cross-network private traffic:** Traffic over peering, transit gateways, VPNs, or interconnects carries the remote private IP read in the local network. Modelled joins resolve it at derive time (`network_connectivity_design.md`); unmodelled hops (currently VPN/interconnect flows to Azure and Cloud SQL in the fixtures) remain on unheld local-scope pivots until Phase 2 lands. Publicly numbered VPCs share `GenericIpAddress` pivots with the internet.
+- **Uniform DNS shape:** Every DNS provider projects `GenericHostname(name) -ResolvesTo-> <record> -ResolvesTo-> target`. CNAME chains stitch across providers, and the owned record node prevents ownerless-to-ownerless edges that `carry_forward` could never expire. Fixture seams deliberately vary casing and formatting on each side so tests catch constructors bypassed by hand.
 
-Traffic between networks over peering, a transit gateway, a VPN or an interconnect carries the far side's private address, read in the near side's network. Joins that are modelled resolve it: an address nothing holds where it was read takes the holder in the one joined network that has it (`network_connectivity_design.md`; phase 1 covers peering and transit gateways). Until VPNs and interconnects are modelled (phase 2), the fixture's AWS flows to an Azure NIC and a Cloud SQL instance land on addresses nobody in that network holds — the honest answer, not a match on value. A VPC numbered from public space shares those pivots with the internet, as it shares the addresses.
+## 2. External Services & Security Rules
 
-DNS always takes one shape, `GenericHostname(name) -ResolvesTo-> record -ResolvesTo-> target`, so a CNAME in one provider chains through a name another provider defines. The record sits between the two pivots because an edge joining two ownerless nodes belongs to no provider, and `carry_forward` would keep it through any provider's outage. The fixtures spell three seams differently on each side so the guard tests catch a producer that bypasses the constructors.
+- **CIDR rules:** Explicit CIDRs in AWS Security Groups, GCP Firewalls, and Azure NSGs link via `RoutesTo -> GenericIpAddress` / `GenericPrivateIpAddress` (filtered by `util::is_large_cidr` to exclude `0.0.0.0/0` and overly broad blocks).
+- **Non-IP targets:** Provider-specific constructs use dedicated kinds (e.g. `AzureServiceTag`).
+- **Named external services:** `CloudflareWorker -ConnectsTo-> ExternalService` is emitted only when a binding or secret explicitly names a URL; raw CIDRs are never heuristically mapped to third-party vendors.
 
-## 2. Inferring external services
+## 3. Flow Telemetry (Tier 2)
 
-- **Security rules.** Explicit CIDRs in AWS security groups, GCP firewalls and Azure NSGs become `GenericIpAddress` via `RoutesTo`. Ranges too wide to mean anything (`0.0.0.0/0`, …) are dropped by `util::is_large_cidr`.
-- **Non-IP targets** (e.g. Azure service tags) get dedicated kinds such as `AzureServiceTag`.
-- **Named services.** `CloudflareWorker -ConnectsTo-> ExternalService` where a secret or plain-text binding contains a URL. Nothing maps a raw CIDR to a named third party, so `ExternalService` appears only where configuration names one.
+Implemented in `atlas/flow.rs`:
 
-## 3. Flow telemetry (Tier 2)
+- `Edge::TrafficFlow` asserts only that traffic occurred. Verdict, packet/byte counters, and `last_seen` live beside the graph in the bounded, expiring `FlowIndex` keyed by `node_key`/`edge_key`.
+- Both endpoints are IP pivots, turning cross-cloud traffic into edges between estates. Private endpoints resolve in the record's `vpc-id` or its `interface-id`'s network in the live graph; records with a private IP and neither are dropped and reported as `Malformed`.
+- Expired flows are omitted when `FlowIndex::overlay` folds into the next Tier-3 scan, and `patch::diff` removes their edges.
 
-Implemented in `atlas/flow.rs`; see `change_monitoring_design.md` §7.
+## 4. Containment (`Edge::Covers`)
 
-- `Edge::TrafficFlow` means only "traffic was observed". Status, packets, bytes and `last_seen` live in `FlowIndex`, keyed by `node_key`/`edge_key`, because `Edge` is an identity type; node freshness uses the same mechanism.
-- Ingestion is push-based: VPC Flow Logs → S3 → SQS (`--aws-flow-log-queue`). GCP and Azure flow logs will normalize into the same `FlowObservation`.
-- Both endpoints are pivots, so a flow between two clouds becomes a real edge between their estates. A private endpoint is read in the network that captured the record — the record's `vpc-id`, else its interface's network in the live graph — and a record that offers neither is dropped and reported rather than placed by guess.
-- The overlay is bounded and expiring; a lapsed flow is dropped from the next scan graph and the differ removes its edge.
-
-## 4. Containment: traffic confirms a rule
-
-Implemented in `atlas/derive/containment.rs`.
-
-A rule yields `GenericIpAddress("203.0.113.0/24")` and a flow yields `GenericIpAddress("203.0.113.77")`; exact-value identity never joins them. The containment pass links each address into every range covering it:
+Implemented in `atlas/derive/containment.rs`. Security rules name CIDR blocks (`203.0.113.0/24`) while flow logs name host IPs (`203.0.113.77`). The containment pass links each host pivot to every CIDR pivot covering it:
 
 ```
 AwsEc2SecurityGroup -RoutesTo-> 203.0.113.0/24 -Covers-> 203.0.113.77 <-TrafficFlow- 10.10.1.11
 ```
 
-- **`Covers` is its own kind** — it describes a rule, not traffic, and must not be confused with a scanned `RoutesTo`.
-- **Derived, so owned by no tier.** Recomputed at every finalisation point via `derive::all`; lifecycle comes from the differ; `carry_forward` never holds it (`Edge::is_projected`).
-- **Per-family and width-aware.** Addresses probe only the prefix widths the estate's rules use. A CIDR with host bits set still matches on its network.
-- **Per-network.** A private range covers private addresses read in its own network only; a public range covers public addresses.
-- **No range-to-range edges** — rule overlap is policy, not traffic.
+- **Distinct edge kind:** `Covers` represents CIDR inclusion, never traffic (`RoutesTo`).
+- **Stateless derivation:** Recomputed by `derive::all` at every finalisation point, diffed like any edge, and excluded from `carry_forward` (`!Edge::is_projected()`).
+- **Scoped & width-probed:** Host addresses probe only prefix lengths present in the estate's rules, within the same IP family and network scope (private ranges cover only private addresses in the same `network`; no range-to-range edges).
 
-## 5. Service topology
+## 5. Service Topology
 
-A flow proves traffic between addresses, not between resources. `service_topology_design.md` covers giving every flow endpoint an address in the graph and the derived `Edge::Serves` that collapses the resulting path into one link between typed resources.
+Flow logs connect addresses, not resources. [`docs/service_topology_design.md`](service_topology_design.md) covers resource address projection and the derived `Edge::Serves` that collapses multi-hop paths into direct resource-to-resource links.

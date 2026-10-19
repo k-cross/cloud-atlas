@@ -1,42 +1,42 @@
 # Cloud Atlas
 
-Discovers cloud configuration and keeps a live, in-memory property graph of the infrastructure — a digital twin continuously synchronized with reality, built from what is actually deployed rather than an idealized view of intent. Intended as a visual aid for architecture discussions and triage.
+Discovers cloud configuration and maintains a live, in-memory property graph of multi-cloud infrastructure—a digital twin synchronized with deployed reality for architecture exploration and triage.
 
 ## Architecture
 
-- **Typed graph**: 70 `Node` variants (`Node::AwsEc2Instance`, `Node::AzureVirtualNetwork`, …) over `Arc<str>` ids, and semantic edges (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
-- **`AtlasEngine`**: concurrent collection, failure reporting, and long-lived graph state.
-- **Live backend** (`atlas-server/`): owns a persistent graph, diffs each scan by stable resource key, and pushes add/remove patches over WebSocket. Change detection has three tiers — cloud event streams (1), flow logs as a liveness overlay (2), and full-scan polling as the backstop (3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
-- **Liveness overlay**: observed traffic lives *beside* the graph in a bounded, expiring `FlowIndex`. `Edge::TrafficFlow` only says "traffic was seen"; counters and timestamps travel on the snapshot's `observations` list.
-- **Service topology**: derived `Edge::Serves` links collapse load balancer → interface → address → instance paths into one edge, `inferred` from wiring and `confirmed` by traffic. See [`docs/service_topology_design.md`](docs/service_topology_design.md).
-- **Interactive rendering** (`atlas-render/`): a WebAssembly force-directed layout feeding a Sigma.js WebGL frontend. See [`atlas-render/README.md`](atlas-render/README.md).
+- **Typed graph:** 74 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
+- **`AtlasEngine`:** Concurrent multi-cloud collection, structured failure reporting, and persistent graph state.
+- **Live backend (`atlas-server/`):** Reconciles against providers, diffs by stable resource key, and streams patches over WebSocket across three change tiers: control-plane event streams (Tier 1), flow-log liveness overlays (Tier 2), and full-scan polling (Tier 3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
+- **Liveness overlay:** Observed traffic lives beside the graph in a bounded, expiring `FlowIndex`. `Edge::TrafficFlow` asserts only that traffic occurred; counters and timestamps ride the snapshot's `observations` list.
+- **Service topology:** Derived `Edge::Serves` links collapse load balancer → interface → address → instance paths into direct resource edges, `inferred` from control-plane wiring and `confirmed` by traffic. See [`docs/service_topology_design.md`](docs/service_topology_design.md).
+- **Interactive rendering (`atlas-render/`):** Rust/WebAssembly ForceAtlas2 layout feeding a Sigma.js WebGL frontend. See [`atlas-render/README.md`](atlas-render/README.md).
 
-Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together, e.g. Route 53 resolving to an Azure App Service or GCP Cloud Run. A private address is scoped to the network it was read in (`GenericPrivateIpAddress`), so `10.0.1.5` in one VPC never joins `10.0.1.5` in another; only public addresses cross networks. DNS from every provider reads `name -ResolvesTo-> record -ResolvesTo-> target`, so records for the same name in different providers meet at one node.
+Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together (e.g. Route 53 resolving to Azure App Service or GCP Cloud Run). Private addresses scope to their network (`GenericPrivateIpAddress`) and resolve across modelled peerings and transit gateways (`docs/network_connectivity_design.md`). DNS across all providers projects `name -ResolvesTo-> record -ResolvesTo-> target`.
 
-## Goals
+## Status & Roadmap
 
-- [x] Live, in-memory graph kept continuously in sync
-- [x] Explorable: `.dot` export (e.g. [Gephi](https://gephi.org/)) and a live WebGL renderer
-- [x] Collect from AWS, GCP, Azure and Cloudflare
-- [x] Persistent graph + differ, patches pushed over WebSocket
-- [ ] Cloud event streams as the primary change feed
-    - [x] AWS — EventBridge/Config/CloudTrail over SQS (`--aws-event-queue`)
-    - [ ] GCP asset feeds, Azure Event Grid (Cloudflare stays on polling)
-- [ ] Data-plane liveness overlay
-    - [x] AWS VPC Flow Logs → S3 → SQS (`--aws-flow-log-queue`)
-    - [ ] GCP and Azure flow logs
-- [ ] On-prem support
+- [x] Live, in-memory graph exported to `.dot` ([Gephi](https://gephi.org/)) and WebGL
+- [x] Multi-cloud collection: AWS, GCP, Azure, and Cloudflare
+- [x] Persistent graph + differ streaming patches over WebSocket
+- [ ] Tier-1 control-plane event streams
+  - [x] AWS — EventBridge / Config / CloudTrail over SQS (`--aws-event-queue`)
+  - [ ] GCP Cloud Asset Inventory feeds, Azure Event Grid (Cloudflare remains on polling)
+- [ ] Tier-2 data-plane liveness overlay
+  - [x] AWS VPC Flow Logs → S3 → SQS (`--aws-flow-log-queue`)
+  - [ ] GCP and Azure flow logs
+- [ ] Cross-cloud VPNs, Direct Connect, ExpressRoute, and Cloud Interconnect
+- [ ] On-prem discovery
 
 ## Providers
 
-- **AWS** — standard credential chain; `--regions`. Resources that don't map to a region live under a `global` scope. S3 buckets are global. Route 53 zones and record sets are global.
-- **GCP** — lightweight REST clients; local gcloud auth or a browser OAuth flow; `--gcp-projects`. Compute, firewalls, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, networking.
-- **Cloudflare** — `CLOUDFLARE_API_TOKEN`; `--cloudflare`. Zones, DNS records, Workers, Durable Objects, KV, R2, D1.
-- **Azure** — Azure Resource Graph, cross-subscription; `az login`; `--azure-subscriptions`. VMs, AKS, App Services, Function Apps, VNets, subnets, NSGs, public IPs, DNS zones, CDN profiles, Storage, SQL, Cosmos DB, Service Bus, Event Grid.
+- **AWS** (`--regions`, standard credential chain): EC2, VPC, ENIs, Peering, Transit Gateways, ELB, Route 53, S3, RDS, DynamoDB, Lambda, ECS, EKS, API Gateway, SQS, SNS, CloudFront, IAM, Config. S3 and Route 53 collect under `global`.
+- **GCP** (`--gcp-projects`, gcloud ADC or browser OAuth): Compute, Firewalls, Forwarding Rules, VPC Networks/Subnetworks/Peerings, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, Cloud Storage.
+- **Cloudflare** (`--cloudflare`, `CLOUDFLARE_API_TOKEN`): Zones, DNS records, Workers, Durable Objects, KV, R2, D1.
+- **Azure** (`--azure-subscriptions`, `az login`, Resource Graph): VMs, AKS, App Services, Function Apps, API Management, VNets/Subnets/Peerings, NICs, Load Balancers, NSGs, Public IPs, DNS Zones, CDN, Storage, SQL, Cosmos DB, Service Bus, Event Grid.
 
-## CLI (one-shot / daemon)
+## CLI (`atlas`)
 
-`cargo build --release` produces `target/release/atlas`. Each run writes `atlas.dot` and a render snapshot `atlas.json` to the working directory.
+`cargo build --release` builds `target/release/atlas` and writes `atlas.dot` and `atlas.json`.
 
 ```bash
 cargo run --bin atlas                                      # AWS us-east-1
@@ -44,21 +44,20 @@ cargo run --bin atlas -- --regions us-east-1 us-west-2
 cargo run --bin atlas -- --gcp-projects proj-1 proj-2
 CLOUDFLARE_API_TOKEN=… cargo run --bin atlas -- --cloudflare
 cargo run --bin atlas -- --azure-subscriptions sub-1 sub-2
-cargo run --bin atlas -- --daemon                          # re-scan every 60s
-cargo run --bin atlas -- --verbose
+cargo run --bin atlas -- --daemon --verbose                # re-scan every 60s
 ```
 
-The daemon never wipes its graph: each tick is diffed against the last, and a provider that could not be read is carried forward for a bounded number of scans instead of looking like a mass deletion.
+In `--daemon` mode, unreadable sources are carried forward for a bounded number of scans rather than diffed as mass deletions.
 
-## Live stack (server + renderer)
+## Live Stack (`atlas-server` + `atlas-render`)
 
 ```bash
 cargo xtask dev --demo    # credential-free: wasm → atlas-server :4681 → frontend :4680
 cargo xtask dev           # real collection; pass provider flags
-cargo xtask test [--e2e]  # every test suite, in order
+cargo xtask test [--e2e]  # all test suites in order
 ```
 
-`atlas-server` also consumes the live AWS feeds:
+With live AWS feeds:
 
 ```bash
 cargo run -p atlas-server -- --regions us-east-1 \

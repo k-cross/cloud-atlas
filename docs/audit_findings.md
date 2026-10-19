@@ -1,91 +1,108 @@
-# Audit findings
+# Audit Findings & Decision Record
 
-Resolved findings, kept as patterns not to reintroduce. Each is pinned by the named test.
+Consolidated record of resolved bugs, rejected alternatives, and historical design decisions. Design documents describe only the current state; historical rationale lives here so invariants are not accidentally undone.
 
-## Tier 2 (flow logs)
+## Tier 1 (Event Feed)
 
-### Delete a notification only after its objects were read
-
-`FlowLogQueue::receive` deleted every message even when the S3 read failed transiently, losing the object for good. Tier 1 can delete unconditionally because only a local parse sits between receive and delete; Tier 2 has a network fetch there. `read_object` returns `Option`: `None` leaves the message queued, `Some` deletes it — including unparseable content (`Malformed`), which would only fail again.
-
-Exception: a 404/410 object is gone, not retryable, and retrying would re-observe its siblings forever and inflate their counters. It is reported `Malformed` and the message released. Auth failures still retry.
-
-Trade-off: a partially failed message is redelivered whole, so the objects that did read are double-counted until their entries lapse. That beats losing data.
-
-Tests: `an_object_that_could_not_be_read_leaves_its_notification_on_the_queue`, `an_object_that_was_read_but_makes_no_sense_is_deleted_anyway`, `an_object_that_is_gone_releases_its_notification`.
-
-### Bound the merge context by what the index kept
-
-`ingest_flows` built its merge subgraph from every arriving record, although `FlowIndex` had already evicted some. One object (`MAX_RECORDS` = 100,000) against `DEFAULT_CAPACITY` (10,000) could write ten times the budget into the live graph. `FlowIndex::context` now filters by what the index holds.
-
-Test: `the_merge_context_never_exceeds_what_the_index_kept`.
-
-### Evict on a tie without emptying the index
-
-`evict` kept `last_seen > cutoff`, dropping every entry *at* the cutoff. Flow records have one-second precision, so ties are normal, and a single-second batch wiped the whole index. `eviction_cut` returns the cutoff plus a budget for entries at it.
-
-Test: `eviction_survives_a_batch_that_shares_one_timestamp`.
-
-### Truncate on a character boundary
-
-`read_to_string` + `String::truncate(limit)` rejected or panicked when the limit fell inside a multi-byte character. `decompress` now reads bytes, cuts at a boundary, then decodes.
-
-Test: `a_cut_that_lands_inside_a_character_still_yields_the_part_before_it`.
-
-## Tier 1 (event feed)
+### SQS as the event consumer
+EventBridge rules route AWS Config items, EC2 state-change notifications, and CloudTrail management events to SQS. A queue buffers across server restarts, and its at-least-once delivery is handled by `EventApplier`. Config items carry attachments needed to project a creation; EC2 state changes are immediate and free but identity-only; CloudTrail provides the broadest API coverage.
 
 ### An interface with no reported subnet attaches to nothing
+When `configuration.networkInterfaces` is absent, the adapter reads interface IDs from relationships, which carry no subnet. `project_instance` previously defaulted to the instance's subnet—wrong for secondary ENIs, causing events and full scans to disagree indefinitely. `EniFacts { subnet_id: None }` now emits no `AttachedTo` edge; the next scan supplies it. A missing edge heals; a wrong one flaps.
+- Tests: `an_eni_from_relationships_alone_attaches_to_no_subnet`, `an_instance_event_produces_only_what_a_full_scan_would`.
 
-With no `configuration.networkInterfaces`, the adapter reads interface ids from relationships, which carry no subnet. `project_instance` used to assume the instance's subnet, which is wrong for secondary ENIs and made event and scan disagree forever. `EniFacts { subnet_id: None }` now yields no `AttachedTo`; the scan supplies it. A missing edge heals, a wrong one flaps.
-
-Tests: `an_eni_from_relationships_alone_attaches_to_no_subnet`, `an_instance_event_produces_only_what_a_full_scan_would`.
+### Config ENIs require full-scan ENI coverage and omit deferred owner edges
+`AWS::EC2::NetworkInterface` Config items could not be mapped until `DescribeNetworkInterfaces` projected every ENI in full scans. Event adapters still omit both `link_interface_owners` edges (load balancer and instance attachment), as each requires cross-collection state absent from a single event.
+- Tests: `an_interface_event_produces_only_what_a_full_scan_would`, `a_balancer_interface_event_does_not_invent_the_balancer`.
 
 ### Prune ordering on a tie without emptying the table
+`EventApplier::prune` previously dropped entries at the cutoff timestamp (`<= cutoff`), which could empty the ordering table on a batch sharing one timestamp and let a redelivered create resurrect a deleted resource. `prune` shares `eviction_cut`/`survives` with `FlowIndex`.
+- Test: `pruning_keeps_a_batch_that_shares_one_timestamp`.
 
-`EventApplier::prune` had the same strict-cutoff bug as `evict`; an emptied table let a redelivered create resurrect a deleted resource. `prune` now shares `eviction_cut`/`survives` with the flow index.
+## Tier 2 (Flow Logs)
 
-Test: `pruning_keeps_a_batch_that_shares_one_timestamp`.
+### S3 → SQS over CloudWatch → Kinesis
+VPC Flow Logs deliver to S3 with native SQS object-created notifications—zero intermediate compute. The CloudWatch Logs → Kinesis path required a per-shard consumer and a Lambda forwarder for no additional signal.
 
-## Tier 3 (reconciliation)
+### Delete a notification only after its objects are read
+`FlowLogQueue::receive` previously deleted SQS messages even when S3 reads failed transiently, losing flow objects permanently. Unlike Tier 1 (local parse only), Tier 2 performs a network fetch between receive and delete. `read_object` returns `Option`: `None` leaves the message queued for retry (including auth failures); `Some` deletes it (including `Malformed` content that would never parse).
+- **404/410 exception:** Missing S3 objects are permanent. Retrying a multi-record notification would re-observe sibling objects indefinitely and inflate counters, so 404/410 is recorded as `Malformed` and the message is deleted.
+- **Trade-off:** A partially failed notification is redelivered whole, double-counting sibling objects until their entries expire—preferable to dropping data.
+- Tests: `an_object_that_could_not_be_read_leaves_its_notification_on_the_queue`, `an_object_that_was_read_but_makes_no_sense_is_deleted_anyway`, `an_object_that_is_gone_releases_its_notification`.
+
+### Bound the merge context by what the index kept
+`ingest_flows` previously built its merge subgraph from all arriving records (`MAX_RECORDS` = 100,000) even after `FlowIndex` evicted excess entries (`DEFAULT_CAPACITY` = 10,000), writing up to 10× the budget into the live graph. `FlowIndex::context` filters by retained entries, and `DEFAULT_CAPACITY` prevents busy VPCs talking to arbitrary external IPs from pinning pivot nodes for the life of the process.
+- Test: `the_merge_context_never_exceeds_what_the_index_kept`.
+
+### Evict on a tie without emptying the index
+`evict` previously kept `last_seen > cutoff`. Because flow records have one-second precision, a single-second batch sharing the cutoff timestamp wiped the index. `eviction_cut` returns the cutoff plus a tie budget.
+- Test: `eviction_survives_a_batch_that_shares_one_timestamp`.
+
+### Truncate on a character boundary
+`read_to_string` followed by `String::truncate(limit)` panicked or failed when the byte limit split a multi-byte UTF-8 character. `decompress` slices raw bytes at a valid character boundary before decoding.
+- Test: `a_cut_that_lands_inside_a_character_still_yields_the_part_before_it`.
+
+## Tier 3 (Reconciliation & Patching)
+
+### Scan vs. event race is self-healing
+Reconciliation installs the estate as of scan *start*. A resource created by a Tier-1 event mid-scan is removed when the scan lands and re-added on the next tick—briefly behind, never permanently inconsistent.
+
+### Snapshot v3 separates observations from topology
+Liveness updates far more frequently than topology. Snapshot v3 moves counters, status, and `last_seen` into sideband `observations` and `expired` lists so patches update freshness without re-announcing nodes or edges.
 
 ### Carry an edge by its owner, not by the pivot it touches
-
-`carry_forward` kept an edge if *either* endpoint was held, and ownerless pivots count as held whenever anything references them. So a healthy provider's stale edge into a shared pivot came back every tick while another provider was down. An edge is now carried only when every endpoint that has an owner is held.
-
-Test: `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.
+`carry_forward` previously retained an edge if *either* endpoint was held, and ownerless pivots count as held whenever referenced. A healthy provider's deleted edge to a shared pivot therefore reappeared every tick while any other provider was unreadable. Edges are now carried only when every owned endpoint is held.
+- Test: `carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot`.
 
 ### No projected edge may join two ownerless pivots
+An edge with no owned endpoints passes the owner check vacuously and anchors its own pivots. Cloudflare previously projected `hostname -ResolvesTo-> target`, preventing healthy zones from repointing or deleting records during another provider's outage. Both Cloudflare and Route 53 now project `hostname -ResolvesTo-> record -ResolvesTo-> target` (also fixing Route 53's record-to-name edge from `RoutesTo` to `ResolvesTo`).
+- Tests: `every_projected_edge_has_an_owned_endpoint`, `carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records`.
 
-The owner rule above passes vacuously for an edge with no owned endpoint, and such an edge anchors its own endpoints. Cloudflare projected `hostname -ResolvesTo-> target`, so while *any* provider was unreadable a healthy zone's repointed or deleted records kept their old answers. DNS now reads `hostname -ResolvesTo-> record -ResolvesTo-> target` for Cloudflare and Route 53 alike (the record-to-name edge was also `RoutesTo`, which means traffic).
+## Networking & Pivots
 
-Tests: `every_projected_edge_has_an_owned_endpoint`, `carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records`.
+### A private address is unique only inside one network
+`GenericIpAddress` was originally keyed by address string alone, merging `10.0.1.5` or default-VPC `172.31.0.0/16` addresses across every VPC, account, region, and cloud. Private ranges now project as `GenericPrivateIpAddress { network, address }` via `Node::ip(value, network)`. Flow records resolve private IPs in the capturing interface's network and are dropped (`Malformed`) when the network is unknown.
+- Tests: `an_ip_target_is_served_only_by_the_holder_in_its_own_network`, `a_private_address_is_one_node_per_network_it_is_read_in`, `only_a_private_address_depends_on_the_network_it_is_read_in`, `a_range_covers_exactly_the_addresses_inside_it_in_its_own_network`, `a_private_address_seen_by_an_interface_the_scan_has_not_found_is_counted_not_guessed`.
 
-## Derivation (service topology)
+### Canonical GCP network keys
+GCP APIs return network references in three forms: full URLs on GCE instances, relative paths on Cloud SQL, and bare names (`default`) on GKE clusters. Keying `GcpComputeNetwork` by raw API strings split one VPC into multiple nodes. `projector/gcp.rs::canonical_network` normalises all references to `projects/P/global/networks/N`.
 
-### A private address is the same address only inside one network
+### Transit gateway and peering connectors stay hubs
+Expanding a transit gateway with $k = 4{,}000$ attachments into $k^2$ pairwise network joins cost 4.7 s and 1.2 GB per derivation in release builds (running multiple times per reconcile). Keeping connectors as hubs in `derive/networks.rs` (`O(k)`) reduced derivation to 0.5 ms.
 
-`GenericIpAddress` was keyed by value alone, so every resource holding `10.0.1.5` in any VPC, account, region or cloud shared one pivot. Default VPCs reuse `172.31.0.0/16` everywhere, so a single IP target group drew `inferred` `Serves` edges to unrelated interfaces with no traffic at all, and a flow confirmed edges to all of them. Private values are now `GenericPrivateIpAddress { network, address }`, built by `Node::ip(value, network)` with the network the address was read in; flow records are read in the network of the interface that captured them, and dropped and reported when it is unknown. Containment scopes the same way.
+### Azure ARG IP field casing and VM-to-NIC ownership
+Azure Resource Graph spells `privateIPAddress` and `publicIPAddress` with uppercase `IP`; relying on `#[serde(rename_all = "camelCase")]` silently deserialised NICs with no addresses. Explicit `#[serde(rename)]` attributes are required. In addition, `AzureVirtualMachine` links to `AzureNetworkInterface` via `HasIp` (formerly `ConnectsTo`) so `derive::service` resolves NIC addresses up to the owning VM.
 
-Tests: `an_ip_target_is_served_only_by_the_holder_in_its_own_network`, `a_private_address_is_one_node_per_network_it_is_read_in`, `only_a_private_address_depends_on_the_network_it_is_read_in`, `a_range_covers_exactly_the_addresses_inside_it_in_its_own_network`, `a_private_address_seen_by_an_interface_the_scan_has_not_found_is_counted_not_guessed`.
+### Cloudflare has no per-resource IP addresses
+Workers and Durable Objects run on shared anycast ranges fronting millions of tenants; KV, R2, and D1 sit behind runtime bindings or account-level API hosts. Only DNS `A`/`AAAA` records name IPs, and those are origin addresses linked via `ResolvesTo` (which confers no ownership).
+- Test: `naming_an_address_is_not_holding_it`.
 
-### Gate an IP target on the scan, as an instance target is
+## Service Topology (`Edge::Serves`)
 
-`link_instance_targets` refused a registration naming a stopped instance by id, but an IP target naming the same instance by its interface's address went through, and the interface — holder gone — resolved as its own owner: `NLB -Serves-> AwsEc2Eni`, `inferred`. `link_targets` now handles both kinds after the parallel pass and skips an address held by an interface attached to an instance the scan dropped.
+### ENI owner attribution rejects heuristics
+- **Load balancers:** Rebuilding an ELB ARN from region and account was rejected because it guesses the partition (`aws` vs. `aws-cn`/`aws-us-gov`). `link_interface_owners` matches the `ELB app/…` or `ELB net/…` description suffix against collected load balancers after `project_parallel`.
+- **Lambda:** `AWS Lambda VPC ENI-<function>-…` cannot be split from its UUID suffix without ambiguity, so no owner edge is drawn.
+- **RDS:** Matching `RDSNetworkInterface` ENIs to DB instances by subnet and security group is a heuristic posing as identity. RDS links via DNS (`ConnectsTo -> GenericHostname(endpoint.address)`), while the unowned ENI retains its IPs so NLB IP-target paths still resolve to `AwsEc2Eni`.
+- Test: `a_database_is_reached_through_its_endpoint_hostname`.
 
-Tests: `a_stopped_ip_target_is_not_inferred`, `an_ip_target_on_a_stopped_instances_interface_is_not_linked`.
+### Gate IP targets on `scanned_instances`
+`link_instance_targets` skipped stopped instances, but IP targets naming a stopped instance's interface address still linked; with the instance excluded from the scan, the ENI resolved as its own owner (`NLB -Serves-> AwsEc2Eni`, `inferred`). `link_targets` now gates both target types after the parallel pass, using `derive::held_addresses` to skip addresses held locally or across a joined network by an interface attached to an unscanned instance.
+- Tests: `a_stopped_ip_target_is_not_inferred`, `a_stopped_ip_target_across_a_peering_is_not_inferred`, `an_ip_target_on_a_stopped_instances_interface_is_not_linked`.
 
-## Rendering
+### Diff-only `Serves` observations
+Emitting all `Serves` observations on every reconcile turned every idle tick into a non-empty WebSocket patch. `DerivedObservations::changed` diffs against the previous reconcile state and emits only transitions.
 
-### Warm-start a layout only from a real one
+### `Serves` naming, fan-out, and non-goals
+- **Direction & name:** `A -Serves-> B` follows traffic direction (`ALB -Serves-> Instance`); `Reaches` was rejected as less descriptive.
+- **Uncapped fan-out:** All secondary and IPv6 addresses become pivots, and owner fan-out per flow is uncapped until a real estate demonstrates a bottleneck.
+- **Non-goals:** Request/response confirmation (port orientation is a heuristic; `Serves` does not prove B replied to A), inventing typed nodes from flow logs, typed external endpoints, and transitive `Serves` closure (belongs in queries, not stored edges).
 
-A patch that changed topology always relaid out warm, from the nodes' current positions. One that landed while the first layout was still settling found every node at the `(0, 0)` it was created with; the engine keeps finite starting positions, coincident nodes exert no force on each other, so the layout "settled" at once and pinned the camera to a ±1 box. The graph stayed a single dot until "Reheat layout". It hit 3 loads in 10 against the demo at a 3 s poll, and the live e2e tests could not see it: a collapsed graph never moves. `GraphController` now warm-starts only once a layout exists (`laidOut`, cleared with each snapshot); before that a patch restarts the cold layout.
+## Rendering & Demo
 
-Test: `a patch that lands before the first layout settles still spreads the graph` (`render.spec.ts`).
+### Warm-start a layout only after initial settle
+Topology patches that arrived before the first layout settled warm-started from initial `(0, 0)` coordinates. Because coincident nodes exert zero repulsion, ForceAtlas2 settled immediately into a ±1 box (3 in 10 page loads at a 3 s poll). `GraphController` now warm-starts only after `laidOut` is set; earlier patches restart a cold layout.
+- Test: `a patch that lands before the first layout settles still spreads the graph` (`render.spec.ts`).
 
-## Demo
-
-### The demo produces only shapes a scan produces
-
-The demo's live change was a `GenericHostname -ResolvesTo-> GenericIpAddress` edge built by hand: an edge between two ownerless pivots, which no provider owns and `carry_forward` would keep through any outage, in a DNS shape no projector emits. It is now a Cloudflare record (`fixtures::canary`) projected by the real Cloudflare projector.
-
-Tests: `the_live_change_is_a_shape_a_scan_produces`, `the_canary_record_toggles_by_parity`.
+### The demo produces only projector-emitted shapes
+The demo's live change previously hand-linked `GenericHostname -ResolvesTo-> GenericIpAddress`—an ownerless-to-ownerless edge that no projector emits and `carry_forward` never expires. It now projects `fixtures::canary` through the Cloudflare projector.
+- Tests: `the_live_change_is_a_shape_a_scan_produces`, `the_canary_record_toggles_by_parity`.

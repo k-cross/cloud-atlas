@@ -1,6 +1,6 @@
 # atlas-server
 
-The live backend: owns a persistent in-memory graph, reconciles it against the providers on an interval, and pushes incremental patches over WebSocket. `atlas-cli` remains the one-shot path.
+Live backend owning the persistent in-memory graph, reconciling against providers on an interval, consuming live event and flow-log feeds, and pushing incremental `GraphPatch`es over WebSocket.
 
 ## Run
 
@@ -16,37 +16,32 @@ cargo run -p atlas-server -- \
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--regions` / `--gcp-projects` / `--azure-subscriptions` / `--cloudflare` | `us-east-1` | Provider scope, as in the CLI |
+| `--regions` / `--gcp-projects` / `--azure-subscriptions` / `--cloudflare` | `us-east-1` | Provider scope (same as CLI) |
 | `--port` | `4681` | HTTP + WebSocket listener |
-| `--poll-secs` | `60` | Tier-3 reconciliation interval |
-| `--retain-scans` | `10` | Incomplete scans a source's resources survive before the differ may delete them |
-| `--aws-event-queue` | off | SQS URL for the Tier-1 control-plane feed |
-| `--aws-flow-log-queue` | off | SQS URL for Tier-2 flow-log S3 notifications |
-| `--flow-ttl-secs` | per source | How long an observed flow counts as current (live: 15 min; demo: short) |
-| `--demo` | off | Serve fixtures instead of collecting |
+| `--poll-secs` | per source | Tier-3 reconciliation interval (live: `60`, demo: `5`) |
+| `--retain-scans` | `10` | Consecutive incomplete scans a source's resources survive before release |
+| `--aws-event-queue` | off | SQS URL for Tier-1 control-plane events |
+| `--aws-flow-log-queue` | off | SQS URL for Tier-2 VPC Flow Log S3 notifications |
+| `--flow-ttl-secs` | per source | Flow observation TTL (live: 15 min; demo: scaled to poll) |
+| `--demo` | off | Serve Globex fixtures (`demo.rs`: canary DNS toggle + periodic burst flow) |
 | `--verbose` | off | Verbose collection logging |
 
-`--demo` flips a sentinel node in and out every other tick, re-observes the fixture flows every tick, and adds a burst flow every fourth, so the full snapshot → patch path — including a flow that arrives and lapses — runs without credentials. All of it lives in `demo.rs`.
+## Architecture
 
-## Design
+- **Single writer:** `poll::run` is the sole mutator of `Arc<RwLock<Graph>>`, `select!`ing over the reconciliation ticker and both live feeds; patches fan out over `tokio::sync::broadcast`.
+- **Tier 1 (`stream.rs`, `atlas::event`):** Normalises SQS messages into additive `ChangeEvent`s (explicit node deletes only), ordered per resource by cloud record time.
+- **Tier 2 (`atlas::flow`):** Stores flow records in the bounded, expiring `FlowIndex`. `reconcile` folds `FlowIndex::overlay` into each scan before diffing so expired flows are removed by `patch::diff`.
+- **Tier 3 (`poll::reconcile`):** Collects, carries forward unreadable sources for `--retain-scans` ticks (fewer for `Unauthorized`), computes derived edges (`derive::all`), diffs on stable keys, and broadcasts non-empty patches.
+- **Isolated health reports:** Scan, stream, and flow health report independently on `/collection.json`; a degraded stream never blocks scan deletions.
 
-- **Single writer.** `poll::run` is the only mutator of an `Arc<RwLock<Graph>>`, `select!`ing over the reconcile ticker and both live feeds; patches fan out on a `broadcast` channel.
-- **Tier 1** (`stream.rs`, `atlas_lib::atlas::event`): SQS messages become `ChangeEvent`s applied between scans. Events only add; a delete removes only the named node; ordering is last-writer-wins on the cloud's record time.
-- **Tier 2** (`atlas_lib::atlas::flow`): observations go into a bounded, expiring `FlowIndex`. `reconcile` folds the overlay into each scan before diffing, so a quiet flow's edge is removed by the ordinary differ.
-- **Tier 3**: each tick collects (or loads fixtures), diffs against the live graph on stable keys, and broadcasts non-empty `GraphPatch`es.
-- **Failure ≠ absence.** For each unreadable source, `reconcile` carries that source's nodes forward for `--retain-scans` scans (fewer for credential failures), then releases them.
-- **Three health reports.** Scan, stream and flow health are separate; a dead feed makes the graph slow or stale, never wrong, so it never suspends removals.
+## HTTP & WebSocket API
 
-## API
-
-- `GET /snapshot.json` — snapshot v3: nodes, edges, `observations`.
+- `GET /snapshot.json` — Snapshot v3 (`nodes`, `edges`, `observations`).
 - `GET /collection.json` — `complete`, `unreadable`, `failures` (with `FailureKind`), `stream`, `flows`.
 - `GET /ws` — JSON frames tagged by `type`:
-  - client → server: `subscribe`, `get_snapshot`, `get_neighbors` (`key`)
-  - server → client: `snapshot`, `patch`, `neighbors`, `error`
-
-Patches carry `observations` (refreshed) and `expired` (lapsed keys) alongside node/edge changes. CORS is permissive so the dev frontend on :4680 can connect.
+  - Client → Server: `subscribe`, `get_snapshot`, `get_neighbors` (`key`)
+  - Server → Client: `snapshot`, `patch` (`observations` + `expired` + node/edge diffs), `neighbors`, `error`
 
 ## Tests
 
-`cargo nextest run -p atlas-server` — WebSocket protocol, reconcile/retention policy, both live-feed arms, stream back-off. No credentials needed.
+`cargo nextest run -p atlas-server` — covers WebSocket protocol, retention/carry-forward policy, Tier-1/Tier-2 ingestion, and stream backoff without cloud credentials.

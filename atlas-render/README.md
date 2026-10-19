@@ -1,8 +1,8 @@
 # atlas-render
 
-The interactive rendering stack: a ForceAtlas2 layout engine compiled to WebAssembly and a Sigma.js (WebGL) frontend that draws the topology plus the Tier-2 liveness overlay.
+Interactive rendering workspace: a Rust/WebAssembly ForceAtlas2 layout engine (`atlas-layout`, `atlas-layout-wasm`) and a SvelteKit + Sigma.js WebGL frontend (`atlas-web`).
 
-This is a **separate cargo workspace** and never depends on `atlas-lib`, whose SDK tree does not build for `wasm32-unknown-unknown`. The only contract is the versioned **render snapshot** (and `GraphPatch`, which has the same node/edge shape):
+This is a **separate Cargo workspace** that never depends on `atlas-lib` (whose cloud SDK dependencies do not target `wasm32-unknown-unknown`). The sole contract is the versioned **render snapshot** and matching `GraphPatch`:
 
 ```json
 {
@@ -17,51 +17,33 @@ This is a **separate cargo workspace** and never depends on `atlas-lib`, whose S
 }
 ```
 
-- `key` is a stable identity derived from the typed resource, which is what lets patches add and remove individual elements.
-- `observations` is keyed by the same `key` and kept separate because freshness changes far more often than topology; a patch carries `observations` and `expired` without re-announcing resources. Unknown keys are ignored, and the layout engine ignores the list entirely.
-- `packets`/`bytes` appear only on `TrafficFlow` edges. A record names several keys, so per-node volume would count the same traffic repeatedly; derive a node's throughput from its incident flow edges. `Serves` observations carry `inferred`/`confirmed` and no volume.
-
-Producers: `atlas` writes `atlas.json`; `atlas-server` serves `/snapshot.json` and streams patches; `cargo run --example demo` (root) writes `multi_cloud_demo.json`.
-
-`SNAPSHOT_VERSION` is pinned in `atlas-lib`'s `atlas::export`, `atlas-layout`, and `atlas-web`'s `graph.ts`. Bump all three together **and rebuild the wasm** (`cargo xtask wasm`), since the compiled engine rejects mismatched versions.
+- **`key`:** Stable identity derived from the typed resource, enabling incremental add/remove patches.
+- **`observations`:** Keyed by `key` (ignored by the layout engine). Patches send updated `observations` and `expired` keys without re-announcing topology. `packets`/`bytes` appear only on `TrafficFlow` edges to avoid multi-counting across incident nodes; `Serves` carries `inferred`/`confirmed` status and `last_seen`.
+- **`SNAPSHOT_VERSION` (3):** Pinned in `atlas-lib/src/atlas/export.rs`, `atlas-layout/src/graph.rs`, and `atlas-web/src/lib/graph.ts`. Bump all three together and run `cargo xtask wasm`.
 
 ## Crates
 
-- **`atlas-layout`** — pure-Rust ForceAtlas2: degree-weighted repulsion via Barnes-Hut, linear/lin-log attraction, strong gravity, adaptive speed. Deterministic (phyllotaxis-spiral initialization). Positions are one interleaved `[x0, y0, x1, y1, ..]` `f32` buffer.
-- **`atlas-layout-wasm`** — `wasm-bindgen` bridge exposing `LayoutEngine`; positions cross as a `Float32Array` (`positionsView()` zero-copy, `positionsCopy()` detached).
-- **`atlas-web/`** — SvelteKit + Sigma.js bun app (see its [README](atlas-web/README.md)). Each frame steps the engine, copies positions into graphology, and lets Sigma redraw. Nodes are coloured by provider and sized by degree.
+- **`atlas-layout`:** Deterministic ForceAtlas2 (phyllotaxis initialization, degree-weighted Barnes-Hut repulsion, linear/lin-log attraction, strong gravity, adaptive speed) over an interleaved `[x0, y0, x1, y1, …]` `f32` buffer. Lock-free kernel; optional `parallel` feature uses rayon natively.
+- **`atlas-layout-wasm`:** `wasm-bindgen` wrapper exposing `LayoutEngine` (`positionsView()` zero-copy `Float32Array`, `positionsCopy()` detached).
+- **`atlas-web/`:** SvelteKit + Sigma.js Bun app (see [`atlas-web/README.md`](atlas-web/README.md)).
 
-## Build & test
+## Build & Test
 
 ```sh
-cargo nextest run --all-targets   # from THIS directory; the root run doesn't reach it
-cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown --release
+# From repo root (preferred)
+cargo xtask dev --demo
+cargo xtask test [--e2e]
+
+# Inside atlas-render/
+cargo nextest run --all-targets
 cargo test -p atlas-layout --features parallel
-
-cd atlas-web && bun install && bun run wasm && bun dev   # http://localhost:4680
+cargo build -p atlas-layout-wasm --target wasm32-unknown-unknown --release
+cd atlas-web && bun install && bun run wasm && bun dev   # http://localhost:4680 (or /?static)
 ```
 
-`atlas-web` connects to `atlas-server` at `ws://<host>:4681/ws` by default. `?static` instead fetches `atlas-web/static/snapshot.json`.
+## Minimal JS Loop
 
-End to end, from the repo root:
-
-```sh
-cargo xtask dev --demo                        # live, credential-free
-
-# or static, no server:
-cargo xtask demo                              # writes multi_cloud_demo.json and atlas-web/static/snapshot.json
-cd atlas-render
-cargo run --example layout_demo -- ../multi_cloud_demo.json
-cd atlas-web && bun dev                       # open /?static
-```
-
-## Concurrency
-
-The force kernel writes each node's force into its own slot from shared read-only inputs, so it parallelizes without locks; the `parallel` feature uses rayon natively. Browser wasm runs single-threaded — wasm threads need SharedArrayBuffer (COOP/COEP) and an atomics build, which is deferred.
-
-## Driving it from JS
-
-`atlas-web/src/lib/GraphController.ts` is the real integration; the loop is:
+See `atlas-web/src/lib/GraphController.ts` for the full integration:
 
 ```js
 import init, { LayoutEngine } from "../../static/pkg/atlas_layout_wasm.js";

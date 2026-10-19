@@ -1,25 +1,21 @@
 # Graph Rendering Design
 
-Replace static `.dot` output with an interactive web view that stays responsive on large multi-cloud estates.
+Interactive web renderer for large multi-cloud estates, decoupling physics layout (`atlas-layout`, `atlas-layout-wasm`) from WebGL drawing (`atlas-web`).
 
-## Approach
+## Architecture
 
-Layout and drawing are decoupled so physics never blocks the UI.
+- **Computation (`atlas-layout` / `atlas-layout-wasm`):** ForceAtlas2 (Barnes-Hut) runs in Rust/Wasm and exposes node coordinates as a flat `Float32Array`. The force kernel is lock-free by construction; native builds parallelize with rayon, while browser Wasm runs single-threaded.
+- **Rendering (`atlas-web`):** Each animation frame steps the layout engine, copies coordinates into graphology, and draws via Sigma.js WebGL shaders, plus a separate `canvas.traffic-layer` for animated packet beads.
 
-- **Computation — Rust/WebAssembly.** ForceAtlas2 (Barnes-Hut) runs in a wasm module and exposes positions as a flat `Float32Array`. The kernel is lock-free by construction, so native builds parallelize with rayon; browser threading is deferred.
-- **Rendering — Sigma.js (WebGL).** Positions are copied into graphology each frame and drawn by WebGL shaders, bypassing the DOM.
+## UX Principles
 
-## UX principles
+- **Context over raw wiring:** Edges convey live activity alongside static topology. Mutable metrics never live on `Node`/`Edge` (which are pure identity types); they travel beside the graph in the snapshot's `observations` list (`change_monitoring_design.md`).
+- **Focused views:** Filter views (starting with `GraphController::setServiceView`) hide intermediate plumbing rather than merely dimming it.
+- **Hierarchical drill-down:** Group Global → Provider → Region → VPC → Node to avoid visual clutter at scale.
 
-- **Context over raw connections.** Edges should say what is happening, not just what is wired. Metrics never live on the edge itself — `Node`/`Edge` are identity types — so they travel beside the graph as the snapshot's `observations` (see `change_monitoring_design.md`, Tier 2).
-- **Hierarchical drill-down.** Group Global → Provider → Region → VPC → Node to avoid a hairball.
-- **Filterable.** Views that hide what is not relevant (the service view is the first).
-
-## Phases
+## Remaining Work
 
 | Phase | Deliverable | Status |
 |---|---|---|
-| 1 | wasm layout engine | Done — `atlas-layout`, `atlas-layout-wasm` |
-| 2 | Sigma.js frontend | Done — `atlas-web` |
-| 3 | Contextual data | Mostly done — flow edges by verdict and volume, freshness halos, packet animation, traffic panel, `Serves` status styling and service view. Remaining: metadata tooltips, per-node drill-down, a way to read raw `last_seen`/`packets`/`bytes`. |
-| 4 | Search | Not started |
+| **3 (remainder)** | Metadata tooltips, per-node drill-down, and UI inspection of raw `last_seen`/`packets`/`bytes` values (flow styling, freshness halos, packet animation, traffic panel, and service view are built). | In progress |
+| **4** | Node and resource search / filter bar. | Not started |
