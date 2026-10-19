@@ -74,6 +74,15 @@ fn render_dir() -> PathBuf {
     repo_root().join("atlas-render")
 }
 
+fn older_than_sources(artifact: &Path, sources: &[PathBuf]) -> bool {
+    let built = artifact.metadata().and_then(|m| m.modified()).ok();
+    let newest = sources.iter().filter_map(|p| newest_mtime(p)).max();
+    match (newest, built) {
+        (Some(src), Some(art)) => src > art,
+        _ => true,
+    }
+}
+
 fn newest_mtime(path: &Path) -> Option<SystemTime> {
     if path.is_file() {
         return path.metadata().and_then(|m| m.modified()).ok();
@@ -91,20 +100,16 @@ pub fn ensure_wasm(force: bool) -> Result<(), String> {
     let root = repo_root();
     let artifact = web_dir().join("static/pkg/atlas_layout_wasm_bg.wasm");
 
-    let stale = force || !artifact.exists() || {
-        let built = artifact.metadata().and_then(|m| m.modified()).ok();
-        let sources = [
-            root.join("atlas-render/atlas-layout/src"),
-            root.join("atlas-render/atlas-layout/Cargo.toml"),
-            root.join("atlas-render/atlas-layout-wasm/src"),
-            root.join("atlas-render/atlas-layout-wasm/Cargo.toml"),
-        ];
-        let newest = sources.iter().filter_map(|p| newest_mtime(p)).max();
-        match (newest, built) {
-            (Some(src), Some(art)) => src > art,
-            _ => true,
-        }
-    };
+    let stale = force
+        || older_than_sources(
+            &artifact,
+            &[
+                root.join("atlas-render/atlas-layout/src"),
+                root.join("atlas-render/atlas-layout/Cargo.toml"),
+                root.join("atlas-render/atlas-layout-wasm/src"),
+                root.join("atlas-render/atlas-layout-wasm/Cargo.toml"),
+            ],
+        );
 
     if stale {
         println!("wasm layout engine is stale — rebuilding pkg/");
@@ -115,17 +120,23 @@ pub fn ensure_wasm(force: bool) -> Result<(), String> {
     }
 }
 
+fn demo_json() -> PathBuf {
+    repo_root().join("multi_cloud_demo.json")
+}
+
 pub fn ensure_demo_snapshot() -> Result<(), String> {
     let root = repo_root();
-    if root.join("multi_cloud_demo.json").exists() {
-        return Ok(());
+    let sources = [
+        root.join("atlas-lib/src"),
+        root.join("atlas-lib/examples"),
+        root.join("atlas-lib/Cargo.toml"),
+    ];
+    if older_than_sources(&demo_json(), &sources) {
+        println!("multi_cloud_demo.json is missing or older than atlas-lib — regenerating");
+        demo_snapshot()
+    } else {
+        publish_demo_snapshot()
     }
-    println!("multi_cloud_demo.json missing — generating from fixtures");
-    run(
-        &root,
-        "cargo",
-        &["run", "-p", "atlas-lib", "--example", "demo"],
-    )
 }
 
 pub fn demo_snapshot() -> Result<(), String> {
@@ -133,7 +144,23 @@ pub fn demo_snapshot() -> Result<(), String> {
         &repo_root(),
         "cargo",
         &["run", "-p", "atlas-lib", "--example", "demo"],
-    )
+    )?;
+    publish_demo_snapshot()
+}
+
+fn publish_demo_snapshot() -> Result<(), String> {
+    let target = web_dir().join("static/snapshot.json");
+    if !older_than_sources(&target, &[demo_json()]) {
+        return Ok(());
+    }
+    std::fs::copy(demo_json(), &target).map_err(|e| {
+        format!(
+            "failed to copy the demo snapshot to {}: {e}",
+            target.display()
+        )
+    })?;
+    println!("refreshed {} (the UI's offline snapshot)", target.display());
+    Ok(())
 }
 
 pub fn test(e2e: bool) -> Result<(), String> {

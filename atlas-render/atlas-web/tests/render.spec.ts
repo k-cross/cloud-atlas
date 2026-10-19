@@ -319,6 +319,55 @@ test.describe("service view (mocked backend)", () => {
 	});
 });
 
+test.describe("first layout (mocked backend)", () => {
+	const MOCK = "ws://mock.invalid/ws";
+
+	test("a patch that lands before the first layout settles still spreads the graph", async ({
+		page,
+	}) => {
+		const snapshot = fixture() as unknown as Record<string, unknown> & { version: number };
+		await page.routeWebSocket(MOCK, (ws) => {
+			ws.onMessage((message) => {
+				if (JSON.parse(String(message)).type !== "subscribe") return;
+				ws.send(JSON.stringify({ ...snapshot, type: "snapshot" }));
+				ws.send(
+					JSON.stringify({
+						type: "patch",
+						version: snapshot.version,
+						added_nodes: [
+							{
+								id: 0,
+								key: "GenericHostname#early.example",
+								label: "early.example",
+								kind: "GenericHostname",
+							},
+						],
+						removed_nodes: [],
+						added_edges: [],
+						removed_edges: [],
+					}),
+				);
+			});
+		});
+
+		await page.goto(`/?server=${MOCK}`);
+		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 15_000 });
+
+		const spread = await page.evaluate(() => {
+			const graph = (
+				globalThis as unknown as {
+					atlas: {
+						graph: { mapNodes: (fn: (key: string, attrs: { x: number }) => number) => number[] };
+					};
+				}
+			).atlas.graph;
+			const xs = graph.mapNodes((_key, attrs) => attrs.x);
+			return Math.max(...xs) - Math.min(...xs);
+		});
+		expect(spread).toBeGreaterThan(1);
+	});
+});
+
 test.describe("live backend (WebSocket)", () => {
 	test("connects to atlas-server and renders the pushed snapshot", async ({ page }) => {
 		const errors: string[] = [];

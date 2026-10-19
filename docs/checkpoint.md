@@ -30,6 +30,7 @@ All four clouds collect; all three change-detection tiers exist for AWS; the who
 - **Route 53 private zones** — a record's private answer is scoped to the record name; `GetHostedZone`'s VPC associations would place it in the VPCs that resolve it.
 - **Azure NSGs on NICs** — NSG rules are read in the VNets of the subnets they're attached to; an NSG attached only to NICs is scoped to itself until the NIC's `networkSecurityGroup` is collected.
 - **A stopped instance's interface** — stays in the graph holding its address, so a client still sending there gets `Serves` to the interface (`service_topology_design.md` §1).
+- **Demo relevance** — tracked in `docs/demo_design.md`: a scripted story in place of the canary record (F1), legible per-network addresses (F2), the filler that pushes the story off-screen (F3), labels (F4), collection health in the UI (F5).
 - **Route 53 record-set identity** — keyed by name alone, so an A and a TXT record for one name, or split-horizon zones, collapse into one node.
 
 ## Resume
@@ -40,4 +41,4 @@ cargo xtask dev --demo
 cargo run --example demo
 ```
 
-Context: `CLAUDE.md`, `docs/change_monitoring_design.md`, `docs/service_topology_design.md`, `docs/audit_findings.md`.
+Context: `CLAUDE.md`, `docs/change_monitoring_design.md`, `docs/service_topology_design.md`, `docs/demo_design.md`, `docs/audit_findings.md`.

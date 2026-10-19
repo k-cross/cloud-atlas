@@ -73,7 +73,7 @@ export class GraphController {
 	private phase = "loading";
 	private connection = "connecting";
 	private anim = 0;
-	private bboxPinned = false;
+	private laidOut = false;
 	private options: GraphControllerOptions;
 	private socket: WebSocket | null = null;
 	private traffic: TrafficLayer | null = null;
@@ -245,9 +245,9 @@ export class GraphController {
 				return;
 			}
 			const target = this.engine!.positionsCopy();
-			if (!warm || !this.bboxPinned) {
+			if (!warm) {
 				this.pinBBox(target);
-				this.bboxPinned = true;
+				this.laidOut = true;
 				this.renderer.getCamera().animatedReset();
 			}
 			this.reveal(start, target);
@@ -260,6 +260,7 @@ export class GraphController {
 			checkVersion(snapshot.version);
 			this.graph.clear();
 			this.graph.import(buildGraph(snapshot).export());
+			this.laidOut = false;
 			this.layoutAndReveal(false);
 			this.renderLegend();
 		} catch (e) {
@@ -271,7 +272,7 @@ export class GraphController {
 		try {
 			checkVersion(patch.version);
 			applyPatch(this.graph, patch);
-			if (changesTopology(patch)) this.layoutAndReveal(true);
+			if (changesTopology(patch)) this.layoutAndReveal(this.laidOut);
 			this.renderLegend();
 		} catch (e) {
 			this.options.onError(errorText(e));

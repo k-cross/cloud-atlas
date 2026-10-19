@@ -43,6 +43,13 @@ impl Source {
         }
     }
 
+    pub fn default_poll(&self) -> Duration {
+        match self {
+            Source::Live(_) => Duration::from_secs(60),
+            Source::Demo => demo::POLL,
+        }
+    }
+
     pub fn default_flow_ttl(&self, poll: Duration) -> Duration {
         match self {
             Source::Live(_) => FlowIndex::DEFAULT_TTL,
@@ -484,10 +491,10 @@ mod tests {
 
         assert_eq!(
             patch.added_nodes.len(),
-            2,
-            "sentinel additions from the sources that did respond must land"
+            3,
+            "the canary record from a source that did respond must land"
         );
-        assert_eq!(patch.added_edges.len(), 1);
+        assert_eq!(patch.added_edges.len(), 3);
         assert!(patch.removed_nodes.is_empty() && patch.removed_edges.is_empty());
     }
 

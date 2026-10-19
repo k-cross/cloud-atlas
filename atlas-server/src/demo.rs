@@ -1,20 +1,17 @@
-use atlas_lib::atlas::definition::{Edge, Node};
 use atlas_lib::atlas::flow::FlowObservation;
 use atlas_lib::atlas::graph_builder::GraphBuilder;
+use atlas_lib::atlas::projector;
 use atlas_lib::fixtures;
 use std::time::Duration;
 
-const SENTINEL_HOSTNAME: &str = "live-demo.internal";
-const SENTINEL_ADDRESS: &str = "198.51.100.42";
+pub const POLL: Duration = Duration::from_secs(5);
 const BURST_PERIOD: u64 = 4;
 const FLOW_TTL_TICKS: u32 = 3;
 
 pub fn graph(tick: u64) -> GraphBuilder {
     let mut builder = fixtures::topology();
     if tick % 2 == 1 {
-        let host = builder.get_or_add_node(Node::hostname(SENTINEL_HOSTNAME));
-        let ip = builder.get_or_add_node(Node::ip(SENTINEL_ADDRESS, SENTINEL_HOSTNAME));
-        builder.add_edge(host, ip, Edge::ResolvesTo);
+        projector::build(&mut builder, &fixtures::canary(), &fixtures::settings());
     }
     builder
 }
@@ -34,23 +31,43 @@ pub fn flow_ttl(poll: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atlas_lib::atlas::definition::Edge;
     use atlas_lib::atlas::patch::diff;
+    use petgraph::visit::EdgeRef;
 
     #[test]
-    fn the_sentinel_toggles_by_parity() {
+    fn the_canary_record_toggles_by_parity() {
         let even = graph(2).graph;
         let odd = graph(3).graph;
-        assert_eq!(odd.node_count(), even.node_count() + 2);
+        assert_eq!(odd.node_count(), even.node_count() + 3);
 
         let added = diff(&even, &odd);
-        assert_eq!(added.added_nodes.len(), 2);
-        assert_eq!(added.added_edges.len(), 1);
+        assert_eq!(
+            added.added_nodes.len(),
+            3,
+            "the record, its name and its answer"
+        );
+        assert_eq!(added.added_edges.len(), 3);
         assert!(added.removed_nodes.is_empty() && added.removed_edges.is_empty());
 
         let removed = diff(&odd, &even);
-        assert_eq!(removed.removed_nodes.len(), 2);
-        assert_eq!(removed.removed_edges.len(), 1);
+        assert_eq!(removed.removed_nodes.len(), 3);
+        assert_eq!(removed.removed_edges.len(), 3);
         assert!(removed.added_nodes.is_empty() && removed.added_edges.is_empty());
+    }
+
+    #[test]
+    fn the_live_change_is_a_shape_a_scan_produces() {
+        let graph = graph(1).graph;
+
+        assert!(
+            graph
+                .edge_references()
+                .filter(|e| e.weight().is_projected())
+                .all(|e| graph[e.source()].owner().is_some()
+                    || graph[e.target()].owner().is_some()),
+            "a projected edge between two pivots would outlive any provider's outage"
+        );
     }
 
     #[test]

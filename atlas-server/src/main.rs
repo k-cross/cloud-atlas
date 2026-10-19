@@ -35,8 +35,9 @@ pub struct Opt {
     #[clap(
         long,
         help = "Serve the credential-free \"Globex\" fixtures instead of collecting from real clouds.",
-        long_help = "Serve the credential-free \"Globex\" fixtures with a live-changing sentinel \
-                     instead of collecting from real clouds. For local development and demos."
+        long_help = "Serve the credential-free \"Globex\" fixtures instead of collecting from real \
+                     clouds: a DNS record comes and goes every scan and a burst of rejected traffic \
+                     arrives every fourth. For local development and demos."
     )]
     demo: bool,
 
@@ -45,10 +46,12 @@ pub struct Opt {
 
     #[clap(
         long,
-        default_value_t = 60,
-        help = "Seconds between reconciliation scans."
+        help = "Seconds between reconciliation scans.",
+        long_help = "Seconds between reconciliation scans.\n\nUnset, the collection source \
+                     answers: a minute against real clouds, five seconds for --demo, so its \
+                     scripted changes show while you watch."
     )]
-    poll_secs: u64,
+    poll_secs: Option<u64>,
 
     #[clap(
         long,
@@ -157,7 +160,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (None, _) => stream::Source::Disabled,
     };
 
-    let poll_interval = Duration::from_secs(opt.poll_secs);
+    let poll_interval = opt
+        .poll_secs
+        .map_or_else(|| source.default_poll(), Duration::from_secs);
     let flow_ttl = opt.flow_ttl_secs.map_or_else(
         || source.default_flow_ttl(poll_interval),
         Duration::from_secs,

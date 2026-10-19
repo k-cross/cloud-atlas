@@ -73,3 +73,19 @@ Tests: `an_ip_target_is_served_only_by_the_holder_in_its_own_network`, `a_privat
 `link_instance_targets` refused a registration naming a stopped instance by id, but an IP target naming the same instance by its interface's address went through, and the interface — holder gone — resolved as its own owner: `NLB -Serves-> AwsEc2Eni`, `inferred`. `link_targets` now handles both kinds after the parallel pass and skips an address held by an interface attached to an instance the scan dropped.
 
 Tests: `a_stopped_ip_target_is_not_inferred`, `an_ip_target_on_a_stopped_instances_interface_is_not_linked`.
+
+## Rendering
+
+### Warm-start a layout only from a real one
+
+A patch that changed topology always relaid out warm, from the nodes' current positions. One that landed while the first layout was still settling found every node at the `(0, 0)` it was created with; the engine keeps finite starting positions, coincident nodes exert no force on each other, so the layout "settled" at once and pinned the camera to a ±1 box. The graph stayed a single dot until "Reheat layout". It hit 3 loads in 10 against the demo at a 3 s poll, and the live e2e tests could not see it: a collapsed graph never moves. `GraphController` now warm-starts only once a layout exists (`laidOut`, cleared with each snapshot); before that a patch restarts the cold layout.
+
+Test: `a patch that lands before the first layout settles still spreads the graph` (`render.spec.ts`).
+
+## Demo
+
+### The demo produces only shapes a scan produces
+
+The demo's live change was a `GenericHostname -ResolvesTo-> GenericIpAddress` edge built by hand: an edge between two ownerless pivots, which no provider owns and `carry_forward` would keep through any outage, in a DNS shape no projector emits. It is now a Cloudflare record (`fixtures::canary`) projected by the real Cloudflare projector.
+
+Tests: `the_live_change_is_a_shape_a_scan_produces`, `the_canary_record_toggles_by_parity`.

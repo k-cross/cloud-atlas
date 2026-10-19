@@ -49,10 +49,9 @@ End to end, from the repo root:
 cargo xtask dev --demo                        # live, credential-free
 
 # or static, no server:
-cargo xtask demo                              # writes multi_cloud_demo.json
+cargo xtask demo                              # writes multi_cloud_demo.json and atlas-web/static/snapshot.json
 cd atlas-render
 cargo run --example layout_demo -- ../multi_cloud_demo.json
-cp ../multi_cloud_demo.json atlas-web/static/snapshot.json
 cd atlas-web && bun dev                       # open /?static
 ```
 

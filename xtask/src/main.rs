@@ -31,8 +31,8 @@ enum Cmd {
         #[clap(long, default_value_t = 4681)]
         port: u16,
 
-        #[clap(long, default_value_t = 60)]
-        poll_secs: u64,
+        #[clap(long)]
+        poll_secs: Option<u64>,
 
         #[clap(long, default_value_t = 4680)]
         web_port: u16,

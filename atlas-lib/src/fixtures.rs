@@ -1146,11 +1146,25 @@ pub fn azure() -> Provider {
     ])
 }
 
-pub fn cloudflare() -> Provider {
-    use crate::cloud::cloudflare::d1::D1Database;
-    use crate::cloud::cloudflare::durable_objects::DurableObjectNamespace;
-    use crate::cloud::cloudflare::worker::WorkerBinding;
-    use crate::cloud::definition::{ScriptId, ZoneId};
+pub fn canary() -> Provider {
+    use crate::cloud::definition::ZoneId;
+
+    Provider::Cloudflare(Box::new(CloudflareCollection {
+        zones: vec![globex_zone()],
+        dns_records: HashMap::from([(
+            ZoneId("zone-globex".to_owned()),
+            vec![dns_record(
+                "rec-canary",
+                "canary.globex.io",
+                "A",
+                "198.51.100.42",
+            )],
+        )]),
+        ..Default::default()
+    }))
+}
+
+fn globex_zone() -> cloudflare::endpoints::zones::zone::Zone {
     use serde_json::json;
 
     let zone_json = json!({
@@ -1178,28 +1192,43 @@ pub fn cloudflare() -> Provider {
             "phishing_detected": false
         }
     });
+    serde_json::from_value(zone_json).expect("fixture zone must deserialize")
+}
 
-    let record_meta = json!({
-        "auto_added": false,
-        "managed_by_apps": false,
-        "managed_by_argo_tunnel": false,
-        "source": "primary"
-    });
-    let dns_record = |id: &str, name: &str, rtype: &str, content: &str| {
-        serde_json::from_value::<cloudflare::endpoints::dns::dns::DnsRecord>(json!({
-            "id": id,
-            "name": name,
-            "type": rtype,
-            "content": content,
-            "proxied": false,
-            "ttl": 300,
-            "modified_on": "2023-01-01T00:00:00Z",
-            "created_on": "2023-01-01T00:00:00Z",
-            "meta": record_meta,
-            "proxiable": true
-        }))
-        .expect("fixture DNS record must deserialize")
-    };
+fn dns_record(
+    id: &str,
+    name: &str,
+    rtype: &str,
+    content: &str,
+) -> cloudflare::endpoints::dns::dns::DnsRecord {
+    use serde_json::json;
+
+    serde_json::from_value(json!({
+        "id": id,
+        "name": name,
+        "type": rtype,
+        "content": content,
+        "proxied": false,
+        "ttl": 300,
+        "modified_on": "2023-01-01T00:00:00Z",
+        "created_on": "2023-01-01T00:00:00Z",
+        "meta": {
+            "auto_added": false,
+            "managed_by_apps": false,
+            "managed_by_argo_tunnel": false,
+            "source": "primary"
+        },
+        "proxiable": true
+    }))
+    .expect("fixture DNS record must deserialize")
+}
+
+pub fn cloudflare() -> Provider {
+    use crate::cloud::cloudflare::d1::D1Database;
+    use crate::cloud::cloudflare::durable_objects::DurableObjectNamespace;
+    use crate::cloud::cloudflare::worker::WorkerBinding;
+    use crate::cloud::definition::{ScriptId, ZoneId};
+    use serde_json::json;
 
     let records = vec![
         dns_record(
@@ -1290,7 +1319,7 @@ pub fn cloudflare() -> Provider {
     )]);
 
     Provider::Cloudflare(Box::new(CloudflareCollection {
-        zones: vec![serde_json::from_value(zone_json).expect("fixture zone must deserialize")],
+        zones: vec![globex_zone()],
         dns_records: HashMap::from([(ZoneId("zone-globex".to_owned()), records)]),
         workers: vec![worker],
         kv_namespaces: vec![kv],

@@ -57,7 +57,7 @@ Prefer these over running pieces by hand:
 cargo xtask dev --demo    # credential-free: wasm (if stale) → atlas-server :4681 → frontend :4680; Ctrl-C stops all
 cargo xtask dev           # real collection; pass provider flags
 cargo xtask wasm [--force]  # rebuild atlas-web/static/pkg/ if atlas-layout is newer (always after a SNAPSHOT_VERSION bump)
-cargo xtask demo          # regenerate multi_cloud_demo.json
+cargo xtask demo          # regenerate multi_cloud_demo.json and the UI's offline static/snapshot.json
 cargo xtask test [--e2e]  # nextest (root) → nextest (atlas-render) → biome → svelte-check → bun unit [→ playwright]
 ```
 
@@ -93,9 +93,9 @@ A source is `Unauthorized` only if *every* failure was a refusal (`report.unread
 
 ### Demo mode lives in `atlas-server/src/demo.rs`
 
-All credential-free behaviour — the sentinel flipping by tick parity, the burst-flow cadence (one tick in four), the seed graph, the demo flow TTL — is in `demo.rs`. `poll::Source` only picks `Live` or `Demo` and delegates; `main.rs` has no demo constants.
+All credential-free behaviour — the canary DNS record flipping by tick parity, the burst-flow cadence (one tick in four), the seed graph, the demo poll (5 s) and flow TTL — is in `demo.rs`. `poll::Source` only picks `Live` or `Demo` and delegates; `main.rs` has no demo constants. What the demo shows, what it doesn't, and the follow-ups are tracked in `docs/demo_design.md`; a change that adds or alters a capability updates its coverage table.
 
-**A demo detail must never become a production default.** `--flow-ttl-secs` is unset-able, and `Source::default_flow_ttl` asks the source: live answers `FlowIndex::DEFAULT_TTL` (15 min), demo answers `demo::flow_ttl(poll)`. Fixture *data* (`fixtures::flows`, `fixtures::burst_flow`) stays in `atlas-lib`; only the *behaviour* lives in `demo.rs`.
+**A demo detail must never become a production default.** `--poll-secs` and `--flow-ttl-secs` are unset-able, and `Source::default_poll`/`default_flow_ttl` ask the source: live answers 60 s and `FlowIndex::DEFAULT_TTL` (15 min), demo answers `demo::POLL` and `demo::flow_ttl(poll)`. Fixture *data* (`fixtures::flows`, `fixtures::burst_flow`, `fixtures::canary`) stays in `atlas-lib`; only the *behaviour* lives in `demo.rs`. **The demo produces only shapes a scan produces**: its changes go through the projectors (`the_live_change_is_a_shape_a_scan_produces`).
 
 `demo::graph` returns `fixtures::topology()`, not `build_graph()`: traffic baked into a scan can never be removed by the differ or expired by a TTL. Demo flows reach the graph through `FlowIndex` like real ones, and `Source::seed_flows` primes the index so the first snapshot has them. Pinned by `the_scan_graph_carries_no_traffic_of_its_own`.
 

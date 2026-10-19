@@ -12,7 +12,7 @@ pub struct DevOpts {
     pub azure_subscriptions: Vec<String>,
     pub cloudflare: bool,
     pub port: u16,
-    pub poll_secs: u64,
+    pub poll_secs: Option<u64>,
     pub web_port: u16,
     pub skip_wasm: bool,
 }
@@ -32,12 +32,11 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
     run(&root, "cargo", &["build", "-p", "atlas-server"])?;
     let server_bin = target_dir(&root).join("debug/atlas-server");
 
-    let mut server_args: Vec<String> = vec![
-        "--port".into(),
-        opts.port.to_string(),
-        "--poll-secs".into(),
-        opts.poll_secs.to_string(),
-    ];
+    let mut server_args: Vec<String> = vec!["--port".into(), opts.port.to_string()];
+    if let Some(poll_secs) = opts.poll_secs {
+        server_args.push("--poll-secs".into());
+        server_args.push(poll_secs.to_string());
+    }
     if opts.demo {
         server_args.push("--demo".into());
     } else {
