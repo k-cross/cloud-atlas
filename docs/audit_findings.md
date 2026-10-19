@@ -58,6 +58,14 @@ Liveness updates far more frequently than topology. Snapshot v3 moves counters, 
 An edge with no owned endpoints passes the owner check vacuously and anchors its own pivots. Cloudflare previously projected `hostname -ResolvesTo-> target`, preventing healthy zones from repointing or deleting records during another provider's outage. Both Cloudflare and Route 53 now project `hostname -ResolvesTo-> record -ResolvesTo-> target` (also fixing Route 53's record-to-name edge from `RoutesTo` to `ResolvesTo`).
 - Tests: `every_projected_edge_has_an_owned_endpoint`, `carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records`.
 
+### Page every AWS listing
+Five AWS collectors read only their first page—Config (100 per type), Lambda (50), Route 53 zones (100), ELBv2 balancers, groups and listeners, and EventBridge buses—so a large estate's tail read as deleted. EC2 instances made one unpaged call as well. Eight more hand-rolled loops stopped only on a missing token and would spin forever on a repeated one, and Route 53 record sets resumed without `NextRecordIdentifier`, restarting at the first weighted or latency record of a name and type. ECS called `DescribeClusters` with no names, which describes only the `default` cluster. Every listing now uses the SDK's `into_paginator().items()`; Route 53 record sets and EventBridge buses (no SDK paginator) loop by hand and fail on a cursor that does not advance. ECS lists its clusters and describes them in batches of 100, treating `MISSING` as gone and any other failure as an error.
+- Tests: `lambda_functions_follow_every_page`, `ecs_describes_every_listed_cluster_not_just_the_default`, `an_ecs_cluster_that_could_not_be_described_is_an_error_not_an_absence`, `eventbridge_buses_follow_every_page`, `eventbridge_refuses_a_page_token_that_repeats`, `route53_resumes_weighted_records_at_their_set_identifier`, `route53_refuses_a_record_cursor_that_does_not_advance`.
+
+### One source per AWS resource
+The Config catch-all drew an `AwsConfigResource` twin beside many typed nodes (VPCs, instances, subnets, security groups, queues, clusters, balancers), and a Config event emitted both. `TYPED_CONFIG_TYPES` now lists every Config type a typed node models and drives both the catch-all exclusion and the event mapping; the Config collector no longer lists types the projector would never draw. Config remains the source only for types no collector models (S3 buckets, RDS clusters, classic ELBs). Consequences: stopped instances, which only Config listed, and IAM roles nothing references no longer appear; ELBv2 listeners and transit gateway attachments are edges, not nodes.
+- Tests: `every_aws_kind_config_records_has_one_source`, `a_config_listing_never_redraws_a_resource_its_own_collector_draws`, `a_config_item_for_a_typed_resource_yields_only_the_typed_node`.
+
 ## Networking & Pivots
 
 ### A private address is unique only inside one network
@@ -69,6 +77,9 @@ GCP APIs return network references in three forms: full URLs on GCE instances, r
 
 ### Transit gateway and peering connectors stay hubs
 Expanding a transit gateway with $k = 4{,}000$ attachments into $k^2$ pairwise network joins cost 4.7 s and 1.2 GB per derivation in release builds (running multiple times per reconcile). Keeping connectors as hubs in `derive/networks.rs` (`O(k)`) reduced derivation to 0.5 ms.
+
+### One connectivity collector
+`DescribeVpcs`, `DescribeVpcPeeringConnections`, `DescribeTransitGateways`, and `DescribeTransitGatewayAttachments` stay one `connectivity` collector, like `networking`. Splitting it would keep VPCs and peerings when only transit gateway calls are denied, but `ReadOnlyAccess` grants all four, and per-call collectors add collection variants for a partial-permission case.
 
 ### Azure ARG IP field casing and VM-to-NIC ownership
 Azure Resource Graph spells `privateIPAddress` and `publicIPAddress` with uppercase `IP`; relying on `#[serde(rename_all = "camelCase")]` silently deserialised NICs with no addresses. Explicit `#[serde(rename)]` attributes are required. In addition, `AzureVirtualMachine` links to `AzureNetworkInterface` via `HasIp` (formerly `ConnectsTo`) so `derive::service` resolves NIC addresses up to the owning VM.

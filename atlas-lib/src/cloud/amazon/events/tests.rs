@@ -405,16 +405,12 @@ fn an_eni_from_relationships_alone_attaches_to_no_subnet() {
 }
 
 #[test]
-fn a_config_item_yields_both_the_typed_and_the_catch_all_node() {
+fn a_config_item_for_a_typed_resource_yields_only_the_typed_node() {
     let events = parse_ok(&instance_config_item("ResourceDeleted"));
 
-    assert_eq!(events.len(), 2);
-    assert!(events.iter().all(|e| e.op == ChangeOp::Deleted));
-    assert!(events.iter().any(|e| matches!(
-        &e.node,
-        Node::AwsConfigResource { resource_type, id }
-            if &**resource_type == "AWS::EC2::Instance" && &**id == "i-0abc123"
-    )));
+    assert_eq!(events.len(), 1, "no AwsConfigResource twin: {events:?}");
+    assert_eq!(events[0].op, ChangeOp::Deleted);
+    assert_eq!(events[0].node, Node::AwsEc2Instance("i-0abc123".into()));
 }
 
 #[test]
@@ -771,8 +767,8 @@ async fn a_queued_event_reaches_the_graph_as_a_patch() {
     );
     assert_eq!(
         batch.events.len(),
-        2,
-        "typed node plus the Config catch-all"
+        1,
+        "the typed node alone; the catch-all never redraws a typed resource"
     );
 
     let mut live = GraphBuilder::new();

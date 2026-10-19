@@ -7,26 +7,19 @@ pub mod collector {
     ) -> Result<Vec<Cluster>, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
+        let names: Vec<String> = client
+            .list_clusters()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
+
         let mut clusters = Vec::new();
-        let mut next_token = None;
-
-        loop {
-            let mut req = client.list_clusters();
-            if let Some(token) = &next_token {
-                req = req.next_token(token);
-            }
-
-            let resp = req.send().await?;
-            for name in resp.clusters() {
-                let cluster_resp = client.describe_cluster().name(name).send().await?;
-                if let Some(cluster) = cluster_resp.cluster {
-                    clusters.push(cluster);
-                }
-            }
-
-            next_token = resp.next_token().map(|s| s.to_string());
-            if next_token.is_none() {
-                break;
+        for name in &names {
+            let cluster_resp = client.describe_cluster().name(name).send().await?;
+            if let Some(cluster) = cluster_resp.cluster {
+                clusters.push(cluster);
             }
         }
 

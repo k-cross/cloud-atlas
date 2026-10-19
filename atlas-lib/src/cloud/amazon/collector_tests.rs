@@ -6,6 +6,12 @@ use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClien
 use aws_smithy_types::body::SdkBody;
 
 async fn replay_config(responses: &[(&'static str, &'static str)]) -> aws_config::SdkConfig {
+    replay(responses).await.0
+}
+
+async fn replay(
+    responses: &[(&'static str, &'static str)],
+) -> (aws_config::SdkConfig, StaticReplayClient) {
     let events = responses
         .iter()
         .map(|(ct, body)| {
@@ -22,12 +28,14 @@ async fn replay_config(responses: &[(&'static str, &'static str)]) -> aws_config
             )
         })
         .collect();
-    aws_config::defaults(aws_config::BehaviorVersion::latest())
+    let http = StaticReplayClient::new(events);
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new("us-east-1"))
         .credentials_provider(Credentials::for_tests())
-        .http_client(StaticReplayClient::new(events))
+        .http_client(http.clone())
         .load()
-        .await
+        .await;
+    (config, http)
 }
 
 const XML: &str = "text/xml";
@@ -44,6 +52,16 @@ async fn lambda_functions() {
 }
 
 #[tokio::test]
+async fn lambda_functions_follow_every_page() {
+    let first = r#"{"Functions":[{"FunctionName":"fn1"}],"NextMarker":"page-2"}"#;
+    let second = r#"{"Functions":[{"FunctionName":"fn2"}]}"#;
+    let cfg = replay_config(&[(JSON, first), (JSON, second)]).await;
+    let fns = super::lambda::collector::runner(&cfg).await.unwrap();
+    let names: Vec<_> = fns.iter().filter_map(|f| f.function_name()).collect();
+    assert_eq!(names, vec!["fn1", "fn2"], "the second page is read");
+}
+
+#[tokio::test]
 async fn eks_clusters() {
     let list = r#"{"clusters":["c1"]}"#;
     let describe = r#"{"cluster":{"name":"c1","arn":"arn:aws:eks:us-east-1:111:cluster/c1","status":"ACTIVE"}}"#;
@@ -54,12 +72,47 @@ async fn eks_clusters() {
 
 #[tokio::test]
 async fn ecs_clusters() {
+    let list = r#"{"clusterArns":["arn:aws:ecs:us-east-1:111:cluster/c1"]}"#;
     let body = r#"{"clusters":[{"clusterArn":"arn:aws:ecs:us-east-1:111:cluster/c1","clusterName":"c1","status":"ACTIVE"}]}"#;
-    let cfg = replay_config(&[(JSON11, body)]).await;
+    let cfg = replay_config(&[(JSON11, list), (JSON11, body)]).await;
     let clusters = super::container_service::collector::runner(&cfg)
         .await
         .unwrap();
     assert_eq!(clusters[0].cluster_name(), Some("c1"));
+}
+
+#[tokio::test]
+async fn ecs_describes_every_listed_cluster_not_just_the_default() {
+    let list = r#"{"clusterArns":["arn:aws:ecs:us-east-1:111:cluster/web","arn:aws:ecs:us-east-1:111:cluster/gone"],"nextToken":"page-2"}"#;
+    let rest = r#"{"clusterArns":["arn:aws:ecs:us-east-1:111:cluster/batch"]}"#;
+    let described = r#"{
+      "clusters":[
+        {"clusterArn":"arn:aws:ecs:us-east-1:111:cluster/web","clusterName":"web"},
+        {"clusterArn":"arn:aws:ecs:us-east-1:111:cluster/batch","clusterName":"batch"}
+      ],
+      "failures":[{"arn":"arn:aws:ecs:us-east-1:111:cluster/gone","reason":"MISSING"}]
+    }"#;
+    let cfg = replay_config(&[(JSON11, list), (JSON11, rest), (JSON11, described)]).await;
+    let clusters = super::container_service::collector::runner(&cfg)
+        .await
+        .unwrap();
+    let names: Vec<_> = clusters.iter().filter_map(|c| c.cluster_name()).collect();
+    assert_eq!(
+        names,
+        vec!["web", "batch"],
+        "a cluster deleted between the list and the describe is simply gone"
+    );
+}
+
+#[tokio::test]
+async fn an_ecs_cluster_that_could_not_be_described_is_an_error_not_an_absence() {
+    let list = r#"{"clusterArns":["arn:aws:ecs:us-east-1:111:cluster/web"]}"#;
+    let described = r#"{"clusters":[],"failures":[{"arn":"arn:aws:ecs:us-east-1:111:cluster/web","reason":"ACCESS_DENIED"}]}"#;
+    let cfg = replay_config(&[(JSON11, list), (JSON11, described)]).await;
+    let error = super::container_service::collector::runner(&cfg)
+        .await
+        .expect_err("a cluster that exists but was not described must not read as absent");
+    assert!(error.to_string().contains("ACCESS_DENIED"), "{error}");
 }
 
 #[tokio::test]
@@ -91,6 +144,26 @@ async fn eventbridge_buses() {
     let cfg = replay_config(&[(JSON11, body)]).await;
     let buses = super::eventbridge::collector::runner(&cfg).await.unwrap();
     assert_eq!(buses[0].name(), Some("default"));
+}
+
+#[tokio::test]
+async fn eventbridge_buses_follow_every_page() {
+    let first = r#"{"EventBuses":[{"Name":"default"}],"NextToken":"page-2"}"#;
+    let second = r#"{"EventBuses":[{"Name":"orders"}]}"#;
+    let cfg = replay_config(&[(JSON11, first), (JSON11, second)]).await;
+    let buses = super::eventbridge::collector::runner(&cfg).await.unwrap();
+    let names: Vec<_> = buses.iter().filter_map(|b| b.name()).collect();
+    assert_eq!(names, vec!["default", "orders"]);
+}
+
+#[tokio::test]
+async fn eventbridge_refuses_a_page_token_that_repeats() {
+    let page = r#"{"EventBuses":[{"Name":"default"}],"NextToken":"stuck"}"#;
+    let cfg = replay_config(&[(JSON11, page), (JSON11, page)]).await;
+    let error = super::eventbridge::collector::runner(&cfg)
+        .await
+        .expect_err("a token that never advances must fail, not loop or truncate");
+    assert!(error.to_string().contains("repeated"), "{error}");
 }
 
 #[tokio::test]
@@ -176,6 +249,65 @@ async fn route53_zones_and_records() {
     } = super::route53::collector::runner(&cfg).await.unwrap();
     assert_eq!(hosted_zones[0].name(), "example.com.");
     assert_eq!(record_sets[0].name(), "example.com.");
+}
+
+const ZONE: &str = r#"<ListHostedZonesResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  <HostedZones>
+    <HostedZone><Id>/hostedzone/Z123</Id><Name>example.com.</Name><CallerReference>ref</CallerReference></HostedZone>
+  </HostedZones>
+  <IsTruncated>false</IsTruncated>
+  <MaxItems>100</MaxItems>
+</ListHostedZonesResponse>"#;
+
+const WEIGHTED_FIRST: &str = r#"<ListResourceRecordSetsResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  <ResourceRecordSets>
+    <ResourceRecordSet>
+      <Name>api.example.com.</Name><Type>A</Type><SetIdentifier>us</SetIdentifier><Weight>50</Weight><TTL>60</TTL>
+      <ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>
+    </ResourceRecordSet>
+  </ResourceRecordSets>
+  <IsTruncated>true</IsTruncated>
+  <NextRecordName>api.example.com.</NextRecordName>
+  <NextRecordType>A</NextRecordType>
+  <NextRecordIdentifier>eu</NextRecordIdentifier>
+  <MaxItems>1</MaxItems>
+</ListResourceRecordSetsResponse>"#;
+
+#[tokio::test]
+async fn route53_resumes_weighted_records_at_their_set_identifier() {
+    let second = r#"<ListResourceRecordSetsResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+  <ResourceRecordSets>
+    <ResourceRecordSet>
+      <Name>api.example.com.</Name><Type>A</Type><SetIdentifier>eu</SetIdentifier><Weight>50</Weight><TTL>60</TTL>
+      <ResourceRecords><ResourceRecord><Value>192.0.2.2</Value></ResourceRecord></ResourceRecords>
+    </ResourceRecordSet>
+  </ResourceRecordSets>
+  <IsTruncated>false</IsTruncated>
+  <MaxItems>1</MaxItems>
+</ListResourceRecordSetsResponse>"#;
+    let (cfg, http) = replay(&[(XML, ZONE), (XML, WEIGHTED_FIRST), (XML, second)]).await;
+    let AWSRoute53 { record_sets, .. } = super::route53::collector::runner(&cfg).await.unwrap();
+
+    let identifiers: Vec<_> = record_sets
+        .iter()
+        .filter_map(|record| record.set_identifier())
+        .collect();
+    assert_eq!(identifiers, vec!["us", "eu"]);
+    let resumed = http.actual_requests().nth(2).expect("a third request");
+    assert!(
+        resumed.uri().contains("identifier=eu"),
+        "without the set identifier the next page restarts at the first `api` A record: {}",
+        resumed.uri()
+    );
+}
+
+#[tokio::test]
+async fn route53_refuses_a_record_cursor_that_does_not_advance() {
+    let cfg = replay_config(&[(XML, ZONE), (XML, WEIGHTED_FIRST), (XML, WEIGHTED_FIRST)]).await;
+    let error = super::route53::collector::runner(&cfg)
+        .await
+        .expect_err("a cursor that never advances must fail, not loop or truncate");
+    assert!(error.to_string().contains("repeated"), "{error}");
 }
 
 #[tokio::test]

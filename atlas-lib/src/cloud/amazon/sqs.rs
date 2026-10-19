@@ -92,32 +92,14 @@ pub mod collector {
     pub async fn runner(
         config: &aws_config::SdkConfig,
     ) -> Result<Vec<QueueUrl>, Box<dyn std::error::Error>> {
-        let client = Client::new(config);
-
-        let mut queues = Vec::new();
-        let mut next_token = None;
-
-        loop {
-            let mut req = client.list_queues();
-            if let Some(token) = &next_token {
-                req = req.next_token(token);
-            }
-
-            let mut resp = req.send().await?;
-            next_token = resp.next_token.take();
-            queues.extend(
-                resp.queue_urls
-                    .take()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(QueueUrl),
-            );
-            if next_token.is_none() {
-                break;
-            }
-        }
-
-        Ok(queues)
+        let urls: Vec<String> = Client::new(config)
+            .list_queues()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
+        Ok(urls.into_iter().map(QueueUrl).collect())
     }
 }
 

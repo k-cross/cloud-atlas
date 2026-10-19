@@ -5,28 +5,12 @@ pub mod collector {
     pub async fn runner(
         config: &aws_config::SdkConfig,
     ) -> Result<Vec<DistributionSummary>, Box<dyn std::error::Error>> {
-        let client = Client::new(config);
-
-        let mut distributions = Vec::new();
-        let mut marker = None;
-
-        loop {
-            let mut req = client.list_distributions();
-            if let Some(m) = &marker {
-                req = req.marker(m);
-            }
-
-            let resp = req.send().await?;
-            let Some(mut list) = resp.distribution_list else {
-                break;
-            };
-            marker = list.next_marker.take();
-            distributions.extend(list.items.take().unwrap_or_default());
-            if marker.is_none() {
-                break;
-            }
-        }
-
-        Ok(distributions)
+        Ok(Client::new(config)
+            .list_distributions()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?)
     }
 }

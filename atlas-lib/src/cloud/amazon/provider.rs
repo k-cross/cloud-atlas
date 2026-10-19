@@ -43,7 +43,7 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
                 "ec2" => AmazonCollection::AmazonInstances, instance::collector::runner(&config),
                 "lambda" => AmazonCollection::AmazonLambdas, lambda::collector::runner(&config),
                 "elbv2" => AmazonCollection::AmazonLoadBalancers, load_balancer::collector::runner(&config),
-                "config" => AmazonCollection::AmazonResources, resource::collector::runner(verbose, &config),
+                "config" => AmazonCollection::AmazonResources, resource::collector::runner(verbose, opts.exclude_by_default, &config),
                 "route53" => AmazonCollection::AmazonRoute53, route53::collector::runner(&config),
                 "eks" => AmazonCollection::AmazonEks, eks::collector::runner(&config),
                 "apigateway" => AmazonCollection::AmazonApiGateway, api_gateway::collector::runner(&config),

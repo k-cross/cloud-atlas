@@ -25,8 +25,8 @@ Joins project as standard graph edges using existing `Edge` kinds:
 | **GCP** | `networks.list` `peerings` | `GcpComputeNetwork -ConnectsTo-> GcpComputeNetwork` (`ACTIVE` only) |
 
 - **Filtering & lifecycle:** Blackhole routes (including NAT/IGW), rejected/deleted peerings, and pending attachments project nothing. `modifying` gateways and attachments stay projected so active paths do not flap during changes. Cross-account peer VPCs project as bare `AwsEc2Vpc` nodes.
-- **AWS Config exclusions:** `AWS::EC2::VPCPeeringConnection`, `TransitGateway`, and `TransitGatewayAttachment` are excluded in `use_aws_resource` (like NAT, EIP, and ENI). `AWS::EC2::VPC` remains in the Config catch-all alongside its `AwsConfigResource` twin.
-- **IAM:** Requires `ec2:DescribeVpcs`, `ec2:DescribeVpcPeeringConnections`, `ec2:DescribeTransitGateways`, and `ec2:DescribeTransitGatewayAttachments` (all included in `ReadOnlyAccess`).
+- **AWS Config:** `AWS::EC2::VPC`, `VPCPeeringConnection`, and `TransitGateway` are in `TYPED_CONFIG_TYPES`, so the Config catch-all never draws them; `TransitGatewayAttachment`, drawn as an edge, is excluded in `use_aws_resource`. Peerings and gateways have no event key: the scan filters them by state a Config item does not carry, so events leave them to the scan.
+- **IAM:** Requires `ec2:DescribeVpcs`, `ec2:DescribeVpcPeeringConnections`, `ec2:DescribeTransitGateways`, and `ec2:DescribeTransitGatewayAttachments` (all included in `ReadOnlyAccess`). They form one `connectivity` collector, so a denied call fails all four and the report names `connectivity`.
 
 ## 3. Cross-Network Address Resolution
 

@@ -3,8 +3,8 @@ use crate::atlas::definition::{Edge, Node};
 use crate::atlas::event::{ChangeEvent, ChangeOp};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector::aws::{
-    EniFacts, InstanceFacts, InterfaceFacts, project_instance, project_interface, use_aws_resource,
-    use_global,
+    ConfigKey, EniFacts, InstanceFacts, InterfaceFacts, project_instance, project_interface,
+    typed_config_type, use_aws_resource, use_global,
 };
 use crate::cloud::amazon::sqs::feed::unwrap_sns;
 use aws_smithy_types::date_time::{DateTime, Format};
@@ -301,32 +301,14 @@ fn config_op(status: Option<&str>) -> Option<ChangeOp> {
 }
 
 fn typed_node(item: &ConfigurationItem, resource_type: &str) -> Option<Node> {
+    let typed = typed_config_type(resource_type)?;
     let id = item.resource_id.as_deref();
-    let name = item.resource_name.as_deref().or(id);
-    let arn = item.arn.as_deref().or(id);
-
-    let node = match resource_type {
-        "AWS::EC2::Instance" => Node::AwsEc2Instance(id?.into()),
-        "AWS::EC2::VPC" => Node::AwsEc2Vpc(id?.into()),
-        "AWS::EC2::Subnet" => Node::AwsEc2Subnet(id?.into()),
-        "AWS::EC2::SecurityGroup" => Node::AwsEc2SecurityGroup(id?.into()),
-        "AWS::EC2::RouteTable" => Node::AwsEc2RouteTable(id?.into()),
-        "AWS::EC2::InternetGateway" => Node::AwsEc2InternetGateway(id?.into()),
-        "AWS::EC2::NatGateway" => Node::AwsEc2NatGateway(id?.into()),
-        "AWS::EC2::NetworkInterface" => Node::AwsEc2Eni(id?.into()),
-        "AWS::EC2::EIP" => Node::AwsEc2Eip(id?.into()),
-        "AWS::Lambda::Function" => Node::AwsLambdaFunction(name?.into()),
-        "AWS::ECS::Cluster" => Node::AwsEcsCluster(arn?.into()),
-        "AWS::EKS::Cluster" => Node::AwsEksCluster(name?.into()),
-        "AWS::RDS::DBInstance" => Node::AwsRdsDbInstance(name?.into()),
-        "AWS::DynamoDB::Table" => Node::AwsDynamoDbTable(name?.into()),
-        "AWS::SNS::Topic" => Node::AwsSnsTopic(arn?.into()),
-        "AWS::ElasticLoadBalancingV2::LoadBalancer" => Node::AwsElbLoadBalancer(arn?.into()),
-        "AWS::ApiGateway::RestApi" => Node::AwsApiGatewayRestApi(id?.into()),
-        "AWS::CloudFront::Distribution" => Node::AwsCloudFrontDistribution(id?.into()),
-        _ => return None,
+    let key = match typed.event_key.as_ref()? {
+        ConfigKey::ResourceId => id,
+        ConfigKey::ResourceName => item.resource_name.as_deref().or(id),
+        ConfigKey::Arn => item.arn.as_deref().or(id),
     };
-    Some(node)
+    Some((typed.node)(key?.into()))
 }
 
 fn typed_context(

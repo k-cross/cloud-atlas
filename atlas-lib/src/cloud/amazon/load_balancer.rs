@@ -1,6 +1,7 @@
 pub mod collector {
     use crate::cloud::definition::AWSLoadBalancing;
     use aws_sdk_elasticloadbalancingv2::Client;
+    use aws_sdk_elasticloadbalancingv2::types::{Listener, LoadBalancer, TargetGroup};
     use std::collections::HashMap;
 
     pub async fn runner(
@@ -8,23 +9,36 @@ pub mod collector {
     ) -> Result<AWSLoadBalancing, Box<dyn std::error::Error>> {
         let client = Client::new(config);
 
-        let lbs_resp = client.describe_load_balancers().send().await?;
-        let load_balancers = lbs_resp.load_balancers.unwrap_or_default();
+        let load_balancers: Vec<LoadBalancer> = client
+            .describe_load_balancers()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
 
         let mut listeners = Vec::new();
         for lb in &load_balancers {
             if let Some(arn) = lb.load_balancer_arn() {
-                let listeners_resp = client
+                let page: Vec<Listener> = client
                     .describe_listeners()
                     .load_balancer_arn(arn)
+                    .into_paginator()
+                    .items()
                     .send()
+                    .try_collect()
                     .await?;
-                listeners.extend(listeners_resp.listeners.unwrap_or_default());
+                listeners.extend(page);
             }
         }
 
-        let tg_resp = client.describe_target_groups().send().await?;
-        let target_groups = tg_resp.target_groups.unwrap_or_default();
+        let target_groups: Vec<TargetGroup> = client
+            .describe_target_groups()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
 
         let mut target_health = HashMap::new();
         for tg in &target_groups {

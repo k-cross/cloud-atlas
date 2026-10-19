@@ -1,5 +1,5 @@
 pub mod collector {
-    use aws_sdk_ec2::types::{Filter, Instance};
+    use aws_sdk_ec2::types::{Filter, Instance, Reservation};
     use aws_sdk_ec2::{Client, Error};
 
     async fn match_instances(client: &Client) -> Result<Vec<Instance>, Error> {
@@ -7,11 +7,16 @@ pub mod collector {
             .set_name(Some("instance-state-name".to_owned()))
             .set_values(Some(vec!["running".to_owned(), "pending".to_owned()]))
             .build();
-        let resp = client.describe_instances().filters(filter).send().await?;
+        let reservations: Vec<Reservation> = client
+            .describe_instances()
+            .filters(filter)
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
 
-        Ok(resp
-            .reservations
-            .unwrap_or_default()
+        Ok(reservations
             .into_iter()
             .flat_map(|reservation| reservation.instances.unwrap_or_default())
             .collect())

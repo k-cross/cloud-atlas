@@ -5,26 +5,13 @@ pub mod collector {
     pub async fn runner(
         config: &aws_config::SdkConfig,
     ) -> Result<Vec<SecurityGroup>, Box<dyn std::error::Error>> {
-        let client = Client::new(config);
-
-        let mut groups = Vec::new();
-        let mut next_token = None;
-
-        loop {
-            let mut req = client.describe_security_groups();
-            if let Some(token) = &next_token {
-                req = req.next_token(token);
-            }
-
-            let mut resp = req.send().await?;
-            next_token = resp.next_token.take();
-            groups.extend(resp.security_groups.take().unwrap_or_default());
-            if next_token.is_none() {
-                break;
-            }
-        }
-
-        Ok(groups)
+        Ok(Client::new(config)
+            .describe_security_groups()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?)
     }
 }
 

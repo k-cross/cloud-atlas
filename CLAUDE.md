@@ -22,7 +22,7 @@ Never call live cloud APIs in tests. Projectors test against the "Globex" estate
 
 - `cargo nextest run` enforces exhaustiveness guards: every `Node` and `Edge` kind must appear in the fixture graph.
 - `cargo run --example demo` projects fixtures + Tier-2 overlay (`fixtures::build_graph()`, combining `fixtures::topology()` and `fixtures::observed()`), writes `multi_cloud_demo.{dot,json}`, prints kind coverage, flows, and derived `Serves` edges, and exits non-zero if any kind is missing or the overlay is empty.
-- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also exclude the Config type in `use_aws_resource` so the catch-all does not duplicate it as `AwsConfigResource`.
+- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also add its Config type to `TYPED_CONFIG_TYPES` (`projector/aws.rs`) with the item field an event names it by (or `None`): the Config catch-all never draws a listed type, and `every_aws_kind_config_records_has_one_source` fails until a new AWS kind is listed.
 
 ### Collector Tests (HTTP → Struct)
 
@@ -85,7 +85,7 @@ All credential-free behaviour (canary DNS parity toggle, 1-in-4 burst flow, 5 s 
 
 `atlas::event::ChangeEvent` + `EventApplier`; `cloud/amazon/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
 
-1. **Projector parity:** Adapters must emit only what the full-scan projector emits (`project_instance`/`InstanceFacts`, `project_interface`/`InterfaceFacts`, `use_aws_resource`/`use_global`). Differently keyed Config types (Route 53 `/hostedzone/` prefix, SQS URLs) and deferred `link_interface_owners` edges are omitted (`an_instance_event_produces_only_what_a_full_scan_would`, `an_interface_event_produces_only_what_a_full_scan_would`).
+1. **Projector parity:** Adapters must emit only what the full-scan projector emits (`project_instance`/`InstanceFacts`, `project_interface`/`InterfaceFacts`, `use_aws_resource`/`use_global`). A Config item for a type in `TYPED_CONFIG_TYPES` becomes only its typed node, never also an `AwsConfigResource`. Types with no event key (keyed differently, like Route 53's `/hostedzone/` prefix and SQS URLs, or filtered by state the item lacks, like peerings and transit gateways) and deferred `link_interface_owners` edges are omitted (`an_instance_event_produces_only_what_a_full_scan_would`, `an_interface_event_produces_only_what_a_full_scan_would`).
 2. **Additive only:** Creates/modifies never remove unmentioned edges; deletes remove only the named node.
 3. **Last-writer-wins on cloud record time** per resource (bounded table; never substitute arrival time for unparseable timestamps).
 4. **Separate health:** `AppState::stream_report` (`/collection.json` → `stream`) never enters `unreadable_sources()`. Unparseable messages are `Malformed`, reported, and deleted.
@@ -123,7 +123,7 @@ Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas
 
 - **Fan-out (`cloud::collector::run_all`):** Runs `Vec<NamedCollector<'_, T>>` concurrently, reporting `{scope}/{name}` failures. AWS and GCP use a local `collectors!` macro (`"name" => Collection::Variant, call(..)`); multi-field payloads use named structs (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `cloud/definition.rs`).
 - **Provider clients:**
-  - **AWS:** `cloud/amazon.rs::load_config(region)` once per region; register in `amazon/provider.rs`.
+  - **AWS:** `cloud/amazon.rs::load_config(region)` once per region; register in `amazon/provider.rs`. Page with the SDK's `into_paginator().items()`; an operation without one (Route 53 record sets, EventBridge buses) loops by hand and fails on a cursor that does not advance.
   - **GCP:** `GoogleApiClient::paginated_list` (`api/google/client.rs`); register in `google/provider.rs`.
   - **Azure:** `AzureApiClient::query_graph` errors on missing/non-array `data` or `totalRecords > rows.len()`. `azure_types!` in `azure/provider.rs` drives the ARG filter and exhaustive `map_resources` dispatch (`leaf!` for `{id, name, location}`).
   - **Cloudflare:** `CloudflareApiClient::get` / `get_paged` (cursor endpoints like R2) and `cloudflare::paginate(per_page, |page| ..)`. **Never stop paging on a short page.**

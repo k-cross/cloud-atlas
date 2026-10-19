@@ -14,6 +14,7 @@ use aws_sdk_ec2::types::{
 use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub fn aws_projector(
     builder: &mut GraphBuilder,
@@ -924,43 +925,161 @@ pub(crate) fn project_instance(
     }
 }
 
+pub(crate) enum ConfigKey {
+    ResourceId,
+    ResourceName,
+    Arn,
+}
+
+pub(crate) struct TypedConfigType {
+    pub(crate) resource_type: &'static str,
+    pub(crate) node: fn(Arc<str>) -> Node,
+    pub(crate) event_key: Option<ConfigKey>,
+}
+
+const fn typed(
+    resource_type: &'static str,
+    node: fn(Arc<str>) -> Node,
+    event_key: Option<ConfigKey>,
+) -> TypedConfigType {
+    TypedConfigType {
+        resource_type,
+        node,
+        event_key,
+    }
+}
+
+pub(crate) const TYPED_CONFIG_TYPES: &[TypedConfigType] = &[
+    typed(
+        "AWS::EC2::Instance",
+        Node::AwsEc2Instance,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::VPC",
+        Node::AwsEc2Vpc,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::Subnet",
+        Node::AwsEc2Subnet,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::SecurityGroup",
+        Node::AwsEc2SecurityGroup,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::RouteTable",
+        Node::AwsEc2RouteTable,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::InternetGateway",
+        Node::AwsEc2InternetGateway,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::NatGateway",
+        Node::AwsEc2NatGateway,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::NetworkInterface",
+        Node::AwsEc2Eni,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::EIP",
+        Node::AwsEc2Eip,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::VPCPeeringConnection",
+        Node::AwsEc2VpcPeeringConnection,
+        None,
+    ),
+    typed("AWS::EC2::TransitGateway", Node::AwsEc2TransitGateway, None),
+    typed(
+        "AWS::Lambda::Function",
+        Node::AwsLambdaFunction,
+        Some(ConfigKey::ResourceName),
+    ),
+    typed("AWS::IAM::Role", Node::AwsIamRole, None),
+    typed(
+        "AWS::ECS::Cluster",
+        Node::AwsEcsCluster,
+        Some(ConfigKey::Arn),
+    ),
+    typed(
+        "AWS::EKS::Cluster",
+        Node::AwsEksCluster,
+        Some(ConfigKey::ResourceName),
+    ),
+    typed(
+        "AWS::RDS::DBInstance",
+        Node::AwsRdsDbInstance,
+        Some(ConfigKey::ResourceName),
+    ),
+    typed(
+        "AWS::DynamoDB::Table",
+        Node::AwsDynamoDbTable,
+        Some(ConfigKey::ResourceName),
+    ),
+    typed("AWS::SQS::Queue", Node::AwsSqsQueue, None),
+    typed("AWS::SNS::Topic", Node::AwsSnsTopic, Some(ConfigKey::Arn)),
+    typed(
+        "AWS::ElasticLoadBalancingV2::LoadBalancer",
+        Node::AwsElbLoadBalancer,
+        Some(ConfigKey::Arn),
+    ),
+    typed(
+        "AWS::ElasticLoadBalancingV2::TargetGroup",
+        Node::AwsElbTargetGroup,
+        None,
+    ),
+    typed("AWS::Route53::HostedZone", Node::AwsRoute53HostedZone, None),
+    typed(
+        "AWS::ApiGateway::RestApi",
+        Node::AwsApiGatewayRestApi,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::CloudFront::Distribution",
+        Node::AwsCloudFrontDistribution,
+        Some(ConfigKey::ResourceId),
+    ),
+];
+
+pub(crate) fn typed_config_type(resource_type: &str) -> Option<&'static TypedConfigType> {
+    TYPED_CONFIG_TYPES
+        .iter()
+        .find(|typed| typed.resource_type == resource_type)
+}
+
 pub(crate) fn use_aws_resource(name: &str, exclude_by_default: bool) -> bool {
+    if typed_config_type(name).is_some() {
+        return false;
+    }
     match name {
         "AWS::RDS::DBClusterSnapshot" => false,
         "AWS::StepFunctions::StateMachine" => false,
         "AWS::ApiGateway::Stage" => false,
         "AWS::ApiGatewayV2::Api" => false,
         "AWS::EC2::NetworkAcl" => false,
-        "AWS::EC2::EIP" => false,
-        "AWS::EC2::NetworkInterface" => false,
-        "AWS::EC2::NatGateway" => false,
-        "AWS::SNS::Topic" => false,
+        "AWS::EC2::TransitGatewayAttachment" => false,
+        "AWS::ElasticLoadBalancingV2::Listener" => false,
         "AWS::RDS::DBCluster" => true,
         "AWS::S3::Bucket" => true,
-        "AWS::SQS::Queue" => true,
-        "AWS::EC2::RouteTable" => false,
-        "AWS::EC2::VPC" => true,
-        "AWS::EC2::Instance" => true,
         "AWS::ElasticLoadBalancing::LoadBalancer" => true,
-        "AWS::ElasticLoadBalancingV2::LoadBalancer" => true,
         "AWS::Redshift::ClusterSubnetGroup" => true,
         "AWS::RDS::DBSubnetGroup" => true,
-        "AWS::EC2::Subnet" => true,
-        "AWS::EC2::InternetGateway" => false,
-        "AWS::EC2::VPCPeeringConnection" => false,
-        "AWS::EC2::TransitGateway" => false,
-        "AWS::EC2::TransitGatewayAttachment" => false,
-        "AWS::ECS::Cluster" => true,
-        "AWS::Lambda::Function" => true,
-        "AWS::RDS::DBInstance" => true,
-        "AWS::EKS::Cluster" => true,
-        "AWS::ElasticLoadBalancingV2::Listener" => true,
 
         // TODO: below are unclear if actually wanted/needed
         "AWS::Route53Resolver::ResolverRuleAssociation" => true,
         "AWS::EC2::VPCEndpoint" => true,
         "AWS::Route53Resolver::ResolverRule" => true,
-        "AWS::DynamoDB::Table" => true,
         _ => !exclude_by_default,
     }
 }
