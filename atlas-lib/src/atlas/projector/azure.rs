@@ -63,7 +63,7 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                         );
                     }
 
-                    for remote_id in vnet
+                    for (remote_id, use_remote_gateways) in vnet
                         .peerings
                         .iter()
                         .filter(|peering| {
@@ -72,13 +72,15 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                                 .as_deref()
                                 .is_some_and(|state| state.eq_ignore_ascii_case("Connected"))
                         })
-                        .filter_map(|peering| peering.remote_id.as_deref())
+                        .filter_map(|peering| {
+                            Some((peering.remote_id.as_deref()?, peering.use_remote_gateways))
+                        })
                     {
-                        builder.link_to(
-                            idx,
-                            Node::AzureVirtualNetwork(canonical_azure_id(remote_id)),
-                            Edge::ConnectsTo,
-                        );
+                        let remote = Node::AzureVirtualNetwork(canonical_azure_id(remote_id));
+                        builder.link_to(idx, remote.clone(), Edge::ConnectsTo);
+                        if use_remote_gateways {
+                            builder.link_to(idx, remote, Edge::RoutesTo);
+                        }
                     }
                 }
             }
@@ -149,6 +151,66 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                     if let Some(ip) = &pip.ip_address {
                         builder.link_to(idx, Node::ip(ip, &id), Edge::ConnectsTo);
                     }
+                }
+            }
+        }
+        MicrosoftCollection::AzureVirtualNetworkGateways(gateways) => {
+            for gateway in gateways.iter().filter(|gateway| {
+                !is_expressroute(gateway.gateway_type.as_deref())
+                    && in_service(gateway.provisioning_state.as_deref())
+            }) {
+                let Some(id) = &gateway.id else { continue };
+                let idx = builder
+                    .get_or_add_node(Node::AzureVirtualNetworkGateway(canonical_azure_id(id)));
+                for vnet in gateway
+                    .subnet_ids
+                    .iter()
+                    .filter_map(|subnet_id| virtual_network_of(subnet_id))
+                {
+                    builder.link_to(idx, Node::AzureVirtualNetwork(vnet), Edge::AttachedTo);
+                }
+                for public_ip_id in &gateway.public_ip_ids {
+                    builder.link_to(
+                        idx,
+                        Node::AzurePublicIpAddress(canonical_azure_id(public_ip_id)),
+                        Edge::HasIp,
+                    );
+                }
+            }
+        }
+        MicrosoftCollection::AzureLocalNetworkGateways(gateways) => {
+            for gateway in gateways
+                .iter()
+                .filter(|gateway| in_service(gateway.provisioning_state.as_deref()))
+            {
+                let Some(id) = &gateway.id else { continue };
+                let id = canonical_azure_id(id);
+                let idx = builder.get_or_add_node(Node::AzureLocalNetworkGateway(id.clone()));
+                if let Some(address) = &gateway.gateway_ip_address {
+                    builder.link_to(idx, Node::ip(address, &id), Edge::RoutesTo);
+                }
+            }
+        }
+        MicrosoftCollection::AzureVpnConnections(connections) => {
+            for connection in connections.iter().filter(|connection| {
+                !is_expressroute(connection.connection_type.as_deref())
+                    && in_service(connection.provisioning_state.as_deref())
+            }) {
+                let Some(id) = &connection.id else { continue };
+                let idx = builder.get_or_add_node(Node::AzureVpnConnection(canonical_azure_id(id)));
+                if let Some(gateway_id) = &connection.gateway_id {
+                    builder.link_to(
+                        idx,
+                        Node::AzureVirtualNetworkGateway(canonical_azure_id(gateway_id)),
+                        Edge::AttachedTo,
+                    );
+                }
+                if let Some(local_id) = &connection.local_gateway_id {
+                    builder.link_to(
+                        idx,
+                        Node::AzureLocalNetworkGateway(canonical_azure_id(local_id)),
+                        Edge::AttachedTo,
+                    );
                 }
             }
         }
@@ -245,6 +307,16 @@ fn project_ip_configurations(
             );
         }
     }
+}
+
+fn is_expressroute(kind: Option<&str>) -> bool {
+    kind.is_some_and(|kind| kind.eq_ignore_ascii_case("ExpressRoute"))
+}
+
+fn in_service(provisioning_state: Option<&str>) -> bool {
+    !provisioning_state.is_some_and(|state| {
+        state.eq_ignore_ascii_case("Deleting") || state.eq_ignore_ascii_case("Failed")
+    })
 }
 
 fn virtual_network_of(subnet_id: &str) -> Option<Arc<str>> {

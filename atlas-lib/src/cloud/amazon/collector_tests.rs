@@ -366,12 +366,44 @@ async fn ec2_connectivity_follows_every_page() {
     <state>available</state>
   </item></transitGatewayAttachments>
 </DescribeTransitGatewayAttachmentsResponse>"#;
+    let vpn_gateways = r#"<DescribeVpnGatewaysResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <vpnGatewaySet><item>
+    <vpnGatewayId>vgw-1</vpnGatewayId>
+    <state>available</state>
+    <attachments><item><vpcId>vpc-a</vpcId><state>attached</state></item></attachments>
+  </item></vpnGatewaySet>
+</DescribeVpnGatewaysResponse>"#;
+    let customer_gateways = r#"<DescribeCustomerGatewaysResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <customerGatewaySet><item>
+    <customerGatewayId>cgw-1</customerGatewayId>
+    <ipAddress>198.51.100.9</ipAddress>
+    <state>available</state>
+  </item></customerGatewaySet>
+</DescribeCustomerGatewaysResponse>"#;
+    let vpn_connections = r#"<DescribeVpnConnectionsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <vpnConnectionSet><item>
+    <vpnConnectionId>vpn-1</vpnConnectionId>
+    <state>available</state>
+    <customerGatewayId>cgw-1</customerGatewayId>
+    <vpnGatewayId>vgw-1</vpnGatewayId>
+    <options><tunnelOptionSet><item><outsideIpAddress>192.0.2.7</outsideIpAddress></item></tunnelOptionSet></options>
+    <vgwTelemetry><item><outsideIpAddress>192.0.2.8</outsideIpAddress><status>DOWN</status></item></vgwTelemetry>
+  </item><item>
+    <vpnConnectionId>vpn-2</vpnConnectionId>
+    <state>available</state>
+    <customerGatewayId>cgw-1</customerGatewayId>
+    <transitGatewayId>tgw-1</transitGatewayId>
+  </item></vpnConnectionSet>
+</DescribeVpnConnectionsResponse>"#;
     let cfg = replay_config(&[
         (XML, vpcs_first),
         (XML, vpcs_second),
         (XML, peerings),
         (XML, gateways),
         (XML, attachments),
+        (XML, vpn_gateways),
+        (XML, customer_gateways),
+        (XML, vpn_connections),
     ])
     .await;
 
@@ -380,6 +412,9 @@ async fn ec2_connectivity_follows_every_page() {
         peering_connections,
         transit_gateways,
         transit_gateway_attachments,
+        vpn_gateways,
+        customer_gateways,
+        vpn_connections,
     } = super::connectivity::collector::runner(&cfg).await.unwrap();
 
     let vpc_ids: Vec<_> = vpcs.iter().filter_map(|vpc| vpc.vpc_id()).collect();
@@ -414,6 +449,35 @@ async fn ec2_connectivity_follows_every_page() {
         attachment.state(),
         Some(&aws_sdk_ec2::types::TransitGatewayAttachmentState::Available)
     );
+
+    let vgw = &vpn_gateways[0];
+    assert_eq!(vgw.vpn_gateway_id(), Some("vgw-1"));
+    assert_eq!(vgw.state(), Some(&aws_sdk_ec2::types::VpnState::Available));
+    assert_eq!(vgw.vpc_attachments()[0].vpc_id(), Some("vpc-a"));
+    assert_eq!(
+        vgw.vpc_attachments()[0].state(),
+        Some(&aws_sdk_ec2::types::AttachmentStatus::Attached)
+    );
+    assert_eq!(customer_gateways[0].customer_gateway_id(), Some("cgw-1"));
+    assert_eq!(customer_gateways[0].ip_address(), Some("198.51.100.9"));
+    assert_eq!(customer_gateways[0].state(), Some("available"));
+    let connection = &vpn_connections[0];
+    assert_eq!(connection.vpn_connection_id(), Some("vpn-1"));
+    assert_eq!(
+        connection.state(),
+        Some(&aws_sdk_ec2::types::VpnState::Available)
+    );
+    assert_eq!(connection.customer_gateway_id(), Some("cgw-1"));
+    assert_eq!(connection.vpn_gateway_id(), Some("vgw-1"));
+    assert_eq!(
+        connection.options().unwrap().tunnel_options()[0].outside_ip_address(),
+        Some("192.0.2.7")
+    );
+    assert_eq!(
+        connection.vgw_telemetry()[0].outside_ip_address(),
+        Some("192.0.2.8")
+    );
+    assert_eq!(vpn_connections[1].transit_gateway_id(), Some("tgw-1"));
 }
 
 #[tokio::test]

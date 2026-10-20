@@ -8,3 +8,4 @@ pub mod pubsub;
 pub mod run;
 pub mod sql;
 pub mod storage;
+pub mod vpn;

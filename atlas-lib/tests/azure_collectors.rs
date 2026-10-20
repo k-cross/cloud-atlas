@@ -121,7 +121,8 @@ fn vnet_extracts_inline_subnets_with_nsg() {
                 "properties": {
                     "peeringState": "Connected",
                     "remoteVirtualNetwork": { "id": "/subscriptions/s/.../virtualNetworks/hub" },
-                    "allowForwardedTraffic": true
+                    "allowForwardedTraffic": true,
+                    "useRemoteGateways": true
                 }
             } ]
         }
@@ -137,6 +138,7 @@ fn vnet_extracts_inline_subnets_with_nsg() {
         Some("/subscriptions/s/.../virtualNetworks/hub")
     );
     assert_eq!(vnets[0].peerings[0].state.as_deref(), Some("Connected"));
+    assert!(vnets[0].peerings[0].use_remote_gateways);
 
     let subnets = variant!(cols, AzureSubnets);
     assert_eq!(subnets[0].name.as_deref(), Some("sn1"));
@@ -304,4 +306,75 @@ fn unknown_resource_types_are_ignored() {
     })]);
     assert!(variant!(cols, AzureVirtualMachines).is_empty());
     assert!(variant!(cols, AzureStorageAccounts).is_empty());
+}
+
+#[test]
+fn vpn_gateways_local_gateways_and_connections_are_extracted() {
+    let cols = map(vec![
+        json!({
+            "id": "/subscriptions/s/.../virtualNetworkGateways/vng1",
+            "name": "vng1",
+            "type": "microsoft.network/virtualnetworkgateways",
+            "location": "eastus",
+            "properties": {
+                "gatewayType": "Vpn",
+                "provisioningState": "Succeeded",
+                "ipConfigurations": [ { "properties": {
+                    "subnet": { "id": "/subscriptions/s/.../virtualNetworks/hub/subnets/GatewaySubnet" },
+                    "publicIPAddress": { "id": "/subscriptions/s/.../publicIPAddresses/pip-vpn" }
+                } } ]
+            }
+        }),
+        json!({
+            "id": "/subscriptions/s/.../localNetworkGateways/lng1",
+            "name": "lng1",
+            "type": "microsoft.network/localnetworkgateways",
+            "location": "eastus",
+            "properties": { "gatewayIpAddress": "192.0.2.101", "provisioningState": "Updating" }
+        }),
+        json!({
+            "id": "/subscriptions/s/.../connections/conn1",
+            "name": "conn1",
+            "type": "microsoft.network/connections",
+            "location": "eastus",
+            "properties": {
+                "connectionType": "IPsec",
+                "provisioningState": "Deleting",
+                "virtualNetworkGateway1": { "id": "/subscriptions/s/.../virtualNetworkGateways/vng1" },
+                "localNetworkGateway2": { "id": "/subscriptions/s/.../localNetworkGateways/lng1" }
+            }
+        }),
+    ]);
+
+    let gateway = &variant!(cols, AzureVirtualNetworkGateways)[0];
+    assert_eq!(gateway.gateway_type.as_deref(), Some("Vpn"));
+    assert_eq!(gateway.provisioning_state.as_deref(), Some("Succeeded"));
+    assert_eq!(
+        gateway.subnet_ids,
+        vec!["/subscriptions/s/.../virtualNetworks/hub/subnets/GatewaySubnet".to_string()]
+    );
+    assert_eq!(
+        gateway.public_ip_ids,
+        vec!["/subscriptions/s/.../publicIPAddresses/pip-vpn".to_string()]
+    );
+    let local_gateway = &variant!(cols, AzureLocalNetworkGateways)[0];
+    assert_eq!(
+        local_gateway.gateway_ip_address.as_deref(),
+        Some("192.0.2.101")
+    );
+    assert_eq!(
+        local_gateway.provisioning_state.as_deref(),
+        Some("Updating")
+    );
+    let connection = &variant!(cols, AzureVpnConnections)[0];
+    assert_eq!(connection.connection_type.as_deref(), Some("IPsec"));
+    assert_eq!(connection.provisioning_state.as_deref(), Some("Deleting"));
+    assert_eq!(
+        connection.gateway_id.as_deref(),
+        Some("/subscriptions/s/.../virtualNetworkGateways/vng1")
+    );
+    assert_eq!(
+        connection.local_gateway_id.as_deref(),
+        Some("/subscriptions/s/.../localNetworkGateways/lng1")
+    );
 }

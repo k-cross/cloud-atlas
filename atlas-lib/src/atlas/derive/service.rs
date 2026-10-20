@@ -692,23 +692,29 @@ mod tests {
     }
 
     #[test]
-    fn a_private_address_seen_from_another_network_names_nothing_there() {
+    fn a_private_address_resolves_across_a_vpn_tunnel() {
         let builder = fixtures::build_graph();
         let web01 = Node::AwsEc2Instance("i-globex-web-01".into());
         let web02 = Node::AwsEc2Instance("i-globex-web-02".into());
 
-        assert!(!serves(
-            &builder,
-            &web01,
-            &Node::AzureVirtualMachine(azure_networking_id(
-                "Microsoft.Compute/virtualMachines/vm-worker",
-            )),
-        ));
-        assert!(!serves(
-            &builder,
-            &web02,
-            &Node::GcpSqlInstance("globex-analytics-db".into()),
-        ));
+        assert!(
+            serves(
+                &builder,
+                &web01,
+                &Node::AzureVirtualMachine(azure_networking_id(
+                    "Microsoft.Compute/virtualMachines/vm-worker",
+                )),
+            ),
+            "the VM sits in a spoke that reaches AWS through the hub's gateway"
+        );
+        assert!(
+            serves(
+                &builder,
+                &web02,
+                &Node::GcpSqlInstance("globex-analytics-db".into()),
+            ),
+            "the tunnel is on the transit gateway, which web-02's VPC is attached to"
+        );
     }
 
     fn overlapping_estate(target_running: bool) -> GraphBuilder {

@@ -759,6 +759,320 @@ mod tests {
     }
 
     #[test]
+    fn the_globex_vpn_story_is_projected_on_all_three_clouds() {
+        let builder = fixtures::build_graph();
+        let azure_address = public("198.51.100.60");
+        let gcp_address = public("198.51.100.70");
+        let connection = Node::AwsEc2VpnConnection("vpn-globex-azure".into());
+        let vgw = Node::AwsEc2VpnGateway("vgw-globex".into());
+        let cgw = Node::AwsEc2CustomerGateway("cgw-globex-azure".into());
+        assert_edge(
+            &builder,
+            &vgw,
+            &Node::AwsEc2Vpc(fixtures::AWS_NETWORK.into()),
+            &Edge::AttachedTo,
+        );
+        assert_edge(&builder, &connection, &vgw, &Edge::AttachedTo);
+        assert_edge(&builder, &connection, &cgw, &Edge::AttachedTo);
+        assert_edge(&builder, &cgw, &azure_address, &Edge::RoutesTo);
+        assert_edge(
+            &builder,
+            &connection,
+            &public("192.0.2.101"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(
+            &builder,
+            &connection,
+            &public("192.0.2.102"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsEc2VpnConnection("vpn-globex-gcp".into()),
+            &Node::AwsEc2TransitGateway("tgw-globex".into()),
+            &Edge::AttachedTo,
+        );
+
+        let vng = Node::AzureVirtualNetworkGateway(azure_networking_id(
+            "Microsoft.Network/virtualNetworkGateways/vng-globex-hub",
+        ));
+        let hub = Node::AzureVirtualNetwork(azure_networking_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex-hub",
+        ));
+        let spoke = Node::AzureVirtualNetwork(azure_networking_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex",
+        ));
+        let lng = Node::AzureLocalNetworkGateway(azure_networking_id(
+            "Microsoft.Network/localNetworkGateways/lng-globex-aws",
+        ));
+        assert_edge(&builder, &vng, &hub, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &vng,
+            &Node::AzurePublicIpAddress(azure_networking_id(
+                "Microsoft.Network/publicIPAddresses/pip-globex-vpn",
+            )),
+            &Edge::HasIp,
+        );
+        assert_edge(&builder, &lng, &public("192.0.2.101"), &Edge::RoutesTo);
+        assert_edge(&builder, &spoke, &hub, &Edge::RoutesTo);
+        assert!(
+            !builder.has_edge(&hub, &spoke, &Edge::RoutesTo),
+            "only the side that uses the remote gateway routes through it"
+        );
+
+        let gcp_gateway = Node::GcpComputeVpnGateway(
+            "projects/globex-prod/regions/us-central1/vpnGateways/ha-gw-globex".into(),
+        );
+        assert_edge(
+            &builder,
+            &gcp_gateway,
+            &gcp_network_node(),
+            &Edge::AttachedTo,
+        );
+        assert_edge(&builder, &gcp_gateway, &gcp_address, &Edge::ConnectsTo);
+        let external = Node::GcpComputeExternalVpnGateway(
+            "projects/globex-prod/global/externalVpnGateways/aws-peer".into(),
+        );
+        assert_edge(&builder, &external, &public("192.0.2.103"), &Edge::RoutesTo);
+    }
+
+    fn gcp_network_node() -> Node {
+        Node::GcpComputeNetwork(gcp_network().into())
+    }
+
+    #[test]
+    fn only_a_working_vpn_is_projected() {
+        use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
+        use aws_sdk_ec2::types::{
+            AttachmentStatus, CustomerGateway, VpcAttachment, VpnConnection, VpnGateway, VpnState,
+        };
+
+        let builder = project_aws(vec![AmazonCollection::AmazonConnectivity(
+            AWSConnectivity {
+                vpn_gateways: vec![
+                    VpnGateway::builder()
+                        .vpn_gateway_id("vgw-detached")
+                        .state(VpnState::Available)
+                        .vpc_attachments(
+                            VpcAttachment::builder()
+                                .vpc_id("vpc-old")
+                                .state(AttachmentStatus::Detached)
+                                .build(),
+                        )
+                        .build(),
+                    VpnGateway::builder()
+                        .vpn_gateway_id("vgw-gone")
+                        .state(VpnState::Deleted)
+                        .build(),
+                ],
+                customer_gateways: vec![
+                    CustomerGateway::builder()
+                        .customer_gateway_id("cgw-gone")
+                        .ip_address("198.51.100.9")
+                        .state("deleted")
+                        .build(),
+                ],
+                vpn_connections: vec![
+                    VpnConnection::builder()
+                        .vpn_connection_id("vpn-pending")
+                        .state(VpnState::Pending)
+                        .customer_gateway_id("cgw-gone")
+                        .build(),
+                ],
+                ..Default::default()
+            },
+        )]);
+
+        assert_has_node(&builder, &Node::AwsEc2VpnGateway("vgw-detached".into()));
+        assert!(
+            !builder.contains(&Node::AwsEc2Vpc("vpc-old".into())),
+            "a detached gateway is not attached to the VPC"
+        );
+        for gone in [
+            Node::AwsEc2VpnGateway("vgw-gone".into()),
+            Node::AwsEc2CustomerGateway("cgw-gone".into()),
+            Node::AwsEc2VpnConnection("vpn-pending".into()),
+        ] {
+            assert!(!builder.contains(&gone), "{gone:?} is not available");
+        }
+    }
+
+    #[test]
+    fn an_expressroute_gateway_and_an_unconnected_peering_draw_no_vpn_join() {
+        use crate::api::azure::models::{
+            VirtualNetwork, VirtualNetworkGateway, VirtualNetworkPeering,
+        };
+        use crate::cloud::definition::{MicrosoftCollection, Provider};
+
+        let remote = azure_networking_id("Microsoft.Network/virtualNetworks/hub");
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::Azure(vec![
+                MicrosoftCollection::AzureVirtualNetworks(vec![VirtualNetwork {
+                    id: Some(
+                        azure_networking_id("Microsoft.Network/virtualNetworks/spoke").to_string(),
+                    ),
+                    peerings: vec![VirtualNetworkPeering {
+                        remote_id: Some(remote.to_string()),
+                        state: Some("Initiated".to_owned()),
+                        use_remote_gateways: true,
+                    }],
+                    ..Default::default()
+                }]),
+                MicrosoftCollection::AzureVirtualNetworkGateways(vec![VirtualNetworkGateway {
+                    id: Some(
+                        azure_networking_id("Microsoft.Network/virtualNetworkGateways/er")
+                            .to_string(),
+                    ),
+                    gateway_type: Some("ExpressRoute".to_owned()),
+                    ..Default::default()
+                }]),
+            ]),
+            &Settings::default(),
+        );
+
+        let spoke = Node::AzureVirtualNetwork(azure_networking_id(
+            "Microsoft.Network/virtualNetworks/spoke",
+        ));
+        assert!(!builder.has_edge(&spoke, &Node::AzureVirtualNetwork(remote), &Edge::RoutesTo));
+        assert!(
+            !builder.contains(&Node::AzureVirtualNetworkGateway(azure_networking_id(
+                "Microsoft.Network/virtualNetworkGateways/er"
+            )))
+        );
+    }
+
+    #[test]
+    fn an_azure_vpn_being_deleted_or_failed_is_not_projected() {
+        use crate::api::azure::models::{
+            LocalNetworkGateway, VirtualNetworkGateway, VpnConnection,
+        };
+        use crate::cloud::definition::{MicrosoftCollection, Provider};
+
+        let id = |rest: &str| Some(azure_networking_id(rest).to_string());
+        let gateway = |name: &str, state: &str| VirtualNetworkGateway {
+            id: id(&format!("Microsoft.Network/virtualNetworkGateways/{name}")),
+            gateway_type: Some("Vpn".to_owned()),
+            provisioning_state: Some(state.to_owned()),
+            subnet_ids: vec![
+                azure_networking_id(&format!(
+                    "Microsoft.Network/virtualNetworks/{name}/subnets/GatewaySubnet"
+                ))
+                .to_string(),
+            ],
+            ..Default::default()
+        };
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::Azure(vec![
+                MicrosoftCollection::AzureVirtualNetworkGateways(vec![
+                    gateway("updating", "Updating"),
+                    gateway("deleting", "Deleting"),
+                    gateway("failed", "failed"),
+                ]),
+                MicrosoftCollection::AzureLocalNetworkGateways(vec![LocalNetworkGateway {
+                    id: id("Microsoft.Network/localNetworkGateways/deleting"),
+                    gateway_ip_address: Some("192.0.2.50".to_owned()),
+                    provisioning_state: Some("Deleting".to_owned()),
+                    ..Default::default()
+                }]),
+                MicrosoftCollection::AzureVpnConnections(vec![VpnConnection {
+                    id: id("Microsoft.Network/connections/failed"),
+                    connection_type: Some("IPsec".to_owned()),
+                    provisioning_state: Some("Failed".to_owned()),
+                    gateway_id: id("Microsoft.Network/virtualNetworkGateways/updating"),
+                    ..Default::default()
+                }]),
+            ]),
+            &Settings::default(),
+        );
+
+        assert_edge(
+            &builder,
+            &Node::AzureVirtualNetworkGateway(azure_networking_id(
+                "Microsoft.Network/virtualNetworkGateways/updating",
+            )),
+            &Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/updating",
+            )),
+            &Edge::AttachedTo,
+        );
+        for gone in [
+            Node::AzureVirtualNetworkGateway(azure_networking_id(
+                "Microsoft.Network/virtualNetworkGateways/deleting",
+            )),
+            Node::AzureVirtualNetworkGateway(azure_networking_id(
+                "Microsoft.Network/virtualNetworkGateways/failed",
+            )),
+            Node::AzureLocalNetworkGateway(azure_networking_id(
+                "Microsoft.Network/localNetworkGateways/deleting",
+            )),
+            Node::AzureVpnConnection(azure_networking_id("Microsoft.Network/connections/failed")),
+        ] {
+            assert!(!builder.contains(&gone), "{gone:?} is going away");
+        }
+        assert!(!builder.contains(&public("192.0.2.50")));
+    }
+
+    #[test]
+    fn a_gcp_tunnel_is_projected_unless_it_is_being_built_or_torn_down() {
+        use crate::api::google::vpn::VpnTunnel;
+        use crate::cloud::definition::{GoogleCollection, Provider};
+
+        let link = |name: &str| format!("https://x/projects/p/regions/r/vpnTunnels/{name}");
+        let tunnel = |name: &str, status: &str| VpnTunnel {
+            self_link: Some(link(name)),
+            status: Some(status.to_owned()),
+            vpn_gateway: Some("https://x/projects/p/regions/r/vpnGateways/gw".to_owned()),
+            ..Default::default()
+        };
+        let statuses = [
+            ("established", "ESTABLISHED"),
+            ("no-packets", "NO_INCOMING_PACKETS"),
+            ("negotiation", "NEGOTIATION_FAILURE"),
+            ("provisioning", "PROVISIONING"),
+            ("allocating", "ALLOCATING_RESOURCES"),
+            ("deprovisioning", "DEPROVISIONING"),
+            ("failed", "FAILED"),
+        ];
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::GCP(vec![(
+                "p".to_owned(),
+                GoogleCollection::GoogleVpnTunnels(
+                    statuses
+                        .iter()
+                        .map(|(name, status)| tunnel(name, status))
+                        .collect(),
+                ),
+            )]),
+            &Settings::default(),
+        );
+
+        let gateway = Node::GcpComputeVpnGateway("projects/p/regions/r/vpnGateways/gw".into());
+        for (name, _) in &statuses[..3] {
+            assert_edge(
+                &builder,
+                &Node::GcpComputeVpnTunnel(
+                    format!("projects/p/regions/r/vpnTunnels/{name}").into(),
+                ),
+                &gateway,
+                &Edge::AttachedTo,
+            );
+        }
+        for (name, status) in &statuses[3..] {
+            let tunnel =
+                Node::GcpComputeVpnTunnel(format!("projects/p/regions/r/vpnTunnels/{name}").into());
+            assert!(!builder.contains(&tunnel), "a {status} tunnel is not built");
+        }
+    }
+
+    #[test]
     fn a_gateway_being_modified_still_joins_its_networks() {
         use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
         use aws_sdk_ec2::types::{

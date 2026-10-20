@@ -35,6 +35,41 @@ pub struct VirtualNetwork {
 pub struct VirtualNetworkPeering {
     pub remote_id: Option<String>,
     pub state: Option<String>,
+    pub use_remote_gateways: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualNetworkGateway {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub gateway_type: Option<String>,
+    pub provisioning_state: Option<String>,
+    pub subnet_ids: Vec<String>,
+    pub public_ip_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalNetworkGateway {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub gateway_ip_address: Option<String>,
+    pub provisioning_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VpnConnection {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub connection_type: Option<String>,
+    pub provisioning_state: Option<String>,
+    pub gateway_id: Option<String>,
+    pub local_gateway_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

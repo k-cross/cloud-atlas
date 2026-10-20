@@ -76,6 +76,9 @@ azure_types! {
     LoadBalancers => "microsoft.network/loadbalancers",
     NetworkSecurityGroups => "microsoft.network/networksecuritygroups",
     PublicIpAddresses => "microsoft.network/publicipaddresses",
+    VirtualNetworkGateways => "microsoft.network/virtualnetworkgateways",
+    LocalNetworkGateways => "microsoft.network/localnetworkgateways",
+    Connections => "microsoft.network/connections",
     StorageAccounts => "microsoft.storage/storageaccounts",
     ManagedClusters => "microsoft.containerservice/managedclusters",
     SqlServers => "microsoft.sql/servers",
@@ -112,6 +115,9 @@ pub fn map_resources(
     let mut balancers = Vec::new();
     let mut nsgs = Vec::new();
     let mut pips = Vec::new();
+    let mut vnet_gateways = Vec::new();
+    let mut local_gateways = Vec::new();
+    let mut vpn_connections = Vec::new();
     let mut storage = Vec::new();
     let mut aks = Vec::new();
     let mut sql = Vec::new();
@@ -225,6 +231,10 @@ pub fn map_resources(
                                         .and_then(|p| p.get("peeringState"))
                                         .and_then(|state| state.as_str())
                                         .map(str::to_owned),
+                                    use_remote_gateways: properties
+                                        .and_then(|p| p.get("useRemoteGateways"))
+                                        .and_then(|flag| flag.as_bool())
+                                        .unwrap_or(false),
                                 }
                             })
                             .collect()
@@ -236,6 +246,52 @@ pub fn map_resources(
                     location: res.location,
                     subnets: subnet_ids,
                     peerings,
+                });
+            }
+            AzureType::VirtualNetworkGateways => {
+                let properties = res.properties.as_ref();
+                let configurations = properties
+                    .and_then(|p| p.get("ipConfigurations"))
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|configuration| configuration.get("properties"));
+                let mut subnet_ids = Vec::new();
+                let mut public_ip_ids = Vec::new();
+                for configuration in configurations {
+                    subnet_ids.extend(referenced_id(Some(configuration), "subnet"));
+                    public_ip_ids.extend(referenced_id(Some(configuration), "publicIPAddress"));
+                }
+                vnet_gateways.push(VirtualNetworkGateway {
+                    gateway_type: property_text(properties, "gatewayType"),
+                    provisioning_state: property_text(properties, "provisioningState"),
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                    subnet_ids,
+                    public_ip_ids,
+                });
+            }
+            AzureType::LocalNetworkGateways => {
+                let properties = res.properties.as_ref();
+                local_gateways.push(LocalNetworkGateway {
+                    gateway_ip_address: property_text(properties, "gatewayIpAddress"),
+                    provisioning_state: property_text(properties, "provisioningState"),
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            AzureType::Connections => {
+                let properties = res.properties.as_ref();
+                vpn_connections.push(VpnConnection {
+                    gateway_id: referenced_id(properties, "virtualNetworkGateway1"),
+                    local_gateway_id: referenced_id(properties, "localNetworkGateway2"),
+                    connection_type: property_text(properties, "connectionType"),
+                    provisioning_state: property_text(properties, "provisioningState"),
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
                 });
             }
             AzureType::NetworkInterfaces => {
@@ -312,6 +368,9 @@ pub fn map_resources(
         MicrosoftCollection::AzureLoadBalancers(balancers),
         MicrosoftCollection::AzureNetworkSecurityGroups(nsgs),
         MicrosoftCollection::AzurePublicIpAddresses(pips),
+        MicrosoftCollection::AzureVirtualNetworkGateways(vnet_gateways),
+        MicrosoftCollection::AzureLocalNetworkGateways(local_gateways),
+        MicrosoftCollection::AzureVpnConnections(vpn_connections),
         MicrosoftCollection::AzureStorageAccounts(storage),
         MicrosoftCollection::AzureManagedClusters(aks),
         MicrosoftCollection::AzureSqlServers(sql),
@@ -345,6 +404,14 @@ pub fn map_resources(
     }
 
     (collections, report)
+}
+
+fn referenced_id(properties: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    properties?.get(key)?.get("id")?.as_str().map(str::to_owned)
+}
+
+fn property_text(properties: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    properties?.get(key)?.as_str().map(str::to_owned)
 }
 
 fn properties_of<T: serde::de::DeserializeOwned>(props: &serde_json::Value) -> Option<T> {
@@ -397,6 +464,9 @@ mod tests {
                 MicrosoftCollection::AzureLoadBalancers(items) => items.len(),
                 MicrosoftCollection::AzureNetworkSecurityGroups(items) => items.len(),
                 MicrosoftCollection::AzurePublicIpAddresses(items) => items.len(),
+                MicrosoftCollection::AzureVirtualNetworkGateways(items) => items.len(),
+                MicrosoftCollection::AzureLocalNetworkGateways(items) => items.len(),
+                MicrosoftCollection::AzureVpnConnections(items) => items.len(),
                 MicrosoftCollection::AzureStorageAccounts(items) => items.len(),
                 MicrosoftCollection::AzureManagedClusters(items) => items.len(),
                 MicrosoftCollection::AzureSqlServers(items) => items.len(),

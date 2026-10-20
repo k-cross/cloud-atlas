@@ -100,6 +100,9 @@ pub struct AWSConnectivity {
     pub peering_connections: Vec<aws_sdk_ec2::types::VpcPeeringConnection>,
     pub transit_gateways: Vec<aws_sdk_ec2::types::TransitGateway>,
     pub transit_gateway_attachments: Vec<aws_sdk_ec2::types::TransitGatewayAttachment>,
+    pub vpn_gateways: Vec<aws_sdk_ec2::types::VpnGateway>,
+    pub customer_gateways: Vec<aws_sdk_ec2::types::CustomerGateway>,
+    pub vpn_connections: Vec<aws_sdk_ec2::types::VpnConnection>,
 }
 
 #[derive(Debug)]
@@ -117,6 +120,9 @@ pub enum GoogleCollection {
     GoogleNetworks(Vec<crate::api::google::compute_network::Network>),
     GoogleSubnetworks(Vec<crate::api::google::compute_network::Subnetwork>),
     GoogleForwardingRules(Vec<crate::api::google::compute_network::ForwardingRule>),
+    GoogleVpnGateways(Vec<crate::api::google::vpn::VpnGateway>),
+    GoogleVpnTunnels(Vec<crate::api::google::vpn::VpnTunnel>),
+    GoogleExternalVpnGateways(Vec<crate::api::google::vpn::ExternalVpnGateway>),
 }
 
 #[derive(Debug)]
@@ -128,6 +134,9 @@ pub enum MicrosoftCollection {
     AzureLoadBalancers(Vec<crate::api::azure::models::LoadBalancer>),
     AzureNetworkSecurityGroups(Vec<crate::api::azure::models::NetworkSecurityGroup>),
     AzurePublicIpAddresses(Vec<crate::api::azure::models::PublicIpAddress>),
+    AzureVirtualNetworkGateways(Vec<crate::api::azure::models::VirtualNetworkGateway>),
+    AzureLocalNetworkGateways(Vec<crate::api::azure::models::LocalNetworkGateway>),
+    AzureVpnConnections(Vec<crate::api::azure::models::VpnConnection>),
     AzureStorageAccounts(Vec<crate::api::azure::models::StorageAccount>),
     AzureManagedClusters(Vec<crate::api::azure::models::ManagedCluster>),
     AzureSqlServers(Vec<crate::api::azure::models::SqlServer>),

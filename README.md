@@ -4,7 +4,7 @@ Discovers cloud configuration and maintains a live, in-memory property graph of 
 
 ## Architecture
 
-- **Typed graph:** 74 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
+- **Typed graph:** 83 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
 - **`AtlasEngine`:** Concurrent multi-cloud collection, structured failure reporting, and persistent graph state.
 - **Live backend (`atlas-server/`):** Reconciles against providers, diffs by stable resource key, and streams patches over WebSocket across three change tiers: control-plane event streams (Tier 1), flow-log liveness overlays (Tier 2), and full-scan polling (Tier 3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
 - **Liveness overlay:** Observed traffic lives beside the graph in a bounded, expiring `FlowIndex`. `Edge::TrafficFlow` asserts only that traffic occurred; counters and timestamps ride the snapshot's `observations` list.
@@ -24,7 +24,8 @@ Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together (e.
 - [ ] Tier-2 data-plane liveness overlay
   - [x] AWS VPC Flow Logs → S3 → SQS (`--aws-flow-log-queue`)
   - [ ] GCP and Azure flow logs
-- [ ] Cross-cloud VPNs, Direct Connect, ExpressRoute, and Cloud Interconnect
+- [x] Site-to-site VPNs across AWS, Azure, and GCP
+- [ ] Direct Connect, ExpressRoute, and Cloud Interconnect
 - [ ] On-prem discovery
 
 ## Providers

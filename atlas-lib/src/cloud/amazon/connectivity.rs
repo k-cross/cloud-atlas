@@ -36,6 +36,24 @@ pub mod collector {
                 .send()
                 .try_collect()
                 .await?,
+            vpn_gateways: client
+                .describe_vpn_gateways()
+                .send()
+                .await?
+                .vpn_gateways
+                .unwrap_or_default(),
+            customer_gateways: client
+                .describe_customer_gateways()
+                .send()
+                .await?
+                .customer_gateways
+                .unwrap_or_default(),
+            vpn_connections: client
+                .describe_vpn_connections()
+                .send()
+                .await?
+                .vpn_connections
+                .unwrap_or_default(),
         })
     }
 }

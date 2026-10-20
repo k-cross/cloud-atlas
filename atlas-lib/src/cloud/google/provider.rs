@@ -1,6 +1,6 @@
 use crate::Settings;
 use crate::api::google::client::GoogleApiClient;
-use crate::api::google::{compute, compute_network, dns, functions, gke, sql};
+use crate::api::google::{compute, compute_network, dns, functions, gke, sql, vpn};
 use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::collector::{NamedCollector, run_all};
 use crate::cloud::definition::{GoogleCollection, Provider};
@@ -65,6 +65,9 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
                 "networks" => GoogleCollection::GoogleNetworks, compute_network::list_networks(c, p),
                 "subnetworks" => GoogleCollection::GoogleSubnetworks, compute_network::list_subnetworks(c, p),
                 "forwarding_rules" => GoogleCollection::GoogleForwardingRules, compute_network::list_forwarding_rules(c, p),
+                "vpn_gateways" => GoogleCollection::GoogleVpnGateways, vpn::list_vpn_gateways(c, p),
+                "vpn_tunnels" => GoogleCollection::GoogleVpnTunnels, vpn::list_vpn_tunnels(c, p),
+                "external_vpn_gateways" => GoogleCollection::GoogleExternalVpnGateways, vpn::list_external_vpn_gateways(c, p),
             ];
 
             let (collections, local_report) = run_all(collectors, SOURCE, p).await;

@@ -263,17 +263,22 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
 }
 
+const AZURE_VPN_ADDRESS: &str = "198.51.100.60";
+const GCP_VPN_ADDRESS: &str = "198.51.100.70";
+const AWS_VPN_ADDRESSES: [&str; 3] = ["192.0.2.101", "192.0.2.102", "192.0.2.103"];
+
 pub fn aws() -> Provider {
     use aws_sdk_ec2::types::{
-        Address, GroupIdentifier, InstanceNetworkInterface, InternetGateway,
-        InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway, NatGatewayAddress,
-        NetworkInterface, NetworkInterfaceAssociation, NetworkInterfaceAttachment,
-        NetworkInterfacePrivateIpAddress, NetworkInterfaceType, Placement, Route, RouteState,
-        RouteTable, RouteTableAssociation, SecurityGroup, Tag, TransitGateway,
-        TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
-        TransitGatewayAttachmentState, TransitGatewayState, UserIdGroupPair, Vpc,
-        VpcPeeringConnection, VpcPeeringConnectionStateReason, VpcPeeringConnectionStateReasonCode,
-        VpcPeeringConnectionVpcInfo, builders::InstanceBuilder,
+        Address, AttachmentStatus, CustomerGateway, GroupIdentifier, InstanceNetworkInterface,
+        InternetGateway, InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway,
+        NatGatewayAddress, NetworkInterface, NetworkInterfaceAssociation,
+        NetworkInterfaceAttachment, NetworkInterfacePrivateIpAddress, NetworkInterfaceType,
+        Placement, Route, RouteState, RouteTable, RouteTableAssociation, SecurityGroup, Tag,
+        TransitGateway, TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
+        TransitGatewayAttachmentState, TransitGatewayState, TunnelOption, UserIdGroupPair, Vpc,
+        VpcAttachment, VpcPeeringConnection, VpcPeeringConnectionStateReason,
+        VpcPeeringConnectionStateReasonCode, VpcPeeringConnectionVpcInfo, VpnConnection,
+        VpnConnectionOptions, VpnGateway, VpnState, builders::InstanceBuilder,
     };
 
     let sg_web = GroupIdentifier::builder()
@@ -745,6 +750,54 @@ pub fn aws() -> Provider {
         attachment("tgw-attach-globex-shared", "vpc-globex-shared"),
     ];
 
+    let vpn_gateways = vec![
+        VpnGateway::builder()
+            .vpn_gateway_id("vgw-globex")
+            .state(VpnState::Available)
+            .vpc_attachments(
+                VpcAttachment::builder()
+                    .vpc_id(AWS_NETWORK)
+                    .state(AttachmentStatus::Attached)
+                    .build(),
+            )
+            .build(),
+    ];
+    let customer_gateway = |id: &str, ip: &str| {
+        CustomerGateway::builder()
+            .customer_gateway_id(id)
+            .ip_address(ip)
+            .state("available")
+            .build()
+    };
+    let customer_gateways = vec![
+        customer_gateway("cgw-globex-azure", AZURE_VPN_ADDRESS),
+        customer_gateway("cgw-globex-gcp", GCP_VPN_ADDRESS),
+    ];
+    let vpn_connection = |id: &str, cgw: &str, tunnels: &[&str]| {
+        let options = tunnels
+            .iter()
+            .fold(VpnConnectionOptions::builder(), |options, ip| {
+                options.tunnel_options(TunnelOption::builder().outside_ip_address(*ip).build())
+            });
+        VpnConnection::builder()
+            .vpn_connection_id(id)
+            .state(VpnState::Available)
+            .customer_gateway_id(cgw)
+            .options(options.build())
+    };
+    let vpn_connections = vec![
+        vpn_connection(
+            "vpn-globex-azure",
+            "cgw-globex-azure",
+            &[AWS_VPN_ADDRESSES[0], AWS_VPN_ADDRESSES[1]],
+        )
+        .vpn_gateway_id("vgw-globex")
+        .build(),
+        vpn_connection("vpn-globex-gcp", "cgw-globex-gcp", &[AWS_VPN_ADDRESSES[2]])
+            .transit_gateway_id("tgw-globex")
+            .build(),
+    ];
+
     let interface_in = |vpc: &str, id: &str, subnet: &str, ip: &str| {
         NetworkInterface::builder()
             .network_interface_id(id)
@@ -900,6 +953,9 @@ pub fn aws() -> Provider {
                 peering_connections,
                 transit_gateways,
                 transit_gateway_attachments,
+                vpn_gateways,
+                customer_gateways,
+                vpn_connections,
             }),
         ),
         (
@@ -926,6 +982,7 @@ pub fn gcp() -> Provider {
     use crate::api::google::run::Service;
     use crate::api::google::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
     use crate::api::google::storage::Bucket;
+    use crate::api::google::vpn::{ExternalVpnGateway, GatewayInterface, VpnGateway, VpnTunnel};
 
     let network_link = format!(
         "https://www.googleapis.com/compute/v1/projects/{}/global/networks/vpc-globex",
@@ -1069,6 +1126,42 @@ pub fn gcp() -> Provider {
         ..Default::default()
     };
 
+    let vpn_gateway_link = format!(
+        "https://www.googleapis.com/compute/v1/projects/{GCP_PROJECT}/regions/us-central1/vpnGateways/ha-gw-globex"
+    );
+    let external_gateway_link = format!(
+        "https://www.googleapis.com/compute/v1/projects/{GCP_PROJECT}/global/externalVpnGateways/aws-peer"
+    );
+    let vpn_gateway = VpnGateway {
+        name: Some("ha-gw-globex".to_owned()),
+        network: Some(net.self_link.clone().unwrap_or_default()),
+        self_link: Some(vpn_gateway_link.clone()),
+        vpn_interfaces: Some(vec![GatewayInterface {
+            id: Some(0),
+            ip_address: Some(GCP_VPN_ADDRESS.to_owned()),
+        }]),
+        ..Default::default()
+    };
+    let external_gateway = ExternalVpnGateway {
+        name: Some("aws-peer".to_owned()),
+        self_link: Some(external_gateway_link.clone()),
+        interfaces: Some(vec![GatewayInterface {
+            id: Some(0),
+            ip_address: Some(AWS_VPN_ADDRESSES[2].to_owned()),
+        }]),
+        ..Default::default()
+    };
+    let vpn_tunnel = VpnTunnel {
+        name: Some("tun-aws-0".to_owned()),
+        self_link: Some(format!(
+            "https://www.googleapis.com/compute/v1/projects/{GCP_PROJECT}/regions/us-central1/vpnTunnels/tun-aws-0"
+        )),
+        status: Some("ESTABLISHED".to_owned()),
+        vpn_gateway: Some(vpn_gateway_link),
+        peer_external_gateway: Some(external_gateway_link),
+        ..Default::default()
+    };
+
     let p = GCP_PROJECT.to_owned();
     Provider::GCP(vec![
         (p.clone(), GoogleCollection::GoogleInstances(vec![instance])),
@@ -1092,7 +1185,22 @@ pub fn gcp() -> Provider {
         ),
         (p.clone(), GoogleCollection::GoogleNetworks(vec![net])),
         (p.clone(), GoogleCollection::GoogleSubnetworks(vec![subnet])),
-        (p, GoogleCollection::GoogleForwardingRules(vec![fw_rule])),
+        (
+            p.clone(),
+            GoogleCollection::GoogleForwardingRules(vec![fw_rule]),
+        ),
+        (
+            p.clone(),
+            GoogleCollection::GoogleVpnGateways(vec![vpn_gateway]),
+        ),
+        (
+            p.clone(),
+            GoogleCollection::GoogleVpnTunnels(vec![vpn_tunnel]),
+        ),
+        (
+            p,
+            GoogleCollection::GoogleExternalVpnGateways(vec![external_gateway]),
+        ),
     ])
 }
 
@@ -1106,11 +1214,12 @@ pub fn azure() -> Provider {
         network_interfaces: vec![azure_id("Microsoft.Network/networkInterfaces/nic-worker")],
     };
 
-    let peering = |remote: &str, state: &str| VirtualNetworkPeering {
+    let peering = |remote: &str, state: &str, use_remote_gateways: bool| VirtualNetworkPeering {
         remote_id: Some(azure_id(&format!(
             "Microsoft.Network/virtualNetworks/{remote}"
         ))),
         state: Some(state.to_owned()),
+        use_remote_gateways,
     };
     let vnet = VirtualNetwork {
         id: Some(azure_id("Microsoft.Network/virtualNetworks/vnet-globex")),
@@ -1120,8 +1229,8 @@ pub fn azure() -> Provider {
             "Microsoft.Network/virtualNetworks/vnet-globex/subnets/default",
         )],
         peerings: vec![
-            peering("vnet-globex-hub", "Connected"),
-            peering("vnet-globex-dr", "Initiated"),
+            peering("vnet-globex-hub", "Connected", true),
+            peering("vnet-globex-dr", "Initiated", false),
         ],
     };
     let hub = VirtualNetwork {
@@ -1131,7 +1240,7 @@ pub fn azure() -> Provider {
         name: Some("vnet-globex-hub".to_owned()),
         location: Some("eastus".to_owned()),
         subnets: Vec::new(),
-        peerings: vec![peering("vnet-globex", "Connected")],
+        peerings: vec![peering("vnet-globex", "Connected", false)],
     };
 
     let subnet = Subnet {
@@ -1175,6 +1284,47 @@ pub fn azure() -> Provider {
         id: Some(azure_id("Microsoft.Network/publicIPAddresses/pip-globex")),
         name: Some("pip-globex".to_owned()),
         ip_address: Some("198.51.100.10".to_owned()),
+    };
+
+    let vpn_pip = PublicIpAddress {
+        id: Some(azure_id(
+            "Microsoft.Network/publicIPAddresses/pip-globex-vpn",
+        )),
+        name: Some("pip-globex-vpn".to_owned()),
+        ip_address: Some(AZURE_VPN_ADDRESS.to_owned()),
+    };
+    let vpn_gateway = VirtualNetworkGateway {
+        id: Some(azure_id(
+            "Microsoft.Network/virtualNetworkGateways/vng-globex-hub",
+        )),
+        name: Some("vng-globex-hub".to_owned()),
+        location: Some("eastus".to_owned()),
+        gateway_type: Some("Vpn".to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+        subnet_ids: vec![azure_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex-hub/subnets/GatewaySubnet",
+        )],
+        public_ip_ids: vec![azure_id(
+            "Microsoft.Network/publicIPAddresses/pip-globex-vpn",
+        )],
+    };
+    let local_gateway = LocalNetworkGateway {
+        id: Some(azure_id(
+            "Microsoft.Network/localNetworkGateways/lng-globex-aws",
+        )),
+        name: Some("lng-globex-aws".to_owned()),
+        location: Some("eastus".to_owned()),
+        gateway_ip_address: Some(AWS_VPN_ADDRESSES[0].to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+    };
+    let vpn_connection = VpnConnection {
+        id: Some(azure_id("Microsoft.Network/connections/conn-globex-aws")),
+        name: Some("conn-globex-aws".to_owned()),
+        location: Some("eastus".to_owned()),
+        connection_type: Some("IPsec".to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+        gateway_id: vpn_gateway.id.clone(),
+        local_gateway_id: local_gateway.id.clone(),
     };
 
     let ip_configuration = |name: &str,
@@ -1321,7 +1471,10 @@ pub fn azure() -> Provider {
         MicrosoftCollection::AzureNetworkInterfaces(vec![nic]),
         MicrosoftCollection::AzureLoadBalancers(vec![balancer]),
         MicrosoftCollection::AzureNetworkSecurityGroups(vec![nsg]),
-        MicrosoftCollection::AzurePublicIpAddresses(vec![pip]),
+        MicrosoftCollection::AzurePublicIpAddresses(vec![pip, vpn_pip]),
+        MicrosoftCollection::AzureVirtualNetworkGateways(vec![vpn_gateway]),
+        MicrosoftCollection::AzureLocalNetworkGateways(vec![local_gateway]),
+        MicrosoftCollection::AzureVpnConnections(vec![vpn_connection]),
         MicrosoftCollection::AzureStorageAccounts(vec![storage]),
         MicrosoftCollection::AzureManagedClusters(vec![aks]),
         MicrosoftCollection::AzureSqlServers(vec![sql]),

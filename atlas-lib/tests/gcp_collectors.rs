@@ -90,6 +90,93 @@ async fn compute_forwarding_rules_aggregated() {
 }
 
 #[tokio::test]
+async fn vpn_gateways_aggregated() {
+    use atlas_lib::api::google::vpn::list_vpn_gateways;
+    let (_s, c) = serve(
+        "/compute/v1/projects/p/aggregated/vpnGateways",
+        json!({ "items": {
+            "regions/us-central1": { "vpnGateways": [ {
+                "name": "ha-gw",
+                "network": "https://x/projects/p/global/networks/vpc",
+                "selfLink": "https://x/projects/p/regions/us-central1/vpnGateways/ha-gw",
+                "vpnInterfaces": [ { "id": 0, "ipAddress": "198.51.100.70" } ]
+            } ] },
+            "regions/empty": { "warning": { "code": "NO_RESULTS_ON_PAGE" } }
+        } }),
+    )
+    .await;
+    let gateways = list_vpn_gateways(&c, "p").await.expect("ok");
+    assert_eq!(gateways.len(), 1, "empty scope skipped");
+    assert_eq!(
+        gateways[0].self_link.as_deref(),
+        Some("https://x/projects/p/regions/us-central1/vpnGateways/ha-gw")
+    );
+    assert_eq!(
+        gateways[0].network.as_deref(),
+        Some("https://x/projects/p/global/networks/vpc")
+    );
+    assert_eq!(
+        gateways[0].vpn_interfaces.as_ref().unwrap()[0]
+            .ip_address
+            .as_deref(),
+        Some("198.51.100.70")
+    );
+}
+
+#[tokio::test]
+async fn vpn_tunnels_and_external_gateways() {
+    use atlas_lib::api::google::vpn::{list_external_vpn_gateways, list_vpn_tunnels};
+    let (_s, c) = serve(
+        "/compute/v1/projects/p/aggregated/vpnTunnels",
+        json!({ "items": {
+            "regions/us-central1": { "vpnTunnels": [ {
+                "name": "tun",
+                "selfLink": "https://x/projects/p/regions/us-central1/vpnTunnels/tun",
+                "status": "NO_INCOMING_PACKETS",
+                "vpnGateway": "https://x/projects/p/regions/us-central1/vpnGateways/ha-gw",
+                "peerExternalGateway": "https://x/projects/p/global/externalVpnGateways/aws-peer"
+            } ] }
+        } }),
+    )
+    .await;
+    let tunnels = list_vpn_tunnels(&c, "p").await.expect("ok");
+    assert_eq!(
+        tunnels[0].self_link.as_deref(),
+        Some("https://x/projects/p/regions/us-central1/vpnTunnels/tun")
+    );
+    assert_eq!(tunnels[0].status.as_deref(), Some("NO_INCOMING_PACKETS"));
+    assert_eq!(
+        tunnels[0].vpn_gateway.as_deref(),
+        Some("https://x/projects/p/regions/us-central1/vpnGateways/ha-gw")
+    );
+    assert_eq!(
+        tunnels[0].peer_external_gateway.as_deref(),
+        Some("https://x/projects/p/global/externalVpnGateways/aws-peer")
+    );
+
+    let (_s, c) = serve(
+        "/compute/v1/projects/p/global/externalVpnGateways",
+        json!({ "items": [ {
+            "name": "aws-peer",
+            "selfLink": "https://x/projects/p/global/externalVpnGateways/aws-peer",
+            "interfaces": [ { "id": 0, "ipAddress": "192.0.2.103" } ]
+        } ] }),
+    )
+    .await;
+    let external = list_external_vpn_gateways(&c, "p").await.expect("ok");
+    assert_eq!(
+        external[0].self_link.as_deref(),
+        Some("https://x/projects/p/global/externalVpnGateways/aws-peer")
+    );
+    assert_eq!(
+        external[0].interfaces.as_ref().unwrap()[0]
+            .ip_address
+            .as_deref(),
+        Some("192.0.2.103")
+    );
+}
+
+#[tokio::test]
 async fn dns_managed_zones() {
     use atlas_lib::api::google::dns::list_managed_zones;
     let (_s, c) = serve(

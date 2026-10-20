@@ -229,7 +229,86 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                 }
             }
         }
+        GoogleCollection::GoogleVpnGateways(gateways) => {
+            for gateway in gateways {
+                let Some(link) = &gateway.self_link else {
+                    continue;
+                };
+                let id = canonical_resource(link);
+                let idx = builder.get_or_add_node(Node::GcpComputeVpnGateway(id.clone()));
+                let scope = address_scope(gateway.network.as_deref(), project, &id);
+                if gateway.network.is_some() {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeNetwork(scope.clone()),
+                        Edge::AttachedTo,
+                    );
+                }
+                for address in gateway
+                    .vpn_interfaces
+                    .iter()
+                    .flatten()
+                    .filter_map(|interface| interface.ip_address.as_deref())
+                {
+                    builder.link_to(idx, Node::ip(address, &scope), Edge::ConnectsTo);
+                }
+            }
+        }
+        GoogleCollection::GoogleVpnTunnels(tunnels) => {
+            for tunnel in tunnels
+                .iter()
+                .filter(|tunnel| tunnel_provisioned(tunnel.status.as_deref()))
+            {
+                let Some(link) = &tunnel.self_link else {
+                    continue;
+                };
+                let idx =
+                    builder.get_or_add_node(Node::GcpComputeVpnTunnel(canonical_resource(link)));
+                if let Some(gateway) = &tunnel.vpn_gateway {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeVpnGateway(canonical_resource(gateway)),
+                        Edge::AttachedTo,
+                    );
+                }
+                if let Some(peer) = &tunnel.peer_external_gateway {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeExternalVpnGateway(canonical_resource(peer)),
+                        Edge::AttachedTo,
+                    );
+                }
+            }
+        }
+        GoogleCollection::GoogleExternalVpnGateways(gateways) => {
+            for gateway in gateways {
+                let Some(link) = &gateway.self_link else {
+                    continue;
+                };
+                let id = canonical_resource(link);
+                let idx = builder.get_or_add_node(Node::GcpComputeExternalVpnGateway(id.clone()));
+                for address in gateway
+                    .interfaces
+                    .iter()
+                    .flatten()
+                    .filter_map(|interface| interface.ip_address.as_deref())
+                {
+                    builder.link_to(idx, Node::ip(address, &id), Edge::RoutesTo);
+                }
+            }
+        }
     }
+}
+
+fn tunnel_provisioned(status: Option<&str>) -> bool {
+    !matches!(
+        status,
+        Some("PROVISIONING" | "ALLOCATING_RESOURCES" | "DEPROVISIONING" | "FAILED")
+    )
+}
+
+fn canonical_resource(link: &str) -> Arc<str> {
+    link.find("projects/").map_or(link, |at| &link[at..]).into()
 }
 
 fn canonical_network(network: &str, project: &str) -> Arc<str> {
