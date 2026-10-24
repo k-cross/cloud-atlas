@@ -5,18 +5,19 @@ use petgraph::visit::EdgeRef;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Side {
-    Mesh,
-    Holds,
-    Names,
+enum Connector {
+    Hub(NodeIndex),
+    Tunnel { naming: NodeIndex, named: NodeIndex },
 }
 
-impl Side {
-    fn partner(self) -> Side {
+impl Connector {
+    fn partner(self) -> Connector {
         match self {
-            Side::Mesh => Side::Mesh,
-            Side::Holds => Side::Names,
-            Side::Names => Side::Holds,
+            Connector::Hub(hub) => Connector::Hub(hub),
+            Connector::Tunnel { naming, named } => Connector::Tunnel {
+                naming: named,
+                named: naming,
+            },
         }
     }
 }
@@ -40,7 +41,7 @@ enum Join {
     },
     Tunnel {
         network: &'static str,
-        gateways: &'static [&'static [Step]],
+        ends: &'static [&'static [Step]],
         holds: &'static [Step],
         names: &'static [Step],
     },
@@ -63,23 +64,25 @@ const JOINS: &[Join] = &[
     },
     Join::Tunnel {
         network: "AwsEc2Vpc",
-        gateways: &[
-            &[step(Edge::AttachedTo, "AwsEc2VpnGateway")],
-            &[step(Edge::AttachedTo, "AwsEc2TransitGateway")],
+        ends: &[
+            &[
+                step(Edge::AttachedTo, "AwsEc2VpnGateway"),
+                step(Edge::AttachedTo, "AwsEc2VpnConnection"),
+            ],
+            &[
+                step(Edge::AttachedTo, "AwsEc2TransitGateway"),
+                step(Edge::AttachedTo, "AwsEc2VpnConnection"),
+            ],
         ],
-        holds: &[
-            step(Edge::AttachedTo, "AwsEc2VpnConnection"),
-            step(Edge::ConnectsTo, "GenericIpAddress"),
-        ],
+        holds: &[step(Edge::ConnectsTo, "GenericIpAddress")],
         names: &[
-            step(Edge::AttachedTo, "AwsEc2VpnConnection"),
             step(Edge::AttachedTo, "AwsEc2CustomerGateway"),
             step(Edge::RoutesTo, "GenericIpAddress"),
         ],
     },
     Join::Tunnel {
         network: "AzureVirtualNetwork",
-        gateways: &[
+        ends: &[
             &[step(Edge::AttachedTo, "AzureVirtualNetworkGateway")],
             &[
                 step(Edge::RoutesTo, "AzureVirtualNetwork"),
@@ -98,7 +101,7 @@ const JOINS: &[Join] = &[
     },
     Join::Tunnel {
         network: "GcpComputeNetwork",
-        gateways: &[&[step(Edge::AttachedTo, "GcpComputeVpnGateway")]],
+        ends: &[&[step(Edge::AttachedTo, "GcpComputeVpnGateway")]],
         holds: &[step(Edge::ConnectsTo, "GenericIpAddress")],
         names: &[
             step(Edge::AttachedTo, "GcpComputeVpnTunnel"),
@@ -110,8 +113,29 @@ const JOINS: &[Join] = &[
 
 #[derive(Default)]
 pub(super) struct Joins<'g> {
-    members: HashMap<&'g str, HashSet<(NodeIndex, Side)>>,
+    members: HashMap<&'g str, HashSet<Connector>>,
     peers: HashMap<&'g str, HashSet<&'g str>>,
+}
+
+struct TunnelEnd<'g> {
+    networks: HashSet<&'g str>,
+    holds: Vec<NodeIndex>,
+    names: Vec<NodeIndex>,
+}
+
+impl TunnelEnd<'_> {
+    fn of(graph: &Graph<Node, Edge>, end: NodeIndex, holds: &[Step], names: &[Step]) -> Self {
+        let reach = |path: &[Step]| {
+            let mut addresses = Vec::new();
+            follow(graph, end, path, &mut addresses);
+            addresses
+        };
+        TunnelEnd {
+            networks: HashSet::new(),
+            holds: reach(holds),
+            names: reach(names),
+        }
+    }
 }
 
 impl<'g> Joins<'g> {
@@ -123,6 +147,7 @@ impl<'g> Joins<'g> {
         let nodes_of = |kind: &str| by_kind.get(kind).map_or(&[][..], Vec::as_slice);
 
         let mut joins = Joins::default();
+        let mut tunnel_ends: HashMap<NodeIndex, TunnelEnd> = HashMap::new();
         for join in JOINS {
             match join {
                 Join::Through { network, connector } => {
@@ -132,7 +157,7 @@ impl<'g> Joins<'g> {
                                 .members
                                 .entry(member)
                                 .or_default()
-                                .insert((hub, Side::Mesh));
+                                .insert(Connector::Hub(hub));
                         }
                     }
                 }
@@ -149,7 +174,7 @@ impl<'g> Joins<'g> {
                 }
                 Join::Tunnel {
                     network,
-                    gateways,
+                    ends,
                     holds,
                     names,
                 } => {
@@ -158,27 +183,47 @@ impl<'g> Joins<'g> {
                             continue;
                         };
                         let mut reached = Vec::new();
-                        for path in *gateways {
+                        for path in *ends {
                             follow(graph, start, path, &mut reached);
                         }
-                        for (side, path) in [(Side::Holds, holds), (Side::Names, names)] {
-                            let mut pivots = Vec::new();
-                            for &gateway in &reached {
-                                follow(graph, gateway, path, &mut pivots);
-                            }
-                            for pivot in pivots {
-                                joins
-                                    .members
-                                    .entry(scope)
-                                    .or_default()
-                                    .insert((pivot, side));
-                            }
+                        for end in reached {
+                            tunnel_ends
+                                .entry(end)
+                                .or_insert_with(|| TunnelEnd::of(graph, end, holds, names))
+                                .networks
+                                .insert(scope);
                         }
                     }
                 }
             }
         }
+        joins.pair(&tunnel_ends);
         joins
+    }
+
+    fn pair(&mut self, tunnel_ends: &HashMap<NodeIndex, TunnelEnd<'g>>) {
+        let mut holders: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+        for (&end, tunnel_end) in tunnel_ends {
+            for &address in &tunnel_end.holds {
+                holders.entry(address).or_default().push(end);
+            }
+        }
+        for (&naming, naming_end) in tunnel_ends {
+            let named_ends = naming_end
+                .names
+                .iter()
+                .filter_map(|address| holders.get(address))
+                .flatten()
+                .filter(|&&named| named != naming);
+            for &named in named_ends {
+                for &network in &naming_end.networks {
+                    self.members
+                        .entry(network)
+                        .or_default()
+                        .insert(Connector::Tunnel { naming, named });
+                }
+            }
+        }
     }
 
     pub(super) fn is_empty(&self) -> bool {
@@ -195,7 +240,7 @@ impl<'g> Joins<'g> {
         match (self.members.get(a), self.members.get(b)) {
             (Some(left), Some(right)) => left
                 .iter()
-                .any(|(connector, side)| right.contains(&(*connector, side.partner()))),
+                .any(|connector| right.contains(&connector.partner())),
             _ => false,
         }
     }
@@ -302,7 +347,7 @@ mod tests {
                 Join::Direct { network } => (*network, Vec::new()),
                 Join::Tunnel {
                     network,
-                    gateways,
+                    ends,
                     holds,
                     names,
                 } => {
@@ -313,12 +358,7 @@ mod tests {
                             "a tunnel meets at a public address"
                         );
                     }
-                    let steps = gateways
-                        .iter()
-                        .copied()
-                        .flatten()
-                        .chain(*holds)
-                        .chain(*names);
+                    let steps = ends.iter().copied().flatten().chain(*holds).chain(*names);
                     (*network, steps.map(|step| step.kind).collect())
                 }
             };
@@ -416,26 +456,32 @@ mod tests {
         Node::public_ip(address).expect("a public address")
     }
 
-    fn aws_names(builder: &mut GraphBuilder, vpc_id: &str, tag: &str, far: &str) {
-        let vgw = builder.get_or_add_node(Node::AwsEc2VpnGateway(format!("vgw-{tag}").into()));
-        builder.link_to(vgw, vpc(vpc_id), Edge::AttachedTo);
+    fn vpn_gateway(builder: &mut GraphBuilder, vpc_id: &str) -> Node {
+        let gateway = Node::AwsEc2VpnGateway(format!("vgw-{vpc_id}").into());
+        let index = builder.get_or_add_node(gateway.clone());
+        builder.link_to(index, vpc(vpc_id), Edge::AttachedTo);
+        gateway
+    }
+
+    fn vpn_connection(builder: &mut GraphBuilder, on: Node, tag: &str, holds: &str, names: &str) {
         let connection =
             builder.get_or_add_node(Node::AwsEc2VpnConnection(format!("vpn-{tag}").into()));
-        builder.link_to(
-            connection,
-            Node::AwsEc2VpnGateway(format!("vgw-{tag}").into()),
-            Edge::AttachedTo,
-        );
-        let cgw = builder.get_or_add_node(Node::AwsEc2CustomerGateway(format!("cgw-{tag}").into()));
-        builder.link_to(
+        builder.link_to(connection, on, Edge::AttachedTo);
+        builder.link_to(connection, public(holds), Edge::ConnectsTo);
+        let customer_gateway = builder.link_to(
             connection,
             Node::AwsEc2CustomerGateway(format!("cgw-{tag}").into()),
             Edge::AttachedTo,
         );
-        builder.link_to(cgw, public(far), Edge::RoutesTo);
+        builder.link_to(customer_gateway, public(names), Edge::RoutesTo);
     }
 
-    fn azure_holds(builder: &mut GraphBuilder, vnet: &str, address: &str) -> NodeIndex {
+    fn aws_end(builder: &mut GraphBuilder, vpc_id: &str, holds: &str, names: &str) {
+        let gateway = vpn_gateway(builder, vpc_id);
+        vpn_connection(builder, gateway, vpc_id, holds, names);
+    }
+
+    fn azure_gateway(builder: &mut GraphBuilder, vnet: &str, holds: &str) {
         let gateway = builder.get_or_add_node(Node::AzureVirtualNetworkGateway(
             format!("vng-{vnet}").into(),
         ));
@@ -449,15 +495,31 @@ mod tests {
             Node::AzurePublicIpAddress(format!("pip-{vnet}").into()),
             Edge::HasIp,
         );
-        builder.link_to(pip, public(address), Edge::ConnectsTo);
-        gateway
+        builder.link_to(pip, public(holds), Edge::ConnectsTo);
+    }
+
+    fn azure_connection(builder: &mut GraphBuilder, vnet: &str, tag: &str, names: &str) {
+        let connection =
+            builder.get_or_add_node(Node::AzureVpnConnection(format!("conn-{tag}").into()));
+        builder.link_to(
+            connection,
+            Node::AzureVirtualNetworkGateway(format!("vng-{vnet}").into()),
+            Edge::AttachedTo,
+        );
+        let local_gateway = builder.link_to(
+            connection,
+            Node::AzureLocalNetworkGateway(format!("lng-{tag}").into()),
+            Edge::AttachedTo,
+        );
+        builder.link_to(local_gateway, public(names), Edge::RoutesTo);
     }
 
     #[test]
-    fn a_tunnel_joins_the_network_that_holds_the_address_to_the_one_that_names_it() {
+    fn a_tunnel_joins_the_networks_at_its_two_ends() {
         let mut builder = GraphBuilder::new();
-        aws_names(&mut builder, "vpc-a", "a", "198.51.100.9");
-        azure_holds(&mut builder, "vnet-hub", "198.51.100.9");
+        aws_end(&mut builder, "vpc-a", "192.0.2.1", "198.51.100.9");
+        azure_gateway(&mut builder, "vnet-hub", "198.51.100.9");
+        azure_connection(&mut builder, "vnet-hub", "a", "192.0.2.1");
 
         let joins = Joins::of(&builder.graph);
 
@@ -466,11 +528,63 @@ mod tests {
     }
 
     #[test]
-    fn two_networks_naming_the_same_gateway_are_not_joined_to_each_other() {
+    fn a_tunnel_configured_at_one_end_joins_nothing() {
         let mut builder = GraphBuilder::new();
-        aws_names(&mut builder, "vpc-a", "a", "198.51.100.9");
-        aws_names(&mut builder, "vpc-b", "b", "198.51.100.9");
-        azure_holds(&mut builder, "vnet-hub", "198.51.100.9");
+        aws_end(&mut builder, "vpc-a", "192.0.2.1", "198.51.100.9");
+        azure_gateway(&mut builder, "vnet-hub", "198.51.100.9");
+        aws_end(&mut builder, "vpc-b", "192.0.2.2", "203.0.113.200");
+        azure_gateway(&mut builder, "vnet-spoke", "198.51.100.10");
+        azure_connection(&mut builder, "vnet-spoke", "b", "192.0.2.2");
+
+        let joins = Joins::of(&builder.graph);
+
+        assert!(
+            !joins.joined("vpc-a", "vnet-hub"),
+            "the Azure gateway names no AWS address"
+        );
+        assert!(
+            !joins.joined("vpc-b", "vnet-spoke"),
+            "the AWS connection names an address Azure does not hold"
+        );
+    }
+
+    #[test]
+    fn a_gateway_pairs_each_of_its_connections_on_its_own() {
+        let mut builder = GraphBuilder::new();
+        let gateway = vpn_gateway(&mut builder, "vpc-a");
+        vpn_connection(
+            &mut builder,
+            gateway.clone(),
+            "to-azure",
+            "192.0.2.1",
+            "198.51.100.9",
+        );
+        vpn_connection(
+            &mut builder,
+            gateway,
+            "to-office",
+            "192.0.2.2",
+            "203.0.113.200",
+        );
+        azure_gateway(&mut builder, "vnet-hub", "198.51.100.9");
+        azure_connection(&mut builder, "vnet-hub", "office", "192.0.2.2");
+
+        let joins = Joins::of(&builder.graph);
+
+        assert!(
+            !joins.joined("vpc-a", "vnet-hub"),
+            "the connection Azure names does not name Azure"
+        );
+    }
+
+    #[test]
+    fn two_networks_tunnelled_to_the_same_gateway_are_not_joined_to_each_other() {
+        let mut builder = GraphBuilder::new();
+        aws_end(&mut builder, "vpc-a", "192.0.2.1", "198.51.100.9");
+        aws_end(&mut builder, "vpc-b", "192.0.2.2", "198.51.100.9");
+        azure_gateway(&mut builder, "vnet-hub", "198.51.100.9");
+        azure_connection(&mut builder, "vnet-hub", "a", "192.0.2.1");
+        azure_connection(&mut builder, "vnet-hub", "b", "192.0.2.2");
 
         let joins = Joins::of(&builder.graph);
 
@@ -481,7 +595,7 @@ mod tests {
     #[test]
     fn a_tunnel_to_a_gateway_the_scan_does_not_model_joins_nothing() {
         let mut builder = GraphBuilder::new();
-        aws_names(&mut builder, "vpc-a", "a", "198.51.100.9");
+        aws_end(&mut builder, "vpc-a", "192.0.2.1", "198.51.100.9");
 
         let joins = Joins::of(&builder.graph);
 
@@ -492,8 +606,9 @@ mod tests {
     #[test]
     fn only_a_peering_that_uses_remote_gateways_rides_the_hub_gateway() {
         let mut builder = GraphBuilder::new();
-        aws_names(&mut builder, "vpc-a", "a", "198.51.100.9");
-        azure_holds(&mut builder, "vnet-hub", "198.51.100.9");
+        aws_end(&mut builder, "vpc-a", "192.0.2.1", "198.51.100.9");
+        azure_gateway(&mut builder, "vnet-hub", "198.51.100.9");
+        azure_connection(&mut builder, "vnet-hub", "a", "192.0.2.1");
         let hub = builder.get_or_add_node(Node::AzureVirtualNetwork("vnet-hub".into()));
         builder.link_to(
             hub,
@@ -526,21 +641,22 @@ mod tests {
             Node::AwsEc2TransitGateway("tgw-1".into()),
             &["vpc-a", "vpc-b"],
         );
-        let connection = builder.get_or_add_node(Node::AwsEc2VpnConnection("vpn-1".into()));
-        builder.link_to(
-            connection,
+        vpn_connection(
+            &mut builder,
             Node::AwsEc2TransitGateway("tgw-1".into()),
-            Edge::AttachedTo,
+            "tgw",
+            "192.0.2.1",
+            "203.0.113.20",
         );
-        builder.link_to(connection, public("203.0.113.9"), Edge::ConnectsTo);
         let gcp = builder.get_or_add_node(Node::GcpComputeVpnGateway("ha-1".into()));
         builder.link_to(
             gcp,
             Node::GcpComputeNetwork("net-gcp".into()),
             Edge::AttachedTo,
         );
+        builder.link_to(gcp, public("203.0.113.20"), Edge::ConnectsTo);
         let external = builder.get_or_add_node(Node::GcpComputeExternalVpnGateway("peer".into()));
-        builder.link_to(external, public("203.0.113.9"), Edge::RoutesTo);
+        builder.link_to(external, public("192.0.2.1"), Edge::RoutesTo);
         let tunnel = builder.get_or_add_node(Node::GcpComputeVpnTunnel("tun-1".into()));
         builder.link_to(
             tunnel,

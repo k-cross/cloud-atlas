@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 79d6185b89779893fd1c49adb532db8da952077e6f8deb2d79739c24fb583d26 # shrinks to (connections, gateway_names, holds, reader) = ([(0, None), (0, Some(0))], [{0}, {}], [true, false], 0)
+cc 59a8eabf045e0af595b6cb45253463da9374cb296e8c86abceb66cca4ea37eec # shrinks to (connections, gateway_names, holds, reader) = ([(0, Some(0))], [{0}], [true], 0)

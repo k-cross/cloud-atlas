@@ -717,6 +717,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_tunnel_whose_far_end_is_going_away_resolves_nothing() {
+        use crate::cloud::definition::{GoogleCollection, MicrosoftCollection, Provider};
+
+        let azure_vm = Node::AzureVirtualMachine(azure_networking_id(
+            "Microsoft.Compute/virtualMachines/vm-worker",
+        ));
+        let cloud_sql = Node::GcpSqlInstance("globex-analytics-db".into());
+        let web01 = Node::AwsEc2Instance("i-globex-web-01".into());
+        let web02 = Node::AwsEc2Instance("i-globex-web-02".into());
+
+        let azure_connection_deleting =
+            fixtures::build_graph_of(fixtures::all().into_iter().map(|provider| match provider {
+                Provider::Azure(mut collections) => {
+                    for collection in &mut collections {
+                        if let MicrosoftCollection::AzureVpnConnections(connections) = collection {
+                            for connection in connections {
+                                connection.provisioning_state = Some("Deleting".to_owned());
+                            }
+                        }
+                    }
+                    Provider::Azure(collections)
+                }
+                other => other,
+            }));
+        assert!(!serves(&azure_connection_deleting, &web01, &azure_vm));
+        assert!(
+            serves(&azure_connection_deleting, &web02, &cloud_sql),
+            "only the Azure tunnel lost an end"
+        );
+
+        let gcp_tunnel_failed =
+            fixtures::build_graph_of(fixtures::all().into_iter().map(|provider| match provider {
+                Provider::GCP(mut collections) => {
+                    for (_, collection) in &mut collections {
+                        if let GoogleCollection::GoogleVpnTunnels(tunnels) = collection {
+                            for tunnel in tunnels {
+                                tunnel.status = Some("FAILED".to_owned());
+                            }
+                        }
+                    }
+                    Provider::GCP(collections)
+                }
+                other => other,
+            }));
+        assert!(!serves(&gcp_tunnel_failed, &web02, &cloud_sql));
+        assert!(
+            serves(&gcp_tunnel_failed, &web01, &azure_vm),
+            "only the GCP tunnel lost an end"
+        );
+    }
+
     fn overlapping_estate(target_running: bool) -> GraphBuilder {
         let mut running = vec!["i-other"];
         if target_running {

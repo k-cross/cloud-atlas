@@ -30,7 +30,7 @@ Joins project as standard graph edges using existing `Edge` kinds:
 
 ## 3. Site-to-Site VPN
 
-A tunnel is stitched through public addresses both ends already name (rule 5). Each side's gateway *holds* its own public address (`ConnectsTo`); the far side *names* it (`RoutesTo`, since naming is not holding). The two views meet on one `GenericIpAddress`, which is the connector.
+A tunnel is stitched through public addresses both ends already name (rule 5). Each end *holds* its own public address (`ConnectsTo`) and *names* the far end's as its peer (`RoutesTo`, since naming is not holding). A tunnel exists only when each end names an address the other holds, since IPsec needs both ends configured.
 
 | Cloud | Collected | Projected |
 |---|---|---|
@@ -38,7 +38,7 @@ A tunnel is stitched through public addresses both ends already name (rule 5). E
 | **Azure** | ARG `virtualnetworkgateways`, `localnetworkgateways`, `connections` | `Vng -AttachedTo-> VNet` (from its subnet id); `Vng -HasIp-> AzurePublicIpAddress`; `Connection -AttachedTo->` its `Vng` and `Lng`; `Lng -RoutesTo->` its `gatewayIpAddress`; a Connected peering with `useRemoteGateways` also projects `spoke -RoutesTo-> hub`. ExpressRoute gateways and connections are skipped, as is any gateway, local gateway or connection whose `provisioningState` is `Deleting` or `Failed` |
 | **GCP** | `aggregated/vpnGateways`, `aggregated/vpnTunnels`, `global/externalVpnGateways` | `VpnGateway -AttachedTo-> Network`; `VpnGateway -ConnectsTo->` each interface address; `Tunnel -AttachedTo->` its `VpnGateway` and `ExternalVpnGateway`; `ExternalVpnGateway -RoutesTo->` each interface address. Tunnels whose `status` is `PROVISIONING`, `ALLOCATING_RESOURCES`, `DEPROVISIONING` or `FAILED` are skipped |
 
-Every cloud skips VPN resources that are not built yet or are being removed. Azure `Updating`, like AWS `modifying`, stays drawn. Tunnel health is runtime state (rule 6) and is not drawn: AWS `UP`/`DOWN`, Azure `connectionStatus`, and the GCP `status` values other than those four (`ESTABLISHED`, `NO_INCOMING_PACKETS`, `NEGOTIATION_FAILURE`, …). A configured tunnel joins whether or not it is up, and a resource with no state is drawn. Config types `VPNGateway`, `CustomerGateway` and `VPNConnection` are in `TYPED_CONFIG_TYPES` with no event key, so events leave them to the scan. **IAM adds** `ec2:DescribeVpnGateways`, `ec2:DescribeCustomerGateways` and `ec2:DescribeVpnConnections` (all in `ReadOnlyAccess`); Azure and GCP read them with the access they already need.
+Every cloud skips VPN resources that are not built yet or are being removed. Azure `Updating`, like AWS `modifying`, stays drawn. Tunnel health is runtime state (rule 6) and is not drawn: AWS `UP`/`DOWN`, Azure `connectionStatus`, and the GCP `status` values other than those four (`ESTABLISHED`, `NO_INCOMING_PACKETS`, `NEGOTIATION_FAILURE`, …). A tunnel configured at both ends joins whether or not it is up, and a resource with no state is drawn. Config types `VPNGateway`, `CustomerGateway` and `VPNConnection` are in `TYPED_CONFIG_TYPES` with no event key, so events leave them to the scan. **IAM adds** `ec2:DescribeVpnGateways`, `ec2:DescribeCustomerGateways` and `ec2:DescribeVpnConnections` (all in `ReadOnlyAccess`); Azure and GCP read them with the access they already need.
 
 ## 4. Cross-Network Address Resolution
 
@@ -49,10 +49,10 @@ Through { network: AwsEc2Vpc, connector: AwsEc2VpcPeeringConnection }
 Through { network: AwsEc2Vpc, connector: AwsEc2TransitGateway }
 Direct  { network: AzureVirtualNetwork }
 Direct  { network: GcpComputeNetwork }
-Tunnel  { network, gateways: [[(Edge, kind) ..] ..], holds: [(Edge, kind) .. GenericIpAddress], names: [(Edge, kind) .. GenericIpAddress] }
+Tunnel  { network, ends: [[(Edge, kind) ..] ..], holds: [(Edge, kind) .. GenericIpAddress], names: [(Edge, kind) .. GenericIpAddress] }
 ```
 
-A `Tunnel` row reaches a network's gateways over any of its `gateways` paths, then walks `holds` or `names` from each gateway to a public address. A network that reaches address `X` over the *holding* suffix is a holder of `X`; over the *naming* suffix, a namer. **Two networks are joined through `X` only when one holds it and the other names it**, so two networks that both name one gateway are not joined to each other. Controlled transitivity is just a longer path: a transit gateway with a VPN attachment reaches `X` through every VPC attached to it, and an Azure spoke reaches the hub's gateway through the `RoutesTo` edge that only `useRemoteGateways` projects, so a plain peering never rides the gateway. Private addresses never act as connectors.
+A `Tunnel` row reaches a network's tunnel ends over any of its `ends` paths (the VPN connection on AWS, the gateway on Azure and GCP), then walks `holds` and `names` from each end to public addresses. **Two ends form a tunnel only when each names an address the other holds, and only then are the networks behind them joined.** One-sided naming joins nothing, so a far end that is deleted, failed or never configured breaks the join. Ends pair one by one: a VGW with one connection to Azure and another to an office cannot combine halves of the two into a tunnel. Each tunnel is a connector with two sides, so two VPCs tunnelled to the same Azure gateway are not joined to each other. Controlled transitivity is just a longer `ends` path: a transit gateway's VPN connection is an end for every VPC attached to it, and an Azure spoke reaches the hub's gateway through the `RoutesTo` edge that only `useRemoteGateways` projects, so a plain peering never rides the gateway. Private addresses never act as connectors.
 
 In `service::address_owners`, an unheld private pivot `a@N` inherits the owners of `a@M` when **at most one—and exactly one—network `M` joined to `N` holds `a`**:
 
@@ -63,12 +63,11 @@ In `service::address_owners`, an unheld private pivot `a@N` inherits the owners 
 - **Hub representation:** Connectors stay hubs ($O(k)$ attachments, never expanded into $k^2$ pairs).
 - **Single integration point:** Sitting inside `address_owners`, resolution automatically feeds observed flows, IP-target chains (`NLB` targeting a peered VPC IP → `inferred`), and the service view.
 
-Pinned by `a_private_address_resolves_across_a_peering`, `a_private_address_resolves_across_a_transit_gateway`, `peering_does_not_chain`, `an_address_two_joined_networks_hold_resolves_to_neither`, `a_holder_in_the_reading_network_wins_over_any_joined_one`, `an_ip_target_in_a_peered_vpc_is_inferred`, `a_stopped_ip_target_across_a_peering_is_not_inferred`, and property test `an_unheld_address_resolves_through_exactly_one_joined_holder`.
+Pinned by `a_private_address_resolves_across_a_peering`, `a_private_address_resolves_across_a_transit_gateway`, `peering_does_not_chain`, `an_address_two_joined_networks_hold_resolves_to_neither`, `a_holder_in_the_reading_network_wins_over_any_joined_one`, `an_ip_target_in_a_peered_vpc_is_inferred`, `a_stopped_ip_target_across_a_peering_is_not_inferred`, `a_tunnel_joins_the_networks_at_its_two_ends`, `a_tunnel_configured_at_one_end_joins_nothing`, `a_gateway_pairs_each_of_its_connections_on_its_own`, `a_tunnel_whose_far_end_is_going_away_resolves_nothing`, and property tests `an_unheld_address_resolves_through_exactly_one_joined_holder` and `a_tunnel_joins_two_networks_only_when_each_end_names_the_other`.
 
 ### Known Gaps
 
 - **Not modelled (Phase 2a):** classic GCP VPN (`targetVpnGateways`), HA VPN between two GCP gateways, Azure VNet-to-VNet connections between two modelled gateways, GCP `exportCustomRoutes` transit through peerings (Cloud SQL private services access is read in the consumer network, so it is unaffected), and BGP-learned routes.
-- **One-ended tunnels:** A join needs only one end to name an address the other end holds. An Azure or GCP gateway holds its address without any connection, so an AWS connection naming it joins the two networks even when the Azure connection or GCP tunnel is missing, failed or being deleted. Requiring both ends (each names an address the other holds) would make every lifecycle filter break the join.
 - **VPN-to-VPN transit:** Two VPN connections on one transit gateway (or on one VGW, as CloudHub) route to each other, but a tunnel join only reaches VPCs, so their far networks are not joined.
 - **TGW overlap (Phase 3):** Without VPC CIDR ranges, an unheld address inside the reading VPC's own CIDR can resolve across a TGW to an overlapping attached VPC.
 - **TGW route-table segmentation (Phase 3):** All VPC attachments on a TGW currently join each other regardless of per-attachment TGW route tables, so traffic attempted toward an isolated attachment's IP (logged as accepted on the source ENI before the TGW drops it) resolves to that holder.

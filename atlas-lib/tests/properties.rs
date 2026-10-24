@@ -1352,6 +1352,128 @@ proptest! {
             "a local holder wins; otherwise exactly one directly joined holder, never a chain"
         );
     }
+
+    #[test]
+    fn a_tunnel_joins_two_networks_only_when_each_end_names_the_other(
+        (connections, gateway_names, holds, reader) in (1..4usize, 1..4usize)
+            .prop_flat_map(|(vpcs, vnets)| {
+                prop::collection::vec((0..vpcs, prop::option::of(0..vnets)), 1..5)
+                    .prop_flat_map(move |connections| {
+                        let count = connections.len();
+                        (
+                            Just(connections),
+                            prop::collection::vec(
+                                prop::collection::hash_set(0..count, 0..=count),
+                                vnets,
+                            ),
+                            prop::collection::vec(any::<bool>(), vnets),
+                            0..vpcs,
+                        )
+                    })
+            }),
+    ) {
+        let vpc = |index: usize| format!("vpc-{index}");
+        let vnet = |index: usize| format!("vnet-{index}");
+        let public = |address: String| Node::public_ip(&address).expect("a public address");
+        let connection_address = |index: usize| format!("192.0.2.{}", index + 1);
+        let gateway_address = |index: usize| format!("198.51.100.{}", index + 1);
+
+        let mut builder = GraphBuilder::new();
+        for (index, (on, names)) in connections.iter().enumerate() {
+            let vgw = builder
+                .get_or_add_node(Node::AwsEc2VpnGateway(format!("vgw-{on}").into()));
+            builder.link_to(vgw, Node::AwsEc2Vpc(vpc(*on).into()), Edge::AttachedTo);
+            let connection = builder
+                .get_or_add_node(Node::AwsEc2VpnConnection(format!("vpn-{index}").into()));
+            builder.link_to(
+                connection,
+                Node::AwsEc2VpnGateway(format!("vgw-{on}").into()),
+                Edge::AttachedTo,
+            );
+            builder.link_to(connection, public(connection_address(index)), Edge::ConnectsTo);
+            if let Some(far) = names {
+                let customer_gateway = builder.link_to(
+                    connection,
+                    Node::AwsEc2CustomerGateway(format!("cgw-{index}").into()),
+                    Edge::AttachedTo,
+                );
+                builder.link_to(customer_gateway, public(gateway_address(*far)), Edge::RoutesTo);
+            }
+        }
+        for (index, names) in gateway_names.iter().enumerate() {
+            let gateway = builder.get_or_add_node(Node::AzureVirtualNetworkGateway(
+                format!("vng-{index}").into(),
+            ));
+            builder.link_to(gateway, Node::AzureVirtualNetwork(vnet(index).into()), Edge::AttachedTo);
+            let pip = builder.link_to(
+                gateway,
+                Node::AzurePublicIpAddress(format!("pip-{index}").into()),
+                Edge::HasIp,
+            );
+            builder.link_to(pip, public(gateway_address(index)), Edge::ConnectsTo);
+            for named in names {
+                let connection = builder.get_or_add_node(Node::AzureVpnConnection(
+                    format!("conn-{index}-{named}").into(),
+                ));
+                builder.link_to(
+                    connection,
+                    Node::AzureVirtualNetworkGateway(format!("vng-{index}").into()),
+                    Edge::AttachedTo,
+                );
+                let local_gateway = builder.link_to(
+                    connection,
+                    Node::AzureLocalNetworkGateway(format!("lng-{index}-{named}").into()),
+                    Edge::AttachedTo,
+                );
+                builder.link_to(local_gateway, public(connection_address(*named)), Edge::RoutesTo);
+            }
+        }
+        for (index, _) in holds.iter().enumerate().filter(|(_, holds)| **holds) {
+            let holder = builder
+                .get_or_add_node(Node::AzureVirtualMachine(format!("vm-{index}").into()));
+            builder.link_to(holder, Node::ip("10.9.9.9", &vnet(index)), Edge::ConnectsTo);
+        }
+        let balancer = Node::AwsElbLoadBalancer(
+            "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/lb/1".into(),
+        );
+        let balancer_idx = builder.get_or_add_node(balancer.clone());
+        let group = builder.link_to(
+            balancer_idx,
+            Node::AwsElbTargetGroup(
+                "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/tg/1".into(),
+            ),
+            Edge::ConnectsTo,
+        );
+        builder.link_to(group, Node::ip("10.9.9.9", &vpc(reader)), Edge::RoutesTo);
+
+        derive::all(&mut builder, &FlowIndex::default());
+
+        let tunnelled: HashSet<usize> = connections
+            .iter()
+            .enumerate()
+            .filter(|(_, (on, _))| *on == reader)
+            .filter_map(|(index, (_, names))| {
+                names.filter(|far| gateway_names[*far].contains(&index))
+            })
+            .collect();
+        let holding: Vec<usize> = tunnelled.into_iter().filter(|far| holds[*far]).collect();
+        let expected: HashSet<(String, String)> = match holding[..] {
+            [only] => Some((
+                node_key(&balancer),
+                node_key(&Node::AzureVirtualMachine(format!("vm-{only}").into())),
+            )),
+            _ => None,
+        }
+        .into_iter()
+        .collect();
+
+        prop_assert_eq!(
+            served_pairs(&builder),
+            expected,
+            "a connection and a gateway that each name the other join their networks; \
+             one-sided naming joins nothing"
+        );
+    }
 }
 
 // -------------------------------------------------------------- azure casing

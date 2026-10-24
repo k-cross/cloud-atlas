@@ -39,7 +39,11 @@ pub fn all() -> Vec<Provider> {
 }
 
 pub fn build_graph() -> GraphBuilder {
-    let mut builder = topology();
+    build_graph_of(all())
+}
+
+pub fn build_graph_of(providers: impl IntoIterator<Item = Provider>) -> GraphBuilder {
+    let mut builder = topology_of(providers);
     let flows = observed();
     flows.overlay(&mut builder);
     derive::all(&mut builder, &flows);
@@ -47,9 +51,13 @@ pub fn build_graph() -> GraphBuilder {
 }
 
 pub fn topology() -> GraphBuilder {
+    topology_of(all())
+}
+
+fn topology_of(providers: impl IntoIterator<Item = Provider>) -> GraphBuilder {
     let s = settings();
     let mut builder = GraphBuilder::new();
-    for provider in all() {
+    for provider in providers {
         projector::build(&mut builder, &provider, &s);
     }
     builder
