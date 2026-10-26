@@ -79,6 +79,7 @@ azure_types! {
     VirtualNetworkGateways => "microsoft.network/virtualnetworkgateways",
     LocalNetworkGateways => "microsoft.network/localnetworkgateways",
     Connections => "microsoft.network/connections",
+    ExpressRouteCircuits => "microsoft.network/expressroutecircuits",
     StorageAccounts => "microsoft.storage/storageaccounts",
     ManagedClusters => "microsoft.containerservice/managedclusters",
     SqlServers => "microsoft.sql/servers",
@@ -117,7 +118,8 @@ pub fn map_resources(
     let mut pips = Vec::new();
     let mut vnet_gateways = Vec::new();
     let mut local_gateways = Vec::new();
-    let mut vpn_connections = Vec::new();
+    let mut gateway_connections = Vec::new();
+    let mut circuits = Vec::new();
     let mut storage = Vec::new();
     let mut aks = Vec::new();
     let mut sql = Vec::new();
@@ -263,7 +265,6 @@ pub fn map_resources(
                     public_ip_ids.extend(referenced_id(Some(configuration), "publicIPAddress"));
                 }
                 vnet_gateways.push(VirtualNetworkGateway {
-                    gateway_type: property_text(properties, "gatewayType"),
                     provisioning_state: property_text(properties, "provisioningState"),
                     id: res.id,
                     name: res.name,
@@ -284,14 +285,52 @@ pub fn map_resources(
             }
             AzureType::Connections => {
                 let properties = res.properties.as_ref();
-                vpn_connections.push(VpnConnection {
+                gateway_connections.push(GatewayConnection {
                     gateway_id: referenced_id(properties, "virtualNetworkGateway1"),
                     local_gateway_id: referenced_id(properties, "localNetworkGateway2"),
-                    connection_type: property_text(properties, "connectionType"),
+                    circuit_id: referenced_id(properties, "peer"),
                     provisioning_state: property_text(properties, "provisioningState"),
                     id: res.id,
                     name: res.name,
                     location: res.location,
+                });
+            }
+            AzureType::ExpressRouteCircuits => {
+                let properties = res.properties.as_ref();
+                let mut peerings = Vec::new();
+                for peering in properties
+                    .and_then(|p| p.get("peerings"))
+                    .and_then(|p| p.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|peering| peering.get("properties"))
+                {
+                    let peering_type = property_text(Some(peering), "peeringType");
+                    for family in std::iter::once(peering).chain(peering.get("ipv6PeeringConfig")) {
+                        peerings.push(ExpressRoutePeering {
+                            peering_type: peering_type.clone(),
+                            state: property_text(Some(family), "state")
+                                .or_else(|| property_text(Some(peering), "state")),
+                            peer_address_prefixes: [
+                                "primaryPeerAddressPrefix",
+                                "secondaryPeerAddressPrefix",
+                            ]
+                            .into_iter()
+                            .filter_map(|key| property_text(Some(family), key))
+                            .collect(),
+                        });
+                    }
+                }
+                circuits.push(ExpressRouteCircuit {
+                    provisioning_state: property_text(properties, "provisioningState"),
+                    service_provider_provisioning_state: property_text(
+                        properties,
+                        "serviceProviderProvisioningState",
+                    ),
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                    peerings,
                 });
             }
             AzureType::NetworkInterfaces => {
@@ -370,7 +409,8 @@ pub fn map_resources(
         MicrosoftCollection::AzurePublicIpAddresses(pips),
         MicrosoftCollection::AzureVirtualNetworkGateways(vnet_gateways),
         MicrosoftCollection::AzureLocalNetworkGateways(local_gateways),
-        MicrosoftCollection::AzureVpnConnections(vpn_connections),
+        MicrosoftCollection::AzureGatewayConnections(gateway_connections),
+        MicrosoftCollection::AzureExpressRouteCircuits(circuits),
         MicrosoftCollection::AzureStorageAccounts(storage),
         MicrosoftCollection::AzureManagedClusters(aks),
         MicrosoftCollection::AzureSqlServers(sql),
@@ -466,7 +506,8 @@ mod tests {
                 MicrosoftCollection::AzurePublicIpAddresses(items) => items.len(),
                 MicrosoftCollection::AzureVirtualNetworkGateways(items) => items.len(),
                 MicrosoftCollection::AzureLocalNetworkGateways(items) => items.len(),
-                MicrosoftCollection::AzureVpnConnections(items) => items.len(),
+                MicrosoftCollection::AzureGatewayConnections(items) => items.len(),
+                MicrosoftCollection::AzureExpressRouteCircuits(items) => items.len(),
                 MicrosoftCollection::AzureStorageAccounts(items) => items.len(),
                 MicrosoftCollection::AzureManagedClusters(items) => items.len(),
                 MicrosoftCollection::AzureSqlServers(items) => items.len(),

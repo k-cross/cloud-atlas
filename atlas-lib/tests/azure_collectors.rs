@@ -347,7 +347,6 @@ fn vpn_gateways_local_gateways_and_connections_are_extracted() {
     ]);
 
     let gateway = &variant!(cols, AzureVirtualNetworkGateways)[0];
-    assert_eq!(gateway.gateway_type.as_deref(), Some("Vpn"));
     assert_eq!(gateway.provisioning_state.as_deref(), Some("Succeeded"));
     assert_eq!(
         gateway.subnet_ids,
@@ -366,8 +365,7 @@ fn vpn_gateways_local_gateways_and_connections_are_extracted() {
         local_gateway.provisioning_state.as_deref(),
         Some("Updating")
     );
-    let connection = &variant!(cols, AzureVpnConnections)[0];
-    assert_eq!(connection.connection_type.as_deref(), Some("IPsec"));
+    let connection = &variant!(cols, AzureGatewayConnections)[0];
     assert_eq!(connection.provisioning_state.as_deref(), Some("Deleting"));
     assert_eq!(
         connection.gateway_id.as_deref(),
@@ -377,4 +375,142 @@ fn vpn_gateways_local_gateways_and_connections_are_extracted() {
         connection.local_gateway_id.as_deref(),
         Some("/subscriptions/s/.../localNetworkGateways/lng1")
     );
+}
+
+#[test]
+fn expressroute_circuits_and_their_connections_are_extracted() {
+    let cols = map(vec![
+        json!({
+            "id": "/subscriptions/s/.../expressRouteCircuits/er1",
+            "name": "er1",
+            "type": "microsoft.network/expressroutecircuits",
+            "location": "eastus",
+            "properties": {
+                "provisioningState": "Succeeded",
+                "circuitProvisioningState": "Enabled",
+                "serviceProviderProvisioningState": "Provisioned",
+                "serviceKey": "00000000-0000-0000-0000-000000000000",
+                "peerings": [
+                    {
+                        "name": "AzurePrivatePeering",
+                        "properties": {
+                            "peeringType": "AzurePrivatePeering",
+                            "state": "Enabled",
+                            "azureASN": 12076,
+                            "peerASN": 16550,
+                            "primaryPeerAddressPrefix": "169.254.70.0/30",
+                            "secondaryPeerAddressPrefix": "169.254.70.4/30",
+                            "ipv6PeeringConfig": {
+                                "primaryPeerAddressPrefix": "fd00:70::/126",
+                                "secondaryPeerAddressPrefix": "fd00:70::4/126",
+                                "state": "Disabled"
+                            }
+                        }
+                    },
+                    {
+                        "name": "MicrosoftPeering",
+                        "properties": {
+                            "peeringType": "MicrosoftPeering",
+                            "state": "Enabled",
+                            "primaryPeerAddressPrefix": "203.0.113.0/30"
+                        }
+                    }
+                ]
+            }
+        }),
+        json!({
+            "id": "/subscriptions/s/.../connections/er-conn",
+            "name": "er-conn",
+            "type": "microsoft.network/connections",
+            "location": "eastus",
+            "properties": {
+                "connectionType": "ExpressRoute",
+                "provisioningState": "Succeeded",
+                "virtualNetworkGateway1": { "id": "/subscriptions/s/.../virtualNetworkGateways/ergw" },
+                "peer": { "id": "/subscriptions/s/.../expressRouteCircuits/er1" }
+            }
+        }),
+    ]);
+
+    let circuit = &variant!(cols, AzureExpressRouteCircuits)[0];
+    assert_eq!(
+        circuit.id.as_deref(),
+        Some("/subscriptions/s/.../expressRouteCircuits/er1")
+    );
+    assert_eq!(circuit.provisioning_state.as_deref(), Some("Succeeded"));
+    assert_eq!(
+        circuit.service_provider_provisioning_state.as_deref(),
+        Some("Provisioned")
+    );
+    let peerings: Vec<_> = circuit
+        .peerings
+        .iter()
+        .map(|peering| {
+            (
+                peering.peering_type.as_deref(),
+                peering.state.as_deref(),
+                peering.peer_address_prefixes.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        peerings,
+        vec![
+            (
+                Some("AzurePrivatePeering"),
+                Some("Enabled"),
+                vec!["169.254.70.0/30".to_owned(), "169.254.70.4/30".to_owned()]
+            ),
+            (
+                Some("AzurePrivatePeering"),
+                Some("Disabled"),
+                vec!["fd00:70::/126".to_owned(), "fd00:70::4/126".to_owned()]
+            ),
+            (
+                Some("MicrosoftPeering"),
+                Some("Enabled"),
+                vec!["203.0.113.0/30".to_owned()]
+            ),
+        ]
+    );
+    let connection = &variant!(cols, AzureGatewayConnections)[0];
+    assert_eq!(
+        connection.gateway_id.as_deref(),
+        Some("/subscriptions/s/.../virtualNetworkGateways/ergw")
+    );
+    assert_eq!(
+        connection.circuit_id.as_deref(),
+        Some("/subscriptions/s/.../expressRouteCircuits/er1")
+    );
+}
+
+#[test]
+fn an_ipv6_peering_with_no_state_of_its_own_takes_its_peering_state() {
+    let cols = map(vec![json!({
+        "id": "/subscriptions/s/.../expressRouteCircuits/er2",
+        "name": "er2",
+        "type": "microsoft.network/expressroutecircuits",
+        "location": "eastus",
+        "properties": {
+            "provisioningState": "Succeeded",
+            "serviceProviderProvisioningState": "Provisioned",
+            "peerings": [ {
+                "name": "AzurePrivatePeering",
+                "properties": {
+                    "peeringType": "AzurePrivatePeering",
+                    "state": "Disabled",
+                    "primaryPeerAddressPrefix": "169.254.71.0/30",
+                    "ipv6PeeringConfig": { "primaryPeerAddressPrefix": "fd00:71::/126" }
+                }
+            } ]
+        }
+    })]);
+
+    let circuit = &variant!(cols, AzureExpressRouteCircuits)[0];
+    let states: Vec<_> = circuit
+        .peerings
+        .iter()
+        .map(|peering| peering.state.as_deref())
+        .collect();
+    assert_eq!(states, vec![Some("Disabled"), Some("Disabled")]);
 }

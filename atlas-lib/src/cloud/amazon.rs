@@ -2,6 +2,7 @@ pub mod api_gateway;
 pub mod cloudfront;
 pub mod connectivity;
 pub mod container_service;
+pub mod direct_connect;
 pub mod dynamodb;
 pub mod eks;
 pub mod eventbridge;

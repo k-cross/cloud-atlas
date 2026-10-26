@@ -1,5 +1,7 @@
 use crate::atlas::collection::CollectionSource;
-use crate::atlas::util::{canonical_hostname, format_address, is_private, parse_address};
+use crate::atlas::util::{
+    canonical_hostname, format_address, is_private, mask_to_prefix, parse_address,
+};
 use std::fmt;
 use std::sync::Arc;
 
@@ -89,6 +91,9 @@ nodes!(
         AwsEc2VpnGateway(id) => "AWS::EC2::VPNGateway({id})",
         AwsEc2CustomerGateway(id) => "AWS::EC2::CustomerGateway({id})",
         AwsEc2VpnConnection(id) => "AWS::EC2::VPNConnection({id})",
+        AwsDirectConnectConnection(id) => "AWS::DirectConnect::Connection({id})",
+        AwsDirectConnectGateway(id) => "AWS::DirectConnect::Gateway({id})",
+        AwsDirectConnectVirtualInterface(id) => "AWS::DirectConnect::VirtualInterface({id})",
         AwsEcsCluster(id) => "AWS::EcsCluster({id})",
         AwsLambdaFunction(id) => "AWS::Lambda::Function({id})",
         AwsIamRole(id) => "AWS::IAM::Role({id})",
@@ -115,6 +120,9 @@ nodes!(
         GcpComputeVpnGateway(id) => "GCP::Compute::VpnGateway({id})",
         GcpComputeVpnTunnel(id) => "GCP::Compute::VpnTunnel({id})",
         GcpComputeExternalVpnGateway(id) => "GCP::Compute::ExternalVpnGateway({id})",
+        GcpComputeRouter(id) => "GCP::Compute::Router({id})",
+        GcpComputeInterconnect(id) => "GCP::Compute::Interconnect({id})",
+        GcpComputeInterconnectAttachment(id) => "GCP::Compute::InterconnectAttachment({id})",
         GcpComputeZone(id) => "GCP::Compute::Zone({id})",
         GcpSqlInstance(id) => "GCP::SQL::Instance({id})",
         GcpDnsManagedZone(id) => "GCP::DNS::ManagedZone({id})",
@@ -132,7 +140,8 @@ nodes!(
         AzureNetworkInterface(id) => "Azure::Network::NetworkInterface({id})",
         AzureVirtualNetworkGateway(id) => "Azure::Network::VirtualNetworkGateway({id})",
         AzureLocalNetworkGateway(id) => "Azure::Network::LocalNetworkGateway({id})",
-        AzureVpnConnection(id) => "Azure::Network::VpnConnection({id})",
+        AzureGatewayConnection(id) => "Azure::Network::GatewayConnection({id})",
+        AzureExpressRouteCircuit(id) => "Azure::Network::ExpressRouteCircuit({id})",
         AzureLoadBalancer(id) => "Azure::Network::LoadBalancer({id})",
         AzureNetworkSecurityGroup(id) => "Azure::Network::NetworkSecurityGroup({id})",
         AzurePublicIpAddress(id) => "Azure::Network::PublicIpAddress({id})",
@@ -179,6 +188,14 @@ impl Node {
             }
             None => Node::GenericIpAddress(value.into()),
         }
+    }
+
+    pub fn link_ip(value: &str) -> Option<Node> {
+        let (addr, Some(width)) = parse_address(value)? else {
+            return None;
+        };
+        let link = format_address(&mask_to_prefix(&addr, width)?, Some(width));
+        Some(Node::ip(&addr.to_string(), &link))
     }
 
     pub fn public_ip(value: &str) -> Option<Node> {

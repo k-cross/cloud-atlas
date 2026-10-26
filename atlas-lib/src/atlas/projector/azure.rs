@@ -1,16 +1,52 @@
-use super::{project_leaf, project_parallel};
-use crate::api::azure::models::IpConfiguration;
+use super::{link_bgp_session, project_leaf, project_parallel};
+use crate::api::azure::models::{ExpressRouteCircuit, ExpressRoutePeering, IpConfiguration};
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::util::is_large_cidr;
+use crate::atlas::util::{
+    format_address, is_large_cidr, mask_to_prefix, offset_address, parse_address,
+};
 use crate::cloud::definition::MicrosoftCollection;
 use petgraph::graph::NodeIndex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
-    project_parallel(builder, azure_data, project_microsoft_collection);
+    let skipped = skipped_resources(azure_data);
+    project_parallel(builder, azure_data, |local, collection| {
+        project_microsoft_collection(local, collection, &skipped)
+    });
     link_rule_destinations(builder, azure_data);
+}
+
+fn skipped_resources(azure_data: &[MicrosoftCollection]) -> HashSet<Arc<str>> {
+    let mut skipped = HashSet::new();
+    for collection in azure_data {
+        match collection {
+            MicrosoftCollection::AzureVirtualNetworkGateways(gateways) => skipped.extend(
+                gateways
+                    .iter()
+                    .filter(|gateway| !in_service(gateway.provisioning_state.as_deref()))
+                    .filter_map(|gateway| gateway.id.as_deref())
+                    .map(canonical_azure_id),
+            ),
+            MicrosoftCollection::AzureLocalNetworkGateways(gateways) => skipped.extend(
+                gateways
+                    .iter()
+                    .filter(|gateway| !in_service(gateway.provisioning_state.as_deref()))
+                    .filter_map(|gateway| gateway.id.as_deref())
+                    .map(canonical_azure_id),
+            ),
+            MicrosoftCollection::AzureExpressRouteCircuits(circuits) => skipped.extend(
+                circuits
+                    .iter()
+                    .filter(|circuit| !circuit_in_service(circuit))
+                    .filter_map(|circuit| circuit.id.as_deref())
+                    .map(canonical_azure_id),
+            ),
+            _ => {}
+        }
+    }
+    skipped
 }
 
 // Resource Graph echoes one resource's id with whatever casing the JSON that
@@ -27,7 +63,11 @@ fn canonical_azure_id(id: &str) -> Arc<str> {
     id.to_ascii_lowercase().into()
 }
 
-fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollection) {
+fn project_microsoft_collection(
+    builder: &mut GraphBuilder,
+    x: &MicrosoftCollection,
+    skipped: &HashSet<Arc<str>>,
+) {
     match x {
         MicrosoftCollection::AzureVirtualMachines(vms) => {
             for vm in vms {
@@ -155,10 +195,10 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
             }
         }
         MicrosoftCollection::AzureVirtualNetworkGateways(gateways) => {
-            for gateway in gateways.iter().filter(|gateway| {
-                !is_expressroute(gateway.gateway_type.as_deref())
-                    && in_service(gateway.provisioning_state.as_deref())
-            }) {
+            for gateway in gateways
+                .iter()
+                .filter(|gateway| in_service(gateway.provisioning_state.as_deref()))
+            {
                 let Some(id) = &gateway.id else { continue };
                 let idx = builder
                     .get_or_add_node(Node::AzureVirtualNetworkGateway(canonical_azure_id(id)));
@@ -191,26 +231,60 @@ fn project_microsoft_collection(builder: &mut GraphBuilder, x: &MicrosoftCollect
                 }
             }
         }
-        MicrosoftCollection::AzureVpnConnections(connections) => {
-            for connection in connections.iter().filter(|connection| {
-                !is_expressroute(connection.connection_type.as_deref())
-                    && in_service(connection.provisioning_state.as_deref())
-            }) {
+        MicrosoftCollection::AzureGatewayConnections(connections) => {
+            for connection in connections
+                .iter()
+                .filter(|connection| in_service(connection.provisioning_state.as_deref()))
+            {
                 let Some(id) = &connection.id else { continue };
-                let idx = builder.get_or_add_node(Node::AzureVpnConnection(canonical_azure_id(id)));
-                if let Some(gateway_id) = &connection.gateway_id {
+                let idx =
+                    builder.get_or_add_node(Node::AzureGatewayConnection(canonical_azure_id(id)));
+                let drawn = |reference: &Option<String>| {
+                    reference
+                        .as_deref()
+                        .map(canonical_azure_id)
+                        .filter(|id| !skipped.contains(id))
+                };
+                if let Some(gateway_id) = drawn(&connection.gateway_id) {
                     builder.link_to(
                         idx,
-                        Node::AzureVirtualNetworkGateway(canonical_azure_id(gateway_id)),
+                        Node::AzureVirtualNetworkGateway(gateway_id),
                         Edge::AttachedTo,
                     );
                 }
-                if let Some(local_id) = &connection.local_gateway_id {
+                if let Some(local_id) = drawn(&connection.local_gateway_id) {
                     builder.link_to(
                         idx,
-                        Node::AzureLocalNetworkGateway(canonical_azure_id(local_id)),
+                        Node::AzureLocalNetworkGateway(local_id),
                         Edge::AttachedTo,
                     );
+                }
+                if let Some(circuit_id) = drawn(&connection.circuit_id) {
+                    builder.link_to(
+                        idx,
+                        Node::AzureExpressRouteCircuit(circuit_id),
+                        Edge::AttachedTo,
+                    );
+                }
+            }
+        }
+        MicrosoftCollection::AzureExpressRouteCircuits(circuits) => {
+            for circuit in circuits
+                .iter()
+                .filter(|circuit| circuit_in_service(circuit))
+            {
+                let Some(id) = &circuit.id else { continue };
+                let idx =
+                    builder.get_or_add_node(Node::AzureExpressRouteCircuit(canonical_azure_id(id)));
+                for prefix in circuit
+                    .peerings
+                    .iter()
+                    .filter(|peering| private_peering_enabled(peering))
+                    .flat_map(|peering| &peering.peer_address_prefixes)
+                {
+                    if let Some((customer, microsoft)) = peering_addresses(prefix) {
+                        link_bgp_session(builder, idx, microsoft, customer);
+                    }
                 }
             }
         }
@@ -309,14 +383,48 @@ fn project_ip_configurations(
     }
 }
 
-fn is_expressroute(kind: Option<&str>) -> bool {
-    kind.is_some_and(|kind| kind.eq_ignore_ascii_case("ExpressRoute"))
-}
-
 fn in_service(provisioning_state: Option<&str>) -> bool {
     !provisioning_state.is_some_and(|state| {
         state.eq_ignore_ascii_case("Deleting") || state.eq_ignore_ascii_case("Failed")
     })
+}
+
+fn circuit_in_service(circuit: &ExpressRouteCircuit) -> bool {
+    in_service(circuit.provisioning_state.as_deref())
+        && provider_provisioned(circuit.service_provider_provisioning_state.as_deref())
+}
+
+fn provider_provisioned(state: Option<&str>) -> bool {
+    !state.is_some_and(|state| {
+        ["NotProvisioned", "Provisioning", "Deprovisioning"]
+            .iter()
+            .any(|pending| state.eq_ignore_ascii_case(pending))
+    })
+}
+
+fn private_peering_enabled(peering: &ExpressRoutePeering) -> bool {
+    peering
+        .peering_type
+        .as_deref()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("AzurePrivatePeering"))
+        && !peering
+            .state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("Disabled"))
+}
+
+fn peering_addresses(prefix: &str) -> Option<(Node, Node)> {
+    let (address, Some(width)) = parse_address(prefix)? else {
+        return None;
+    };
+    let link = mask_to_prefix(&address, width)?;
+    let host = |offset| {
+        let host = offset_address(&link, offset)?;
+        (mask_to_prefix(&host, width)? == link)
+            .then(|| Node::link_ip(&format_address(&host, Some(width))))
+            .flatten()
+    };
+    Some((host(1)?, host(2)?))
 }
 
 fn virtual_network_of(subnet_id: &str) -> Option<Arc<str>> {

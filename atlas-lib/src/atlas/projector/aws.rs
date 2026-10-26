@@ -1,11 +1,16 @@
-use super::{project_leaf, project_parallel};
+use super::{link_bgp_session, project_leaf, project_parallel};
 use crate::Settings;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::derive::{self, HeldAddresses};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::{
-    AWSConnectivity, AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection,
+    AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
+    AWSRoute53, AmazonCollection,
+};
+use aws_sdk_directconnect::types::{
+    BgpPeerState, ConnectionState, DirectConnectGateway, DirectConnectGatewayAssociationState,
+    DirectConnectGatewayState, GatewayType, VirtualInterface, VirtualInterfaceState,
 };
 use aws_sdk_ec2::types::{
     AttachmentStatus, NetworkInterface, RouteState, TransitGatewayAttachmentResourceType,
@@ -25,6 +30,7 @@ pub fn aws_projector(
     project_parallel(builder, aws_data, |local, (region, collection)| {
         project_amazon_collection(local, region, collection, opts)
     });
+    link_direct_connect_gateways(builder, aws_data);
     let scanned = scanned_instances(aws_data);
     link_interface_owners(builder, aws_data, &scanned);
     link_targets(builder, aws_data, &scanned);
@@ -793,6 +799,120 @@ fn project_amazon_collection(
                 }
             }
         }
+        AmazonCollection::AmazonDirectConnect(AWSDirectConnect {
+            connections,
+            virtual_interfaces,
+        }) => {
+            let mut drawn_connections = HashSet::new();
+            for connection_id in connections
+                .iter()
+                .filter(|connection| {
+                    matches!(
+                        connection.connection_state(),
+                        Some(ConnectionState::Available | ConnectionState::Down)
+                    )
+                })
+                .filter_map(|connection| connection.connection_id())
+            {
+                builder.link_to(
+                    region_idx,
+                    Node::AwsDirectConnectConnection(connection_id.into()),
+                    Edge::Contains,
+                );
+                drawn_connections.insert(connection_id);
+            }
+
+            for interface in virtual_interfaces
+                .iter()
+                .filter(|interface| drawn_interface(interface))
+            {
+                let Some(interface_id) = interface.virtual_interface_id() else {
+                    continue;
+                };
+                let interface_idx = builder.link_to(
+                    region_idx,
+                    Node::AwsDirectConnectVirtualInterface(interface_id.into()),
+                    Edge::Contains,
+                );
+                if let Some(connection_id) = interface
+                    .connection_id()
+                    .filter(|id| drawn_connections.contains(id))
+                {
+                    builder.link_to(
+                        interface_idx,
+                        Node::AwsDirectConnectConnection(connection_id.into()),
+                        Edge::AttachedTo,
+                    );
+                }
+                if let Some(vgw_id) = interface.virtual_gateway_id().filter(|id| !id.is_empty()) {
+                    builder.link_to(
+                        interface_idx,
+                        Node::AwsEc2VpnGateway(vgw_id.into()),
+                        Edge::AttachedTo,
+                    );
+                }
+                for (amazon, customer) in bgp_sessions(interface) {
+                    if let (Some(amazon), Some(customer)) =
+                        (Node::link_ip(amazon), Node::link_ip(customer))
+                    {
+                        link_bgp_session(builder, interface_idx, amazon, customer);
+                    }
+                }
+            }
+        }
+        AmazonCollection::AmazonDirectConnectGateways(AWSDirectConnectGateways {
+            gateways,
+            associations,
+        }) => {
+            let global_idx = builder.get_or_add_node(Node::AwsRegion("global".into()));
+            let skipped: HashSet<_> = skipped_direct_connect_gateways(gateways).collect();
+            for gateway_id in gateways
+                .iter()
+                .filter_map(|gateway| gateway.direct_connect_gateway_id())
+                .filter(|id| !skipped.contains(id))
+            {
+                builder.link_to(
+                    global_idx,
+                    Node::AwsDirectConnectGateway(gateway_id.into()),
+                    Edge::Contains,
+                );
+            }
+
+            for association in associations.iter().filter(|association| {
+                matches!(
+                    association.association_state(),
+                    Some(
+                        DirectConnectGatewayAssociationState::Associated
+                            | DirectConnectGatewayAssociationState::Updating
+                    )
+                )
+            }) {
+                let Some(gateway_id) = association
+                    .direct_connect_gateway_id()
+                    .filter(|id| !skipped.contains(id))
+                else {
+                    continue;
+                };
+                let Some(associated) = association.associated_gateway() else {
+                    continue;
+                };
+                let associated = match (associated.r#type(), associated.id()) {
+                    (Some(GatewayType::VirtualPrivateGateway), Some(id)) => {
+                        Node::AwsEc2VpnGateway(id.into())
+                    }
+                    (Some(GatewayType::TransitGateway), Some(id)) => {
+                        Node::AwsEc2TransitGateway(id.into())
+                    }
+                    _ => continue,
+                };
+                let associated_idx = builder.get_or_add_node(associated);
+                builder.link_to(
+                    associated_idx,
+                    Node::AwsDirectConnectGateway(gateway_id.into()),
+                    Edge::AttachedTo,
+                );
+            }
+        }
         AmazonCollection::AmazonSecurityGroups(groups) => {
             for sg in groups {
                 if let Some(id) = sg.group_id() {
@@ -835,6 +955,93 @@ fn project_amazon_collection(
             }
         }
     }
+}
+
+fn link_direct_connect_gateways(
+    builder: &mut GraphBuilder,
+    aws_data: &[(String, AmazonCollection)],
+) {
+    let skipped: HashSet<&str> = aws_data
+        .iter()
+        .filter_map(|(_, collection)| match collection {
+            AmazonCollection::AmazonDirectConnectGateways(AWSDirectConnectGateways {
+                gateways,
+                ..
+            }) => Some(gateways),
+            _ => None,
+        })
+        .flat_map(|gateways| skipped_direct_connect_gateways(gateways))
+        .collect();
+
+    for (_, collection) in aws_data {
+        let AmazonCollection::AmazonDirectConnect(AWSDirectConnect {
+            virtual_interfaces, ..
+        }) = collection
+        else {
+            continue;
+        };
+        for interface in virtual_interfaces
+            .iter()
+            .filter(|interface| drawn_interface(interface))
+        {
+            let (Some(interface_id), Some(gateway_id)) = (
+                interface.virtual_interface_id(),
+                interface
+                    .direct_connect_gateway_id()
+                    .filter(|id| !id.is_empty() && !skipped.contains(id)),
+            ) else {
+                continue;
+            };
+            let interface_idx = builder
+                .get_or_add_node(Node::AwsDirectConnectVirtualInterface(interface_id.into()));
+            builder.link_to(
+                interface_idx,
+                Node::AwsDirectConnectGateway(gateway_id.into()),
+                Edge::AttachedTo,
+            );
+        }
+    }
+}
+
+fn drawn_interface(interface: &VirtualInterface) -> bool {
+    matches!(
+        interface.virtual_interface_type(),
+        Some("private" | "transit")
+    ) && matches!(
+        interface.virtual_interface_state(),
+        Some(
+            VirtualInterfaceState::Available
+                | VirtualInterfaceState::Down
+                | VirtualInterfaceState::Testing
+        )
+    )
+}
+
+fn skipped_direct_connect_gateways(
+    gateways: &[DirectConnectGateway],
+) -> impl Iterator<Item = &str> {
+    gateways
+        .iter()
+        .filter(|gateway| {
+            gateway.direct_connect_gateway_state() != Some(&DirectConnectGatewayState::Available)
+        })
+        .filter_map(|gateway| gateway.direct_connect_gateway_id())
+}
+
+fn bgp_sessions(interface: &VirtualInterface) -> Vec<(&str, &str)> {
+    let peers = interface.bgp_peers();
+    if peers.is_empty() {
+        return interface
+            .amazon_address()
+            .zip(interface.customer_address())
+            .into_iter()
+            .collect();
+    }
+    peers
+        .iter()
+        .filter(|peer| peer.bgp_peer_state() == Some(&BgpPeerState::Available))
+        .filter_map(|peer| peer.amazon_address().zip(peer.customer_address()))
+        .collect()
 }
 
 pub(crate) struct InstanceFacts<'a> {

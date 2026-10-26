@@ -728,44 +728,120 @@ mod tests {
         let web01 = Node::AwsEc2Instance("i-globex-web-01".into());
         let web02 = Node::AwsEc2Instance("i-globex-web-02".into());
 
-        let azure_connection_deleting =
-            fixtures::build_graph_of(fixtures::all().into_iter().map(|provider| match provider {
-                Provider::Azure(mut collections) => {
-                    for collection in &mut collections {
-                        if let MicrosoftCollection::AzureVpnConnections(connections) = collection {
-                            for connection in connections {
-                                connection.provisioning_state = Some("Deleting".to_owned());
-                            }
+        let azure_connection_deleting = estate_where(|provider| {
+            if let Provider::Azure(collections) = provider {
+                for collection in collections {
+                    if let MicrosoftCollection::AzureGatewayConnections(connections) = collection {
+                        for connection in connections {
+                            connection.provisioning_state = Some("Deleting".to_owned());
                         }
                     }
-                    Provider::Azure(collections)
                 }
-                other => other,
-            }));
+            }
+        });
         assert!(!serves(&azure_connection_deleting, &web01, &azure_vm));
         assert!(
             serves(&azure_connection_deleting, &web02, &cloud_sql),
             "only the Azure tunnel lost an end"
         );
 
-        let gcp_tunnel_failed =
-            fixtures::build_graph_of(fixtures::all().into_iter().map(|provider| match provider {
-                Provider::GCP(mut collections) => {
-                    for (_, collection) in &mut collections {
-                        if let GoogleCollection::GoogleVpnTunnels(tunnels) = collection {
-                            for tunnel in tunnels {
-                                tunnel.status = Some("FAILED".to_owned());
-                            }
+        let gcp_tunnel_failed = estate_where(|provider| {
+            if let Provider::GCP(collections) = provider {
+                for (_, collection) in collections {
+                    if let GoogleCollection::GoogleVpnTunnels(tunnels) = collection {
+                        for tunnel in tunnels {
+                            tunnel.status = Some("FAILED".to_owned());
                         }
                     }
-                    Provider::GCP(collections)
                 }
-                other => other,
-            }));
+            }
+        });
         assert!(!serves(&gcp_tunnel_failed, &web02, &cloud_sql));
         assert!(
             serves(&gcp_tunnel_failed, &web01, &azure_vm),
             "only the GCP tunnel lost an end"
+        );
+    }
+
+    fn estate_where(edit: impl FnMut(&mut crate::cloud::definition::Provider)) -> GraphBuilder {
+        let mut providers = fixtures::all();
+        providers.iter_mut().for_each(edit);
+        fixtures::build_graph_of(providers)
+    }
+
+    fn cloud_sql_address() -> Node {
+        Node::ip(
+            "10.20.0.5",
+            &format!(
+                "projects/{}/global/networks/vpc-globex",
+                fixtures::GCP_PROJECT
+            ),
+        )
+    }
+
+    fn spoke_network() -> std::sync::Arc<str> {
+        azure_networking_id("Microsoft.Network/virtualNetworks/vnet-globex")
+    }
+
+    #[test]
+    fn a_private_address_resolves_across_a_dedicated_circuit() {
+        let builder = fixtures::build_graph();
+        let held = held_addresses(&builder.graph);
+
+        assert!(
+            serves(
+                &builder,
+                &Node::AwsEc2Instance("i-globex-warehouse".into()),
+                &Node::GcpSqlInstance("globex-analytics-db".into()),
+            ),
+            "the data VPC reaches GCP over Direct Connect to a Cross-Cloud Interconnect"
+        );
+        assert_eq!(
+            held.holder(&spoke_network(), "10.20.0.5"),
+            builder.index_of(&cloud_sql_address()),
+            "the spoke reaches GCP over the hub's ExpressRoute circuit"
+        );
+        assert_eq!(
+            held.holder("vpc-globex-data", "10.20.1.4"),
+            None,
+            "two circuits that meet in GCP do not join their far ends to each other"
+        );
+    }
+
+    #[test]
+    fn a_circuit_whose_far_end_is_going_away_resolves_nothing() {
+        use crate::cloud::definition::{GoogleCollection, Provider};
+
+        let attachments_defunct = estate_where(|provider| {
+            if let Provider::GCP(collections) = provider {
+                for (_, collection) in collections {
+                    if let GoogleCollection::GoogleInterconnectAttachments(attachments) = collection
+                    {
+                        for attachment in attachments {
+                            attachment.state = Some("DEFUNCT".to_owned());
+                        }
+                    }
+                }
+            }
+        });
+        let cloud_sql = Node::GcpSqlInstance("globex-analytics-db".into());
+
+        assert!(!serves(
+            &attachments_defunct,
+            &Node::AwsEc2Instance("i-globex-warehouse".into()),
+            &cloud_sql,
+        ));
+        assert_eq!(
+            held_addresses(&attachments_defunct.graph).holder(&spoke_network(), "10.20.0.5"),
+            None
+        );
+        assert!(
+            serves(
+                &attachments_defunct,
+                &Node::AwsEc2Instance("i-globex-web-02".into()),
+                &cloud_sql,
+            ),
+            "the VPN still reaches GCP"
         );
     }
 

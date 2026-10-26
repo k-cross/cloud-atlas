@@ -70,6 +70,8 @@ pub enum AmazonCollection {
     AmazonNetworking(AWSNetworking),
     AmazonNetworkInterfaces(Vec<aws_sdk_ec2::types::NetworkInterface>),
     AmazonConnectivity(AWSConnectivity),
+    AmazonDirectConnect(AWSDirectConnect),
+    AmazonDirectConnectGateways(AWSDirectConnectGateways),
 }
 
 #[derive(Debug)]
@@ -105,6 +107,18 @@ pub struct AWSConnectivity {
     pub vpn_connections: Vec<aws_sdk_ec2::types::VpnConnection>,
 }
 
+#[derive(Debug, Default)]
+pub struct AWSDirectConnect {
+    pub connections: Vec<aws_sdk_directconnect::types::Connection>,
+    pub virtual_interfaces: Vec<aws_sdk_directconnect::types::VirtualInterface>,
+}
+
+#[derive(Debug, Default)]
+pub struct AWSDirectConnectGateways {
+    pub gateways: Vec<aws_sdk_directconnect::types::DirectConnectGateway>,
+    pub associations: Vec<aws_sdk_directconnect::types::DirectConnectGatewayAssociation>,
+}
+
 #[derive(Debug)]
 pub enum GoogleCollection {
     GoogleInstances(Vec<crate::api::google::compute::Instance>),
@@ -123,6 +137,9 @@ pub enum GoogleCollection {
     GoogleVpnGateways(Vec<crate::api::google::vpn::VpnGateway>),
     GoogleVpnTunnels(Vec<crate::api::google::vpn::VpnTunnel>),
     GoogleExternalVpnGateways(Vec<crate::api::google::vpn::ExternalVpnGateway>),
+    GoogleRouters(Vec<crate::api::google::interconnect::Router>),
+    GoogleInterconnects(Vec<crate::api::google::interconnect::Interconnect>),
+    GoogleInterconnectAttachments(Vec<crate::api::google::interconnect::InterconnectAttachment>),
 }
 
 #[derive(Debug)]
@@ -136,7 +153,8 @@ pub enum MicrosoftCollection {
     AzurePublicIpAddresses(Vec<crate::api::azure::models::PublicIpAddress>),
     AzureVirtualNetworkGateways(Vec<crate::api::azure::models::VirtualNetworkGateway>),
     AzureLocalNetworkGateways(Vec<crate::api::azure::models::LocalNetworkGateway>),
-    AzureVpnConnections(Vec<crate::api::azure::models::VpnConnection>),
+    AzureGatewayConnections(Vec<crate::api::azure::models::GatewayConnection>),
+    AzureExpressRouteCircuits(Vec<crate::api::azure::models::ExpressRouteCircuit>),
     AzureStorageAccounts(Vec<crate::api::azure::models::StorageAccount>),
     AzureManagedClusters(Vec<crate::api::azure::models::ManagedCluster>),
     AzureSqlServers(Vec<crate::api::azure::models::SqlServer>),

@@ -900,18 +900,16 @@ mod tests {
     }
 
     #[test]
-    fn an_expressroute_gateway_and_an_unconnected_peering_draw_no_vpn_join() {
-        use crate::api::azure::models::{
-            VirtualNetwork, VirtualNetworkGateway, VirtualNetworkPeering,
-        };
+    fn an_unconnected_peering_does_not_ride_the_hub_gateway() {
+        use crate::api::azure::models::{VirtualNetwork, VirtualNetworkPeering};
         use crate::cloud::definition::{MicrosoftCollection, Provider};
 
         let remote = azure_networking_id("Microsoft.Network/virtualNetworks/hub");
         let mut builder = GraphBuilder::new();
         projector::build(
             &mut builder,
-            &Provider::Azure(vec![
-                MicrosoftCollection::AzureVirtualNetworks(vec![VirtualNetwork {
+            &Provider::Azure(vec![MicrosoftCollection::AzureVirtualNetworks(vec![
+                VirtualNetwork {
                     id: Some(
                         azure_networking_id("Microsoft.Network/virtualNetworks/spoke").to_string(),
                     ),
@@ -921,16 +919,8 @@ mod tests {
                         use_remote_gateways: true,
                     }],
                     ..Default::default()
-                }]),
-                MicrosoftCollection::AzureVirtualNetworkGateways(vec![VirtualNetworkGateway {
-                    id: Some(
-                        azure_networking_id("Microsoft.Network/virtualNetworkGateways/er")
-                            .to_string(),
-                    ),
-                    gateway_type: Some("ExpressRoute".to_owned()),
-                    ..Default::default()
-                }]),
-            ]),
+                },
+            ])]),
             &Settings::default(),
         );
 
@@ -938,24 +928,18 @@ mod tests {
             "Microsoft.Network/virtualNetworks/spoke",
         ));
         assert!(!builder.has_edge(&spoke, &Node::AzureVirtualNetwork(remote), &Edge::RoutesTo));
-        assert!(
-            !builder.contains(&Node::AzureVirtualNetworkGateway(azure_networking_id(
-                "Microsoft.Network/virtualNetworkGateways/er"
-            )))
-        );
     }
 
     #[test]
     fn an_azure_vpn_being_deleted_or_failed_is_not_projected() {
         use crate::api::azure::models::{
-            LocalNetworkGateway, VirtualNetworkGateway, VpnConnection,
+            GatewayConnection, LocalNetworkGateway, VirtualNetworkGateway,
         };
         use crate::cloud::definition::{MicrosoftCollection, Provider};
 
         let id = |rest: &str| Some(azure_networking_id(rest).to_string());
         let gateway = |name: &str, state: &str| VirtualNetworkGateway {
             id: id(&format!("Microsoft.Network/virtualNetworkGateways/{name}")),
-            gateway_type: Some("Vpn".to_owned()),
             provisioning_state: Some(state.to_owned()),
             subnet_ids: vec![
                 azure_networking_id(&format!(
@@ -980,13 +964,21 @@ mod tests {
                     provisioning_state: Some("Deleting".to_owned()),
                     ..Default::default()
                 }]),
-                MicrosoftCollection::AzureVpnConnections(vec![VpnConnection {
-                    id: id("Microsoft.Network/connections/failed"),
-                    connection_type: Some("IPsec".to_owned()),
-                    provisioning_state: Some("Failed".to_owned()),
-                    gateway_id: id("Microsoft.Network/virtualNetworkGateways/updating"),
-                    ..Default::default()
-                }]),
+                MicrosoftCollection::AzureGatewayConnections(vec![
+                    GatewayConnection {
+                        id: id("Microsoft.Network/connections/failed"),
+                        provisioning_state: Some("Failed".to_owned()),
+                        gateway_id: id("Microsoft.Network/virtualNetworkGateways/updating"),
+                        ..Default::default()
+                    },
+                    GatewayConnection {
+                        id: id("Microsoft.Network/connections/to-deleting"),
+                        provisioning_state: Some("Succeeded".to_owned()),
+                        gateway_id: id("Microsoft.Network/virtualNetworkGateways/deleting"),
+                        local_gateway_id: id("Microsoft.Network/localNetworkGateways/deleting"),
+                        ..Default::default()
+                    },
+                ]),
             ]),
             &Settings::default(),
         );
@@ -1001,6 +993,12 @@ mod tests {
             )),
             &Edge::AttachedTo,
         );
+        assert_has_node(
+            &builder,
+            &Node::AzureGatewayConnection(azure_networking_id(
+                "Microsoft.Network/connections/to-deleting",
+            )),
+        );
         for gone in [
             Node::AzureVirtualNetworkGateway(azure_networking_id(
                 "Microsoft.Network/virtualNetworkGateways/deleting",
@@ -1011,7 +1009,9 @@ mod tests {
             Node::AzureLocalNetworkGateway(azure_networking_id(
                 "Microsoft.Network/localNetworkGateways/deleting",
             )),
-            Node::AzureVpnConnection(azure_networking_id("Microsoft.Network/connections/failed")),
+            Node::AzureGatewayConnection(azure_networking_id(
+                "Microsoft.Network/connections/failed",
+            )),
         ] {
             assert!(!builder.contains(&gone), "{gone:?} is going away");
         }
@@ -1070,6 +1070,544 @@ mod tests {
                 Node::GcpComputeVpnTunnel(format!("projects/p/regions/r/vpnTunnels/{name}").into());
             assert!(!builder.contains(&tunnel), "a {status} tunnel is not built");
         }
+    }
+
+    fn link(address: &str) -> Node {
+        Node::link_ip(address).expect("an address with its link prefix")
+    }
+
+    #[test]
+    fn a_link_address_is_scoped_to_the_subnet_both_ends_share() {
+        let link_scope = |address: &str| match link(address) {
+            Node::GenericPrivateIpAddress { network, address } => {
+                (network.to_string(), address.to_string())
+            }
+            other => panic!("{other:?} is not a private link address"),
+        };
+
+        assert_eq!(
+            link_scope("169.254.60.1/30"),
+            ("169.254.60.0/30".to_owned(), "169.254.60.1".to_owned())
+        );
+        assert_eq!(link_scope("169.254.60.2/30").0, "169.254.60.0/30");
+        assert_eq!(
+            link("203.0.113.1/31"),
+            public("203.0.113.1"),
+            "a public link address is the internet's own pivot"
+        );
+        assert_eq!(
+            Node::link_ip("169.254.60.1"),
+            None,
+            "without its prefix the link it sits on is unknown"
+        );
+    }
+
+    #[test]
+    fn the_fixture_circuits_meet_on_their_link_addresses() {
+        let builder = fixtures::build_graph();
+
+        let interface = Node::AwsDirectConnectVirtualInterface("dxvif-globex-gcp".into());
+        let dx_gateway = Node::AwsDirectConnectGateway("dxgw-globex".into());
+        assert_edge(
+            &builder,
+            &Node::AwsRegion("global".into()),
+            &dx_gateway,
+            &Edge::Contains,
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsEc2VpnGateway("vgw-globex-data".into()),
+            &dx_gateway,
+            &Edge::AttachedTo,
+        );
+        assert_edge(&builder, &interface, &dx_gateway, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &interface,
+            &Node::AwsDirectConnectConnection("dxcon-globex-gcp".into()),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &interface,
+            &link("169.254.60.1/30"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(
+            &builder,
+            &interface,
+            &link("169.254.60.2/30"),
+            &Edge::RoutesTo,
+        );
+
+        let router = Node::GcpComputeRouter(
+            "projects/globex-prod/regions/us-east4/routers/rtr-globex-interconnect".into(),
+        );
+        let to_aws = Node::GcpComputeInterconnectAttachment(
+            "projects/globex-prod/regions/us-east4/interconnectAttachments/att-globex-aws".into(),
+        );
+        assert_edge(&builder, &router, &gcp_network_node(), &Edge::AttachedTo);
+        assert_edge(&builder, &to_aws, &router, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &to_aws,
+            &Node::GcpComputeInterconnect(
+                "projects/globex-prod/global/interconnects/cci-globex-aws".into(),
+            ),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &to_aws,
+            &link("169.254.60.2/30"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(&builder, &to_aws, &link("169.254.60.1/30"), &Edge::RoutesTo);
+
+        let circuit = Node::AzureExpressRouteCircuit(azure_networking_id(
+            "Microsoft.Network/expressRouteCircuits/er-globex-gcp",
+        ));
+        let expressroute_gateway = Node::AzureVirtualNetworkGateway(azure_networking_id(
+            "Microsoft.Network/virtualNetworkGateways/ergw-globex-hub",
+        ));
+        let connection = Node::AzureGatewayConnection(azure_networking_id(
+            "Microsoft.Network/connections/conn-globex-gcp",
+        ));
+        assert_edge(
+            &builder,
+            &expressroute_gateway,
+            &Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/vnet-globex-hub",
+            )),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &connection,
+            &expressroute_gateway,
+            &Edge::AttachedTo,
+        );
+        assert_edge(&builder, &connection, &circuit, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &circuit,
+            &link("169.254.70.2/30"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(
+            &builder,
+            &circuit,
+            &link("169.254.70.1/30"),
+            &Edge::RoutesTo,
+        );
+    }
+
+    #[test]
+    fn only_a_direct_connect_circuit_that_reaches_a_network_is_projected() {
+        use crate::cloud::definition::{
+            AWSDirectConnect, AWSDirectConnectGateways, AmazonCollection,
+        };
+        use aws_sdk_directconnect::types::{
+            AssociatedGateway, BgpPeer, BgpPeerState, Connection, ConnectionState,
+            DirectConnectGateway, DirectConnectGatewayAssociation,
+            DirectConnectGatewayAssociationState, DirectConnectGatewayState, GatewayType,
+            VirtualInterface, VirtualInterfaceState,
+        };
+
+        let interface = |id: &str, kind: &str, state: VirtualInterfaceState| {
+            VirtualInterface::builder()
+                .virtual_interface_id(id)
+                .virtual_interface_type(kind)
+                .virtual_interface_state(state)
+        };
+        let peer = |amazon: &str, customer: &str, state: BgpPeerState| {
+            BgpPeer::builder()
+                .amazon_address(amazon)
+                .customer_address(customer)
+                .bgp_peer_state(state)
+                .build()
+        };
+        let association = |associated: AssociatedGateway,
+                           state: DirectConnectGatewayAssociationState| {
+            DirectConnectGatewayAssociation::builder()
+                .direct_connect_gateway_id("dxgw-a")
+                .associated_gateway(associated)
+                .association_state(state)
+                .build()
+        };
+        let builder = project_aws(vec![
+            AmazonCollection::AmazonDirectConnect(AWSDirectConnect {
+                connections: vec![
+                    Connection::builder()
+                        .connection_id("dxcon-a")
+                        .connection_state(ConnectionState::Down)
+                        .build(),
+                    Connection::builder()
+                        .connection_id("dxcon-ordering")
+                        .connection_state(ConnectionState::Ordering)
+                        .build(),
+                ],
+                virtual_interfaces: vec![
+                    interface("vif-private", "private", VirtualInterfaceState::Available)
+                        .connection_id("dxcon-a")
+                        .virtual_gateway_id("vgw-a")
+                        .direct_connect_gateway_id("")
+                        .amazon_address("169.254.1.1/30")
+                        .customer_address("169.254.1.2/30")
+                        .bgp_peers(peer(
+                            "169.254.1.1/30",
+                            "169.254.1.2/30",
+                            BgpPeerState::Available,
+                        ))
+                        .bgp_peers(peer(
+                            "169.254.9.1/30",
+                            "169.254.9.2/30",
+                            BgpPeerState::Deleting,
+                        ))
+                        .build(),
+                    interface("vif-transit", "transit", VirtualInterfaceState::Down)
+                        .connection_id("dxlag-a")
+                        .virtual_gateway_id("")
+                        .direct_connect_gateway_id("dxgw-a")
+                        .amazon_address("169.254.2.1/30")
+                        .customer_address("169.254.2.2/30")
+                        .build(),
+                    interface("vif-orphaned", "private", VirtualInterfaceState::Down)
+                        .connection_id("dxcon-a")
+                        .virtual_gateway_id("")
+                        .direct_connect_gateway_id("dxgw-deleting")
+                        .build(),
+                    interface("vif-public", "public", VirtualInterfaceState::Available)
+                        .connection_id("dxcon-a")
+                        .build(),
+                    interface("vif-pending", "private", VirtualInterfaceState::Pending)
+                        .connection_id("dxcon-a")
+                        .build(),
+                ],
+            }),
+            AmazonCollection::AmazonDirectConnectGateways(AWSDirectConnectGateways {
+                gateways: vec![
+                    DirectConnectGateway::builder()
+                        .direct_connect_gateway_id("dxgw-a")
+                        .direct_connect_gateway_state(DirectConnectGatewayState::Available)
+                        .build(),
+                    DirectConnectGateway::builder()
+                        .direct_connect_gateway_id("dxgw-deleting")
+                        .direct_connect_gateway_state(DirectConnectGatewayState::Deleting)
+                        .build(),
+                ],
+                associations: vec![
+                    association(
+                        AssociatedGateway::builder()
+                            .id("tgw-a")
+                            .r#type(GatewayType::TransitGateway)
+                            .build(),
+                        DirectConnectGatewayAssociationState::Updating,
+                    ),
+                    association(
+                        AssociatedGateway::builder()
+                            .id("vgw-old")
+                            .r#type(GatewayType::VirtualPrivateGateway)
+                            .build(),
+                        DirectConnectGatewayAssociationState::Disassociated,
+                    ),
+                    DirectConnectGatewayAssociation::builder()
+                        .direct_connect_gateway_id("dxgw-deleting")
+                        .associated_gateway(
+                            AssociatedGateway::builder()
+                                .id("vgw-b")
+                                .r#type(GatewayType::VirtualPrivateGateway)
+                                .build(),
+                        )
+                        .association_state(DirectConnectGatewayAssociationState::Associated)
+                        .build(),
+                ],
+            }),
+        ]);
+
+        let gateway = Node::AwsDirectConnectGateway("dxgw-a".into());
+        assert_edge(
+            &builder,
+            &Node::AwsEc2TransitGateway("tgw-a".into()),
+            &gateway,
+            &Edge::AttachedTo,
+        );
+        let private = Node::AwsDirectConnectVirtualInterface("vif-private".into());
+        assert_edge(
+            &builder,
+            &private,
+            &Node::AwsDirectConnectConnection("dxcon-a".into()),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &private,
+            &Node::AwsEc2VpnGateway("vgw-a".into()),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &private,
+            &link("169.254.1.1/30"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(&builder, &private, &link("169.254.1.2/30"), &Edge::RoutesTo);
+        let transit = Node::AwsDirectConnectVirtualInterface("vif-transit".into());
+        assert_edge(&builder, &transit, &gateway, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &transit,
+            &link("169.254.2.1/30"),
+            &Edge::ConnectsTo,
+        );
+        assert_has_node(
+            &builder,
+            &Node::AwsDirectConnectVirtualInterface("vif-orphaned".into()),
+        );
+        for absent in [
+            Node::AwsDirectConnectConnection("dxcon-ordering".into()),
+            Node::AwsDirectConnectConnection("dxlag-a".into()),
+            Node::AwsDirectConnectGateway("dxgw-deleting".into()),
+            Node::AwsEc2VpnGateway("vgw-old".into()),
+            Node::AwsEc2VpnGateway("vgw-b".into()),
+            Node::AwsEc2VpnGateway("".into()),
+            Node::AwsDirectConnectGateway("".into()),
+            Node::AwsDirectConnectVirtualInterface("vif-public".into()),
+            Node::AwsDirectConnectVirtualInterface("vif-pending".into()),
+            link("169.254.9.1/30"),
+        ] {
+            assert!(!builder.contains(&absent), "{absent:?} is not projected");
+        }
+    }
+
+    #[test]
+    fn an_expressroute_circuit_holds_the_second_address_of_each_peering_and_names_the_first() {
+        use crate::api::azure::models::{
+            ExpressRouteCircuit, ExpressRoutePeering, GatewayConnection, VirtualNetworkGateway,
+        };
+        use crate::cloud::definition::{MicrosoftCollection, Provider};
+
+        let id = |rest: &str| Some(azure_networking_id(rest).to_string());
+        let peering = |kind: &str, state: &str, prefixes: &[&str]| ExpressRoutePeering {
+            peering_type: Some(kind.to_owned()),
+            state: Some(state.to_owned()),
+            peer_address_prefixes: prefixes.iter().map(|prefix| prefix.to_string()).collect(),
+        };
+        let circuit = |name: &str, provisioning: &str, provider: &str| ExpressRouteCircuit {
+            id: id(&format!("Microsoft.Network/expressRouteCircuits/{name}")),
+            provisioning_state: Some(provisioning.to_owned()),
+            service_provider_provisioning_state: Some(provider.to_owned()),
+            peerings: vec![
+                peering(
+                    "AzurePrivatePeering",
+                    "Enabled",
+                    &["192.168.15.16/30", "192.168.15.20/30"],
+                ),
+                peering("MicrosoftPeering", "Enabled", &["203.0.113.0/30"]),
+                peering("AzurePrivatePeering", "Disabled", &["fd00:15::/126"]),
+            ],
+            ..Default::default()
+        };
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::Azure(vec![
+                MicrosoftCollection::AzureVirtualNetworkGateways(vec![VirtualNetworkGateway {
+                    id: id("Microsoft.Network/virtualNetworkGateways/ergw"),
+                    provisioning_state: Some("Succeeded".to_owned()),
+                    subnet_ids: vec![
+                        azure_networking_id(
+                            "Microsoft.Network/virtualNetworks/hub/subnets/GatewaySubnet",
+                        )
+                        .to_string(),
+                    ],
+                    ..Default::default()
+                }]),
+                MicrosoftCollection::AzureGatewayConnections(
+                    ["live", "unprovisioned", "deleting"]
+                        .into_iter()
+                        .map(|circuit| GatewayConnection {
+                            id: id(&format!("Microsoft.Network/connections/er-{circuit}")),
+                            provisioning_state: Some("Succeeded".to_owned()),
+                            gateway_id: id("Microsoft.Network/virtualNetworkGateways/ergw"),
+                            circuit_id: id(&format!(
+                                "Microsoft.Network/expressRouteCircuits/{circuit}"
+                            )),
+                            ..Default::default()
+                        })
+                        .collect(),
+                ),
+                MicrosoftCollection::AzureExpressRouteCircuits(vec![
+                    circuit("live", "Succeeded", "Provisioned"),
+                    circuit("unprovisioned", "Succeeded", "NotProvisioned"),
+                    circuit("deleting", "Deleting", "Provisioned"),
+                ]),
+            ]),
+            &Settings::default(),
+        );
+
+        let gateway = Node::AzureVirtualNetworkGateway(azure_networking_id(
+            "Microsoft.Network/virtualNetworkGateways/ergw",
+        ));
+        let live = Node::AzureExpressRouteCircuit(azure_networking_id(
+            "Microsoft.Network/expressRouteCircuits/live",
+        ));
+        assert_edge(
+            &builder,
+            &gateway,
+            &Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/hub",
+            )),
+            &Edge::AttachedTo,
+        );
+        let connection = Node::AzureGatewayConnection(azure_networking_id(
+            "Microsoft.Network/connections/er-live",
+        ));
+        assert_edge(&builder, &connection, &gateway, &Edge::AttachedTo);
+        assert_edge(&builder, &connection, &live, &Edge::AttachedTo);
+        for (microsoft, customer) in [
+            ("192.168.15.18/30", "192.168.15.17/30"),
+            ("192.168.15.22/30", "192.168.15.21/30"),
+        ] {
+            assert_edge(&builder, &live, &link(microsoft), &Edge::ConnectsTo);
+            assert_edge(&builder, &live, &link(customer), &Edge::RoutesTo);
+        }
+        for absent in [
+            public("203.0.113.2"),
+            link("fd00:15::2/126"),
+            Node::AzureExpressRouteCircuit(azure_networking_id(
+                "Microsoft.Network/expressRouteCircuits/unprovisioned",
+            )),
+            Node::AzureExpressRouteCircuit(azure_networking_id(
+                "Microsoft.Network/expressRouteCircuits/deleting",
+            )),
+        ] {
+            assert!(!builder.contains(&absent), "{absent:?} is not projected");
+        }
+    }
+
+    #[test]
+    fn an_interconnect_attachment_is_projected_unless_it_is_being_built_or_torn_down() {
+        use crate::api::google::interconnect::{Interconnect, InterconnectAttachment, Router};
+        use crate::cloud::definition::{GoogleCollection, Provider};
+
+        let compute = "https://x/compute/v1/projects/p";
+        let attachment = |name: &str, state: Option<&str>| InterconnectAttachment {
+            self_link: Some(format!(
+                "{compute}/regions/r/interconnectAttachments/{name}"
+            )),
+            state: state.map(str::to_owned),
+            router: Some(format!("{compute}/regions/r/routers/rtr")),
+            interconnect: Some(format!("{compute}/global/interconnects/ic")),
+            cloud_router_ip_address: Some("169.254.10.1/29".to_owned()),
+            customer_router_ip_address: Some("169.254.10.2/29".to_owned()),
+            cloud_router_ipv6_address: Some("2600:2d00:0:2::1/125".to_owned()),
+            customer_router_ipv6_address: Some("2600:2d00:0:2::2/125".to_owned()),
+            ..Default::default()
+        };
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::GCP(vec![
+                (
+                    "p".to_owned(),
+                    GoogleCollection::GoogleRouters(vec![Router {
+                        self_link: Some(format!("{compute}/regions/r/routers/rtr")),
+                        network: Some(format!("{compute}/global/networks/net")),
+                        ..Default::default()
+                    }]),
+                ),
+                (
+                    "p".to_owned(),
+                    GoogleCollection::GoogleInterconnects(vec![
+                        Interconnect {
+                            self_link: Some(format!("{compute}/global/interconnects/ic")),
+                            state: Some("ACTIVE".to_owned()),
+                            ..Default::default()
+                        },
+                        Interconnect {
+                            self_link: Some(format!("{compute}/global/interconnects/unused")),
+                            state: Some("UNPROVISIONED".to_owned()),
+                            ..Default::default()
+                        },
+                    ]),
+                ),
+                (
+                    "p".to_owned(),
+                    GoogleCollection::GoogleInterconnectAttachments(vec![
+                        attachment("active", Some("ACTIVE")),
+                        attachment("unspecified", None),
+                        attachment("pending-partner", Some("PENDING_PARTNER")),
+                        attachment("pending-customer", Some("PENDING_CUSTOMER")),
+                        attachment("requested", Some("PARTNER_REQUEST_RECEIVED")),
+                        attachment("unprovisioned", Some("UNPROVISIONED")),
+                        attachment("defunct", Some("DEFUNCT")),
+                        InterconnectAttachment {
+                            interconnect: Some(format!("{compute}/global/interconnects/unused")),
+                            ..attachment("on-unused", Some("ACTIVE"))
+                        },
+                    ]),
+                ),
+            ]),
+            &Settings::default(),
+        );
+
+        let router = Node::GcpComputeRouter("projects/p/regions/r/routers/rtr".into());
+        assert_edge(
+            &builder,
+            &router,
+            &Node::GcpComputeNetwork("projects/p/global/networks/net".into()),
+            &Edge::AttachedTo,
+        );
+        let attachment_node = |name: &str| {
+            Node::GcpComputeInterconnectAttachment(
+                format!("projects/p/regions/r/interconnectAttachments/{name}").into(),
+            )
+        };
+        let active = attachment_node("active");
+        assert_edge(&builder, &active, &router, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &active,
+            &Node::GcpComputeInterconnect("projects/p/global/interconnects/ic".into()),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &active,
+            &link("169.254.10.1/29"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(&builder, &active, &link("169.254.10.2/29"), &Edge::RoutesTo);
+        assert_edge(
+            &builder,
+            &active,
+            &link("2600:2d00:0:2::1/125"),
+            &Edge::ConnectsTo,
+        );
+        assert_edge(
+            &builder,
+            &active,
+            &link("2600:2d00:0:2::2/125"),
+            &Edge::RoutesTo,
+        );
+        assert_has_node(&builder, &attachment_node("unspecified"));
+        assert_has_node(&builder, &attachment_node("on-unused"));
+        for name in [
+            "pending-partner",
+            "pending-customer",
+            "requested",
+            "unprovisioned",
+            "defunct",
+        ] {
+            assert!(
+                !builder.contains(&attachment_node(name)),
+                "{name} is not built"
+            );
+        }
+        assert!(!builder.contains(&Node::GcpComputeInterconnect(
+            "projects/p/global/interconnects/unused".into()
+        )));
     }
 
     #[test]
@@ -1721,6 +2259,9 @@ mod tests {
             "AwsEc2AvailabilityZone",
             "AwsRoute53RecordSet",
             "AwsConfigResource",
+            "AwsDirectConnectConnection",
+            "AwsDirectConnectGateway",
+            "AwsDirectConnectVirtualInterface",
         ];
         let typed: Vec<&str> = TYPED_CONFIG_TYPES
             .iter()

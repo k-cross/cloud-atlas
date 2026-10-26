@@ -1,18 +1,39 @@
-use super::{project_leaf, project_parallel};
+use super::{link_bgp_session, project_leaf, project_parallel};
 use crate::api::google::compute::NetworkInterface;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::GoogleCollection;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[(String, GoogleCollection)]) {
+    let skipped = skipped_interconnects(gcp_data);
     project_parallel(builder, gcp_data, |local, (project, collection)| {
-        project_google_collection(local, project, collection)
+        project_google_collection(local, project, collection, &skipped)
     });
 }
 
-fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &GoogleCollection) {
+fn skipped_interconnects(gcp_data: &[(String, GoogleCollection)]) -> HashSet<Arc<str>> {
+    gcp_data
+        .iter()
+        .filter_map(|(_, collection)| match collection {
+            GoogleCollection::GoogleInterconnects(interconnects) => Some(interconnects),
+            _ => None,
+        })
+        .flatten()
+        .filter(|interconnect| !interconnect_provisioned(interconnect.state.as_deref()))
+        .filter_map(|interconnect| interconnect.self_link.as_deref())
+        .map(canonical_resource)
+        .collect()
+}
+
+fn project_google_collection(
+    builder: &mut GraphBuilder,
+    project: &str,
+    x: &GoogleCollection,
+    skipped_interconnects: &HashSet<Arc<str>>,
+) {
     let project_idx = builder.get_or_add_node(Node::GcpProject(project.into()));
 
     match x {
@@ -297,7 +318,98 @@ fn project_google_collection(builder: &mut GraphBuilder, project: &str, x: &Goog
                 }
             }
         }
+        GoogleCollection::GoogleRouters(routers) => {
+            for router in routers {
+                let Some(link) = &router.self_link else {
+                    continue;
+                };
+                let idx = builder.get_or_add_node(Node::GcpComputeRouter(canonical_resource(link)));
+                if let Some(network) = &router.network {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeNetwork(canonical_network(network, project)),
+                        Edge::AttachedTo,
+                    );
+                }
+            }
+        }
+        GoogleCollection::GoogleInterconnects(interconnects) => {
+            for link in interconnects
+                .iter()
+                .filter(|interconnect| interconnect_provisioned(interconnect.state.as_deref()))
+                .filter_map(|interconnect| interconnect.self_link.as_deref())
+            {
+                builder.get_or_add_node(Node::GcpComputeInterconnect(canonical_resource(link)));
+            }
+        }
+        GoogleCollection::GoogleInterconnectAttachments(attachments) => {
+            for attachment in attachments
+                .iter()
+                .filter(|attachment| attachment_provisioned(attachment.state.as_deref()))
+            {
+                let Some(link) = &attachment.self_link else {
+                    continue;
+                };
+                let idx = builder.get_or_add_node(Node::GcpComputeInterconnectAttachment(
+                    canonical_resource(link),
+                ));
+                if let Some(router) = &attachment.router {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeRouter(canonical_resource(router)),
+                        Edge::AttachedTo,
+                    );
+                }
+                if let Some(interconnect) = attachment
+                    .interconnect
+                    .as_deref()
+                    .map(canonical_resource)
+                    .filter(|id| !skipped_interconnects.contains(id))
+                {
+                    builder.link_to(
+                        idx,
+                        Node::GcpComputeInterconnect(interconnect),
+                        Edge::AttachedTo,
+                    );
+                }
+                let sessions = [
+                    (
+                        &attachment.cloud_router_ip_address,
+                        &attachment.customer_router_ip_address,
+                    ),
+                    (
+                        &attachment.cloud_router_ipv6_address,
+                        &attachment.customer_router_ipv6_address,
+                    ),
+                ];
+                for (cloud_router, customer_router) in sessions {
+                    if let (Some(held), Some(named)) = (
+                        cloud_router.as_deref().and_then(Node::link_ip),
+                        customer_router.as_deref().and_then(Node::link_ip),
+                    ) {
+                        link_bgp_session(builder, idx, held, named);
+                    }
+                }
+            }
+        }
     }
+}
+
+fn interconnect_provisioned(state: Option<&str>) -> bool {
+    state != Some("UNPROVISIONED")
+}
+
+fn attachment_provisioned(state: Option<&str>) -> bool {
+    !matches!(
+        state,
+        Some(
+            "DEFUNCT"
+                | "PARTNER_REQUEST_RECEIVED"
+                | "PENDING_CUSTOMER"
+                | "PENDING_PARTNER"
+                | "UNPROVISIONED"
+        )
+    )
 }
 
 fn tunnel_provisioned(status: Option<&str>) -> bool {

@@ -20,15 +20,16 @@ The credential-free demo showcases Cloud Atlas without cloud accounts. **Keep th
 | Per-network private address scoping | Yes, static (`vpc-globex-staging` reuses `10.10.0.0/16` with its own isolated `10.10.1.10`); the two VPN flows resolve across tunnels (below) | |
 | Cross-network private resolution | Yes, static (`web-01` → warehouse via `pcx-globex-data`; `web-02` → shared-services ENI via `tgw-globex`; Azure & GCP peerings projected) | |
 | Site-to-site VPN | Yes, static (AWS `vgw-globex` ↔ Azure hub gateway, with the spoke reaching it by gateway transit: `web-01` → Azure VM; `tgw-globex` ↔ GCP HA VPN: `web-02` → Cloud SQL) | |
+| Dedicated circuits | Yes, static (Direct Connect ↔ GCP Cross-Cloud Interconnect: warehouse → Cloud SQL; ExpressRoute ↔ Cross-Cloud Interconnect is drawn and joined, but no Azure flow log feeds it) | |
 | Tier 3 scan → diff → patch | Trivially (canary DNS record toggle) | F1 |
-| Tier 2 traffic overlay | Yes (17 steady flows with verdicts, volume, and beads; periodic burst flow) | |
+| Tier 2 traffic overlay | Yes (18 steady flows with verdicts, volume, and beads; periodic burst flow) | |
 | `Covers` derivation | Yes, static (`203.0.113.0/24` covers `203.0.113.77`) | |
-| `Serves` (`inferred` vs. `confirmed`) | Static only (11 `confirmed`, 2 `inferred`; no live status transition) | F1 |
+| `Serves` (`inferred` vs. `confirmed`) | Static only (12 `confirmed`, 2 `inferred`; no live status transition) | F1 |
 | Service view | Yes | |
 | Failure semantics (`CollectionReport`, `carry_forward`, `Retention`) | No (demo report is always complete; UI does not surface `/collection.json`) | F1, F5 |
 | Tier 1 events | No (`--aws-event-queue` is unused in demo mode) | F6 |
 
-**Baseline metrics:** 161 nodes (the component and edgeless counts below predate the VPN resources and are due a re-measure), 13 edgeless nodes, 8 region-only leaves, labels up to 149 characters.
+**Baseline metrics:** 180 nodes and 250 edges in 16 components (the main one holds 159 nodes), 13 edgeless nodes, 8 region-only leaves, labels up to 156 characters.
 
 ## Invariants
 
@@ -45,7 +46,6 @@ The credential-free demo showcases Cloud Atlas without cloud accounts. **Keep th
   3. `web-01` traffic stops → reverts to `inferred`.
   4. Azure fails (`Unavailable`) → estate carried forward, `/collection.json` reports the outage (visible via F5).
   5. Azure recovers and `web-04` terminates → edges removed.
-- **F2. Dedicated-circuit hops (done for VPN):** The two cross-cloud private flows now resolve over VPN. Add a Direct Connect, ExpressRoute or Cloud Interconnect flow when Phase 2b lands.
 - **F3. Connect isolated guard nodes:** 13 edgeless nodes (10 Azure, 3 GCP) and 8 region-only AWS leaves exist solely for exhaustiveness guards and push the main component into the centre of the camera. Link GCP DNS zones, functions, and buckets to their project, and evaluate Azure container grouping.
 - **F4. Short node labels:** Display concise labels (last ID segment or bare IP) on the canvas and full `Display` keys on hover (Rendering Phase 3).
 - **F5. Collection health in the UI:** Render `/collection.json` status in `atlas-web` so degraded/retained sources are visible.

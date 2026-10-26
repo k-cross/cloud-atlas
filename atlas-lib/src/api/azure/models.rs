@@ -44,7 +44,6 @@ pub struct VirtualNetworkGateway {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
-    pub gateway_type: Option<String>,
     pub provisioning_state: Option<String>,
     pub subnet_ids: Vec<String>,
     pub public_ip_ids: Vec<String>,
@@ -62,14 +61,33 @@ pub struct LocalNetworkGateway {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct VpnConnection {
+pub struct GatewayConnection {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
-    pub connection_type: Option<String>,
     pub provisioning_state: Option<String>,
     pub gateway_id: Option<String>,
     pub local_gateway_id: Option<String>,
+    pub circuit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressRouteCircuit {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub provisioning_state: Option<String>,
+    pub service_provider_provisioning_state: Option<String>,
+    pub peerings: Vec<ExpressRoutePeering>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressRoutePeering {
+    pub peering_type: Option<String>,
+    pub state: Option<String>,
+    pub peer_address_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

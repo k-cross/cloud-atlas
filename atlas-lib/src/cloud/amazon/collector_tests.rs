@@ -1,5 +1,6 @@
 use crate::cloud::definition::{
-    AWSConnectivity, AWSLoadBalancing, AWSNetworking, AWSRoute53, TableName,
+    AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
+    AWSRoute53, TableName,
 };
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
@@ -580,4 +581,130 @@ async fn network_interfaces_follow_pagination_past_the_first_page() {
         .filter_map(|e| e.network_interface_id())
         .collect();
     assert_eq!(ids, vec!["eni-1", "eni-2"]);
+}
+
+#[tokio::test]
+async fn direct_connect_follows_every_page_of_connections_and_interfaces() {
+    let connections_first = r#"{"connections":[{"connectionId":"dxcon-1","connectionState":"available","location":"EqDC2"}],"nextToken":"page-2"}"#;
+    let connections_second =
+        r#"{"connections":[{"connectionId":"dxcon-2","connectionState":"down"}]}"#;
+    let interfaces = r#"{"virtualInterfaces":[{
+        "virtualInterfaceId":"dxvif-1","virtualInterfaceType":"private","virtualInterfaceState":"available",
+        "connectionId":"dxcon-1","virtualGatewayId":"vgw-1","directConnectGatewayId":"dxgw-1",
+        "amazonAddress":"169.254.1.1/30","customerAddress":"169.254.1.2/30",
+        "bgpPeers":[{"amazonAddress":"169.254.1.1/30","customerAddress":"169.254.1.2/30","bgpPeerState":"available"}]
+    }]}"#;
+    let (cfg, http) = replay(&[
+        (JSON11, connections_first),
+        (JSON11, connections_second),
+        (JSON11, interfaces),
+    ])
+    .await;
+
+    let AWSDirectConnect {
+        connections,
+        virtual_interfaces,
+    } = super::direct_connect::collector::runner(&cfg)
+        .await
+        .unwrap();
+
+    let connection_ids: Vec<_> = connections
+        .iter()
+        .filter_map(|connection| connection.connection_id())
+        .collect();
+    assert_eq!(connection_ids, vec!["dxcon-1", "dxcon-2"]);
+    assert!(connections[0].connection_state().is_some());
+
+    let interface = &virtual_interfaces[0];
+    assert_eq!(interface.virtual_interface_id(), Some("dxvif-1"));
+    assert_eq!(interface.virtual_interface_type(), Some("private"));
+    assert!(interface.virtual_interface_state().is_some());
+    assert_eq!(interface.connection_id(), Some("dxcon-1"));
+    assert_eq!(interface.virtual_gateway_id(), Some("vgw-1"));
+    assert_eq!(interface.direct_connect_gateway_id(), Some("dxgw-1"));
+    assert_eq!(interface.amazon_address(), Some("169.254.1.1/30"));
+    assert_eq!(interface.customer_address(), Some("169.254.1.2/30"));
+    let peer = &interface.bgp_peers()[0];
+    assert_eq!(peer.amazon_address(), Some("169.254.1.1/30"));
+    assert_eq!(peer.customer_address(), Some("169.254.1.2/30"));
+    assert!(peer.bgp_peer_state().is_some());
+
+    let requests = request_bodies(&http);
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].contains("page-2"), "{}", requests[1]);
+}
+
+#[tokio::test]
+async fn direct_connect_gateways_ask_each_gateway_for_its_associations() {
+    let gateways = r#"{"directConnectGateways":[
+        {"directConnectGatewayId":"dxgw-1","directConnectGatewayState":"available"},
+        {"directConnectGatewayId":"dxgw-2","directConnectGatewayState":"available"}
+    ]}"#;
+    let first_associations = r#"{"directConnectGatewayAssociations":[{"directConnectGatewayId":"dxgw-1","associationState":"associated","associatedGateway":{"id":"vgw-1","type":"virtualPrivateGateway"}}],"nextToken":"assoc-2"}"#;
+    let more_associations = r#"{"directConnectGatewayAssociations":[{"directConnectGatewayId":"dxgw-1","associationState":"updating","associatedGateway":{"id":"tgw-1","type":"transitGateway"}}]}"#;
+    let no_associations = r#"{"directConnectGatewayAssociations":[]}"#;
+    let (cfg, http) = replay(&[
+        (JSON11, gateways),
+        (JSON11, first_associations),
+        (JSON11, more_associations),
+        (JSON11, no_associations),
+    ])
+    .await;
+
+    let AWSDirectConnectGateways {
+        gateways,
+        associations,
+    } = super::direct_connect::collector::gateways(&cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(gateways.len(), 2);
+    assert!(gateways[0].direct_connect_gateway_state().is_some());
+    let associated: Vec<_> = associations
+        .iter()
+        .filter_map(|association| association.associated_gateway())
+        .filter_map(|gateway| gateway.id().zip(gateway.r#type()))
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(associated, vec!["vgw-1", "tgw-1"]);
+    assert!(associations[0].association_state().is_some());
+    assert_eq!(associations[0].direct_connect_gateway_id(), Some("dxgw-1"));
+
+    let requests = request_bodies(&http);
+    assert!(requests[1].contains("dxgw-1"), "{}", requests[1]);
+    assert!(
+        requests[2].contains("dxgw-1") && requests[2].contains("assoc-2"),
+        "{}",
+        requests[2]
+    );
+    assert!(requests[3].contains("dxgw-2"), "{}", requests[3]);
+}
+
+fn request_bodies(http: &StaticReplayClient) -> Vec<String> {
+    http.actual_requests()
+        .map(|request| {
+            String::from_utf8_lossy(request.body().bytes().unwrap_or_default()).into_owned()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn direct_connect_refuses_a_page_token_that_repeats() {
+    let page = r#"{"connections":[{"connectionId":"dxcon-1"}],"nextToken":"stuck"}"#;
+    let cfg = replay_config(&[(JSON11, page), (JSON11, page)]).await;
+    let error = super::direct_connect::collector::runner(&cfg)
+        .await
+        .expect_err("a token that never advances must fail, not loop or truncate");
+    assert!(error.to_string().contains("repeated"), "{error}");
+}
+
+#[tokio::test]
+async fn direct_connect_refuses_a_page_token_that_comes_back() {
+    let first = r#"{"connections":[{"connectionId":"dxcon-1"}],"nextToken":"a"}"#;
+    let second = r#"{"connections":[{"connectionId":"dxcon-2"}],"nextToken":"b"}"#;
+    let cfg = replay_config(&[(JSON11, first), (JSON11, second), (JSON11, first)]).await;
+    let error = super::direct_connect::collector::runner(&cfg)
+        .await
+        .expect_err("a cursor that cycles must fail, not loop");
+    assert!(error.to_string().contains("repeated"), "{error}");
 }

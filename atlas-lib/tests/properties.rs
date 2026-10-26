@@ -292,6 +292,31 @@ proptest! {
 
 proptest! {
     #[test]
+    fn both_ends_of_a_link_read_their_addresses_in_the_subnet_they_share(
+        base in any::<u32>(),
+        width in 1u8..=32,
+        near in any::<u32>(),
+        far in any::<u32>(),
+    ) {
+        let subnet_mask = u32::MAX.checked_shl(32 - u32::from(width)).unwrap_or(0);
+        let inside = |host: u32| {
+            IpAddr::V4(std::net::Ipv4Addr::from((base & subnet_mask) | (host & !subnet_mask)))
+        };
+        let subnet = format!("{}/{width}", inside(0));
+        let end = |host: u32| {
+            let address = inside(host);
+            Node::link_ip(&format!("{address}/{width}"))
+                .map(|node| (address, node))
+                .ok_or_else(|| TestCaseError::fail(format!("{address}/{width} names no link")))
+        };
+        for (address, link_end) in [end(near)?, end(far)?] {
+            prop_assert_eq!(link_end, Node::ip(&address.to_string(), &subnet));
+        }
+    }
+}
+
+proptest! {
+    #[test]
     fn only_a_private_address_depends_on_the_network_it_is_read_in(
         text in address_text(),
     ) {
@@ -1412,7 +1437,7 @@ proptest! {
             );
             builder.link_to(pip, public(gateway_address(index)), Edge::ConnectsTo);
             for named in names {
-                let connection = builder.get_or_add_node(Node::AzureVpnConnection(
+                let connection = builder.get_or_add_node(Node::AzureGatewayConnection(
                     format!("conn-{index}-{named}").into(),
                 ));
                 builder.link_to(

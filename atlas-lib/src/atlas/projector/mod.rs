@@ -4,8 +4,10 @@ pub mod cloudflare;
 pub mod gcp;
 
 use crate::Settings;
+use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::cloud::definition::Provider as CloudProvider;
+use petgraph::graph::NodeIndex;
 use rayon::prelude::*;
 
 macro_rules! project_leaf {
@@ -26,6 +28,16 @@ macro_rules! project_leaf {
 }
 
 pub(crate) use project_leaf;
+
+pub(crate) fn link_bgp_session(
+    builder: &mut GraphBuilder,
+    end: NodeIndex,
+    held: Node,
+    named: Node,
+) {
+    builder.link_to(end, held, Edge::ConnectsTo);
+    builder.link_to(end, named, Edge::RoutesTo);
+}
 
 pub(crate) fn project_parallel<T: Sync>(
     builder: &mut GraphBuilder,

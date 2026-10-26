@@ -6,8 +6,9 @@ use crate::atlas::flow::{FlowAction, FlowIndex, FlowObservation};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
-    AWSConnectivity, AWSLoadBalancing, AWSNetworking, AWSRoute53, AmazonCollection,
-    CloudflareCollection, GoogleCollection, MicrosoftCollection, Provider, QueueUrl, TableName,
+    AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
+    AWSRoute53, AmazonCollection, CloudflareCollection, GoogleCollection, MicrosoftCollection,
+    Provider, QueueUrl, TableName,
 };
 use std::collections::HashMap;
 
@@ -73,15 +74,16 @@ pub fn observed() -> FlowIndex {
 
 pub fn flows() -> Vec<FlowObservation> {
     let now = now_millis();
-    let flow = |(src, src_port): (&str, u16),
-                (dst, dst_port): (&str, u16),
-                resources: Vec<Node>,
-                packets: u64,
-                action| FlowObservation {
+    let flow_in = |network: &str,
+                   (src, src_port): (&str, u16),
+                   (dst, dst_port): (&str, u16),
+                   resources: Vec<Node>,
+                   packets: u64,
+                   action| FlowObservation {
         source: CollectionSource::Aws,
         scope: REGION.to_owned(),
-        src: Node::ip(src, AWS_NETWORK),
-        dst: Node::ip(dst, AWS_NETWORK),
+        src: Node::ip(src, network),
+        dst: Node::ip(dst, network),
         src_port: Some(src_port),
         dst_port: Some(dst_port),
         resources,
@@ -89,6 +91,9 @@ pub fn flows() -> Vec<FlowObservation> {
         bytes: packets.saturating_mul(AVERAGE_PACKET_BYTES),
         action,
         observed_at: now,
+    };
+    let flow = |src, dst, resources, packets, action| {
+        flow_in(AWS_NETWORK, src, dst, resources, packets, action)
     };
     let web01 = || {
         vec![
@@ -242,6 +247,17 @@ pub fn flows() -> Vec<FlowObservation> {
             8_400,
             Some(FlowAction::Accepted),
         ),
+        flow_in(
+            DATA_NETWORK,
+            ("10.40.1.20", 47100),
+            ("10.20.0.5", 5432),
+            vec![
+                Node::AwsEc2Instance("i-globex-warehouse".into()),
+                Node::AwsEc2Eni("eni-globex-warehouse".into()),
+            ],
+            33_600,
+            Some(FlowAction::Accepted),
+        ),
     ]
 }
 
@@ -274,8 +290,21 @@ fn now_millis() -> i64 {
 const AZURE_VPN_ADDRESS: &str = "198.51.100.60";
 const GCP_VPN_ADDRESS: &str = "198.51.100.70";
 const AWS_VPN_ADDRESSES: [&str; 3] = ["192.0.2.101", "192.0.2.102", "192.0.2.103"];
+const DATA_NETWORK: &str = "vpc-globex-data";
+const DX_AMAZON_ADDRESS: &str = "169.254.60.1/30";
+const DX_GOOGLE_ADDRESS: &str = "169.254.60.2/30";
+const ER_PRIMARY_PREFIX: &str = "169.254.70.0/30";
+const ER_SECONDARY_PREFIX: &str = "169.254.70.4/30";
+const ER_GOOGLE_ADDRESS: &str = "169.254.70.1/30";
+const ER_MICROSOFT_ADDRESS: &str = "169.254.70.2/30";
 
 pub fn aws() -> Provider {
+    use aws_sdk_directconnect::types::{
+        AssociatedGateway, BgpPeer, BgpPeerState, Connection, ConnectionState,
+        DirectConnectGateway, DirectConnectGatewayAssociation,
+        DirectConnectGatewayAssociationState, DirectConnectGatewayState, GatewayType,
+        VirtualInterface, VirtualInterfaceState,
+    };
     use aws_sdk_ec2::types::{
         Address, AttachmentStatus, CustomerGateway, GroupIdentifier, InstanceNetworkInterface,
         InternetGateway, InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway,
@@ -344,11 +373,11 @@ pub fn aws() -> Provider {
         .build();
     let warehouse = InstanceBuilder::default()
         .set_instance_id(Some("i-globex-warehouse".to_owned()))
-        .set_vpc_id(Some("vpc-globex-data".to_owned()))
+        .set_vpc_id(Some(DATA_NETWORK.to_owned()))
         .set_subnet_id(Some("subnet-data-1a".to_owned()))
         .set_private_ip_address(Some("10.40.1.20".to_owned()))
         .set_network_interfaces(Some(vec![eni_in(
-            "vpc-globex-data",
+            DATA_NETWORK,
             "eni-globex-warehouse",
             "subnet-data-1a",
         )]))
@@ -705,7 +734,7 @@ pub fn aws() -> Provider {
     let vpc = |id: &str, cidr: &str| Vpc::builder().vpc_id(id).cidr_block(cidr).build();
     let vpcs = vec![
         vpc(AWS_NETWORK, "10.10.0.0/16"),
-        vpc("vpc-globex-data", "10.40.0.0/16"),
+        vpc(DATA_NETWORK, "10.40.0.0/16"),
         vpc("vpc-globex-shared", "10.50.0.0/16"),
         vpc("vpc-globex-staging", "10.10.0.0/16"),
     ];
@@ -730,7 +759,7 @@ pub fn aws() -> Provider {
         peering(
             "pcx-globex-data",
             VpcPeeringConnectionStateReasonCode::Active,
-            "vpc-globex-data",
+            DATA_NETWORK,
         ),
         peering(
             "pcx-globex-staging",
@@ -758,17 +787,21 @@ pub fn aws() -> Provider {
         attachment("tgw-attach-globex-shared", "vpc-globex-shared"),
     ];
 
-    let vpn_gateways = vec![
+    let vpn_gateway = |id: &str, vpc_id: &str| {
         VpnGateway::builder()
-            .vpn_gateway_id("vgw-globex")
+            .vpn_gateway_id(id)
             .state(VpnState::Available)
             .vpc_attachments(
                 VpcAttachment::builder()
-                    .vpc_id(AWS_NETWORK)
+                    .vpc_id(vpc_id)
                     .state(AttachmentStatus::Attached)
                     .build(),
             )
-            .build(),
+            .build()
+    };
+    let vpn_gateways = vec![
+        vpn_gateway("vgw-globex", AWS_NETWORK),
+        vpn_gateway("vgw-globex-data", DATA_NETWORK),
     ];
     let customer_gateway = |id: &str, ip: &str| {
         CustomerGateway::builder()
@@ -805,6 +838,55 @@ pub fn aws() -> Provider {
             .transit_gateway_id("tgw-globex")
             .build(),
     ];
+
+    let direct_connect = AWSDirectConnect {
+        connections: vec![
+            Connection::builder()
+                .connection_id("dxcon-globex-gcp")
+                .connection_name("globex-cross-cloud-gcp")
+                .connection_state(ConnectionState::Available)
+                .location("EqDC2")
+                .build(),
+        ],
+        virtual_interfaces: vec![
+            VirtualInterface::builder()
+                .virtual_interface_id("dxvif-globex-gcp")
+                .virtual_interface_type("private")
+                .virtual_interface_state(VirtualInterfaceState::Available)
+                .connection_id("dxcon-globex-gcp")
+                .direct_connect_gateway_id("dxgw-globex")
+                .amazon_address(DX_AMAZON_ADDRESS)
+                .customer_address(DX_GOOGLE_ADDRESS)
+                .bgp_peers(
+                    BgpPeer::builder()
+                        .amazon_address(DX_AMAZON_ADDRESS)
+                        .customer_address(DX_GOOGLE_ADDRESS)
+                        .bgp_peer_state(BgpPeerState::Available)
+                        .build(),
+                )
+                .build(),
+        ],
+    };
+    let direct_connect_gateways = AWSDirectConnectGateways {
+        gateways: vec![
+            DirectConnectGateway::builder()
+                .direct_connect_gateway_id("dxgw-globex")
+                .direct_connect_gateway_state(DirectConnectGatewayState::Available)
+                .build(),
+        ],
+        associations: vec![
+            DirectConnectGatewayAssociation::builder()
+                .direct_connect_gateway_id("dxgw-globex")
+                .association_state(DirectConnectGatewayAssociationState::Associated)
+                .associated_gateway(
+                    AssociatedGateway::builder()
+                        .id("vgw-globex-data")
+                        .r#type(GatewayType::VirtualPrivateGateway)
+                        .build(),
+                )
+                .build(),
+        ],
+    };
 
     let interface_in = |vpc: &str, id: &str, subnet: &str, ip: &str| {
         NetworkInterface::builder()
@@ -881,7 +963,7 @@ pub fn aws() -> Provider {
             .description("RDSNetworkInterface")
             .build(),
         attached_in(
-            "vpc-globex-data",
+            DATA_NETWORK,
             "eni-globex-warehouse",
             "subnet-data-1a",
             "10.40.1.20",
@@ -929,7 +1011,7 @@ pub fn aws() -> Provider {
             }),
         ),
         (
-            r.clone(),
+            "global".to_owned(),
             AmazonCollection::AmazonRoute53(AWSRoute53 {
                 hosted_zones: vec![hosted_zone],
                 record_sets: vec![record_a, record_cname, record_db_cname],
@@ -950,7 +1032,7 @@ pub fn aws() -> Provider {
         ),
         (r.clone(), AmazonCollection::AmazonSns(vec![sns])),
         (
-            r.clone(),
+            "global".to_owned(),
             AmazonCollection::AmazonCloudFront(vec![cloudfront]),
         ),
         (r.clone(), AmazonCollection::AmazonSecurityGroups(vec![sg])),
@@ -965,6 +1047,14 @@ pub fn aws() -> Provider {
                 customer_gateways,
                 vpn_connections,
             }),
+        ),
+        (
+            r.clone(),
+            AmazonCollection::AmazonDirectConnect(direct_connect),
+        ),
+        (
+            "global".to_owned(),
+            AmazonCollection::AmazonDirectConnectGateways(direct_connect_gateways),
         ),
         (
             r,
@@ -986,6 +1076,7 @@ pub fn gcp() -> Provider {
     use crate::api::google::dns::ManagedZone;
     use crate::api::google::functions::CloudFunction;
     use crate::api::google::gke::{Cluster, NetworkConfig};
+    use crate::api::google::interconnect::{Interconnect, InterconnectAttachment, Router};
     use crate::api::google::pubsub::{Subscription, Topic};
     use crate::api::google::run::Service;
     use crate::api::google::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
@@ -1170,6 +1261,54 @@ pub fn gcp() -> Provider {
         ..Default::default()
     };
 
+    let compute = format!("https://www.googleapis.com/compute/v1/projects/{GCP_PROJECT}");
+    let router_link = format!("{compute}/regions/us-east4/routers/rtr-globex-interconnect");
+    let router = Router {
+        name: Some("rtr-globex-interconnect".to_owned()),
+        self_link: Some(router_link.clone()),
+        network: net.self_link.clone(),
+        ..Default::default()
+    };
+    let interconnect_link = |name: &str| format!("{compute}/global/interconnects/{name}");
+    let interconnect = |name: &str| Interconnect {
+        name: Some(name.to_owned()),
+        self_link: Some(interconnect_link(name)),
+        state: Some("ACTIVE".to_owned()),
+        ..Default::default()
+    };
+    let attachment = |name: &str, interconnect: &str, cloud_router: &str, customer_router: &str| {
+        InterconnectAttachment {
+            name: Some(name.to_owned()),
+            self_link: Some(format!(
+                "{compute}/regions/us-east4/interconnectAttachments/{name}"
+            )),
+            state: Some("ACTIVE".to_owned()),
+            router: Some(router_link.clone()),
+            interconnect: Some(interconnect_link(interconnect)),
+            cloud_router_ip_address: Some(cloud_router.to_owned()),
+            customer_router_ip_address: Some(customer_router.to_owned()),
+            ..Default::default()
+        }
+    };
+    let interconnects = vec![
+        interconnect("cci-globex-aws"),
+        interconnect("cci-globex-azure"),
+    ];
+    let attachments = vec![
+        attachment(
+            "att-globex-aws",
+            "cci-globex-aws",
+            DX_GOOGLE_ADDRESS,
+            DX_AMAZON_ADDRESS,
+        ),
+        attachment(
+            "att-globex-azure",
+            "cci-globex-azure",
+            ER_GOOGLE_ADDRESS,
+            ER_MICROSOFT_ADDRESS,
+        ),
+    ];
+
     let p = GCP_PROJECT.to_owned();
     Provider::GCP(vec![
         (p.clone(), GoogleCollection::GoogleInstances(vec![instance])),
@@ -1206,8 +1345,17 @@ pub fn gcp() -> Provider {
             GoogleCollection::GoogleVpnTunnels(vec![vpn_tunnel]),
         ),
         (
-            p,
+            p.clone(),
             GoogleCollection::GoogleExternalVpnGateways(vec![external_gateway]),
+        ),
+        (p.clone(), GoogleCollection::GoogleRouters(vec![router])),
+        (
+            p.clone(),
+            GoogleCollection::GoogleInterconnects(interconnects),
+        ),
+        (
+            p,
+            GoogleCollection::GoogleInterconnectAttachments(attachments),
         ),
     ])
 }
@@ -1307,7 +1455,6 @@ pub fn azure() -> Provider {
         )),
         name: Some("vng-globex-hub".to_owned()),
         location: Some("eastus".to_owned()),
-        gateway_type: Some("Vpn".to_owned()),
         provisioning_state: Some("Succeeded".to_owned()),
         subnet_ids: vec![azure_id(
             "Microsoft.Network/virtualNetworks/vnet-globex-hub/subnets/GatewaySubnet",
@@ -1325,14 +1472,53 @@ pub fn azure() -> Provider {
         gateway_ip_address: Some(AWS_VPN_ADDRESSES[0].to_owned()),
         provisioning_state: Some("Succeeded".to_owned()),
     };
-    let vpn_connection = VpnConnection {
+    let vpn_connection = GatewayConnection {
         id: Some(azure_id("Microsoft.Network/connections/conn-globex-aws")),
         name: Some("conn-globex-aws".to_owned()),
         location: Some("eastus".to_owned()),
-        connection_type: Some("IPsec".to_owned()),
         provisioning_state: Some("Succeeded".to_owned()),
         gateway_id: vpn_gateway.id.clone(),
         local_gateway_id: local_gateway.id.clone(),
+        circuit_id: None,
+    };
+
+    let expressroute_gateway = VirtualNetworkGateway {
+        id: Some(azure_id(
+            "Microsoft.Network/virtualNetworkGateways/ergw-globex-hub",
+        )),
+        name: Some("ergw-globex-hub".to_owned()),
+        location: Some("eastus".to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+        subnet_ids: vec![azure_id(
+            "Microsoft.Network/virtualNetworks/vnet-globex-hub/subnets/GatewaySubnet",
+        )],
+        public_ip_ids: Vec::new(),
+    };
+    let circuit = ExpressRouteCircuit {
+        id: Some(azure_id(
+            "Microsoft.Network/expressRouteCircuits/er-globex-gcp",
+        )),
+        name: Some("er-globex-gcp".to_owned()),
+        location: Some("eastus".to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+        service_provider_provisioning_state: Some("Provisioned".to_owned()),
+        peerings: vec![ExpressRoutePeering {
+            peering_type: Some("AzurePrivatePeering".to_owned()),
+            state: Some("Enabled".to_owned()),
+            peer_address_prefixes: vec![
+                ER_PRIMARY_PREFIX.to_owned(),
+                ER_SECONDARY_PREFIX.to_owned(),
+            ],
+        }],
+    };
+    let expressroute_connection = GatewayConnection {
+        id: Some(azure_id("Microsoft.Network/connections/conn-globex-gcp")),
+        name: Some("conn-globex-gcp".to_owned()),
+        location: Some("eastus".to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+        gateway_id: expressroute_gateway.id.clone(),
+        local_gateway_id: None,
+        circuit_id: circuit.id.clone(),
     };
 
     let ip_configuration = |name: &str,
@@ -1480,9 +1666,10 @@ pub fn azure() -> Provider {
         MicrosoftCollection::AzureLoadBalancers(vec![balancer]),
         MicrosoftCollection::AzureNetworkSecurityGroups(vec![nsg]),
         MicrosoftCollection::AzurePublicIpAddresses(vec![pip, vpn_pip]),
-        MicrosoftCollection::AzureVirtualNetworkGateways(vec![vpn_gateway]),
+        MicrosoftCollection::AzureVirtualNetworkGateways(vec![vpn_gateway, expressroute_gateway]),
         MicrosoftCollection::AzureLocalNetworkGateways(vec![local_gateway]),
-        MicrosoftCollection::AzureVpnConnections(vec![vpn_connection]),
+        MicrosoftCollection::AzureGatewayConnections(vec![vpn_connection, expressroute_connection]),
+        MicrosoftCollection::AzureExpressRouteCircuits(vec![circuit]),
         MicrosoftCollection::AzureStorageAccounts(vec![storage]),
         MicrosoftCollection::AzureManagedClusters(vec![aks]),
         MicrosoftCollection::AzureSqlServers(vec![sql]),

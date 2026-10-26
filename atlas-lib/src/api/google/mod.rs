@@ -4,6 +4,7 @@ pub mod compute_network;
 pub mod dns;
 pub mod functions;
 pub mod gke;
+pub mod interconnect;
 pub mod pubsub;
 pub mod run;
 pub mod sql;

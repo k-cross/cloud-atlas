@@ -177,6 +177,104 @@ async fn vpn_tunnels_and_external_gateways() {
 }
 
 #[tokio::test]
+async fn routers_and_interconnects() {
+    use atlas_lib::api::google::interconnect::{
+        list_interconnect_attachments, list_interconnects, list_routers,
+    };
+    let (_s, c) = serve(
+        "/compute/v1/projects/p/aggregated/routers",
+        json!({ "items": {
+            "regions/us-east4": { "routers": [ {
+                "name": "rtr",
+                "selfLink": "https://x/projects/p/regions/us-east4/routers/rtr",
+                "network": "https://x/projects/p/global/networks/vpc",
+                "bgp": { "asn": 16550 }
+            } ] },
+            "regions/empty": { "warning": { "code": "NO_RESULTS_ON_PAGE" } }
+        } }),
+    )
+    .await;
+    let routers = list_routers(&c, "p").await.expect("ok");
+    assert_eq!(routers.len(), 1, "empty scope skipped");
+    assert_eq!(
+        routers[0].self_link.as_deref(),
+        Some("https://x/projects/p/regions/us-east4/routers/rtr")
+    );
+    assert_eq!(
+        routers[0].network.as_deref(),
+        Some("https://x/projects/p/global/networks/vpc")
+    );
+
+    let (_s, c) = serve(
+        "/compute/v1/projects/p/global/interconnects",
+        json!({ "items": [ {
+            "name": "cci-aws",
+            "selfLink": "https://x/projects/p/global/interconnects/cci-aws",
+            "interconnectType": "DEDICATED",
+            "state": "ACTIVE",
+            "operationalStatus": "OS_ACTIVE"
+        } ] }),
+    )
+    .await;
+    let interconnects = list_interconnects(&c, "p").await.expect("ok");
+    assert_eq!(
+        interconnects[0].self_link.as_deref(),
+        Some("https://x/projects/p/global/interconnects/cci-aws")
+    );
+    assert_eq!(interconnects[0].state.as_deref(), Some("ACTIVE"));
+
+    let (_s, c) = serve(
+        "/compute/v1/projects/p/aggregated/interconnectAttachments",
+        json!({ "items": {
+            "regions/us-east4": { "interconnectAttachments": [ {
+                "name": "att-aws",
+                "selfLink": "https://x/projects/p/regions/us-east4/interconnectAttachments/att-aws",
+                "type": "DEDICATED",
+                "state": "ACTIVE",
+                "router": "https://x/projects/p/regions/us-east4/routers/rtr",
+                "interconnect": "https://x/projects/p/global/interconnects/cci-aws",
+                "cloudRouterIpAddress": "169.254.60.2/30",
+                "customerRouterIpAddress": "169.254.60.1/30",
+                "cloudRouterIpv6Address": "2600:2d00:0:2::1/125",
+                "customerRouterIpv6Address": "2600:2d00:0:2::2/125"
+            } ] }
+        } }),
+    )
+    .await;
+    let attachments = list_interconnect_attachments(&c, "p").await.expect("ok");
+    let attachment = &attachments[0];
+    assert_eq!(
+        attachment.self_link.as_deref(),
+        Some("https://x/projects/p/regions/us-east4/interconnectAttachments/att-aws")
+    );
+    assert_eq!(attachment.state.as_deref(), Some("ACTIVE"));
+    assert_eq!(
+        attachment.router.as_deref(),
+        Some("https://x/projects/p/regions/us-east4/routers/rtr")
+    );
+    assert_eq!(
+        attachment.interconnect.as_deref(),
+        Some("https://x/projects/p/global/interconnects/cci-aws")
+    );
+    assert_eq!(
+        attachment.cloud_router_ip_address.as_deref(),
+        Some("169.254.60.2/30")
+    );
+    assert_eq!(
+        attachment.customer_router_ip_address.as_deref(),
+        Some("169.254.60.1/30")
+    );
+    assert_eq!(
+        attachment.cloud_router_ipv6_address.as_deref(),
+        Some("2600:2d00:0:2::1/125")
+    );
+    assert_eq!(
+        attachment.customer_router_ipv6_address.as_deref(),
+        Some("2600:2d00:0:2::2/125")
+    );
+}
+
+#[tokio::test]
 async fn dns_managed_zones() {
     use atlas_lib::api::google::dns::list_managed_zones;
     let (_s, c) = serve(

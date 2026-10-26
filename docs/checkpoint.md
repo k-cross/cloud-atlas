@@ -4,20 +4,20 @@
 
 All four providers collect, all three change-detection tiers run for AWS, and the full stack runs credential-free in demo mode.
 
-- **`atlas-lib`:** Collectors and projectors for AWS, GCP, Azure, and Cloudflare; 83 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
+- **`atlas-lib`:** Collectors and projectors for AWS, GCP, Azure, and Cloudflare; 90 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
 - **Tier 1 (Events):** `atlas::event` + `cloud/amazon/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
 - **Tier 2 (Flows):** `atlas::flow` + `cloud/amazon/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
 - **Tier 3 (Reconciliation):** `patch::diff` over a persistent graph; `CollectionReport` + `carry_forward` + `Retention` distinguish collection failures from deletions.
-- **Address & network coverage:** AWS `DescribeNetworkInterfaces` and RDS endpoint hostnames; GCP instance internal/NAT IPs, forwarding rules, and Cloud SQL; Azure NICs and load balancers. Private IPs scope to their network (`GenericPrivateIpAddress`) and resolve across AWS VPC peering, Transit Gateways, Azure VNet peering, GCP network peering, and site-to-site VPN tunnels between clouds (`docs/network_connectivity_design.md`).
+- **Address & network coverage:** AWS `DescribeNetworkInterfaces` and RDS endpoint hostnames; GCP instance internal/NAT IPs, forwarding rules, and Cloud SQL; Azure NICs and load balancers. Private IPs scope to their network (`GenericPrivateIpAddress`) and resolve across AWS VPC peering, Transit Gateways, Azure VNet peering, GCP network peering, site-to-site VPN tunnels, and dedicated circuits (Direct Connect, ExpressRoute and Cloud Interconnect, paired across clouds over Cross-Cloud Interconnect) (`docs/network_connectivity_design.md`).
 - **Derived edges (`atlas::derive::all`):** `Covers` (host IP in CIDR, per network) and `Serves` (`inferred`/`confirmed` service topology across instance and IP target groups, gated on `scanned_instances`).
 - **`atlas-server` & `atlas-web`:** `/snapshot.json` (v3), `/collection.json`, `/ws`; Wasm ForceAtlas2 layout + Sigma.js WebGL with traffic overlay, `Serves` status styling, and service view.
 - **`cargo xtask`:** `dev [--demo]`, `wasm`, `demo`, `test [--e2e]`.
 
 ## Next Up
 
-1. **Network connectivity Phase 2b** — Direct Connect, ExpressRoute, and Cloud Interconnect (`docs/network_connectivity_design.md`); site-to-site VPN (Phase 2a) is done.
-2. **Tiers 1–2 for GCP and Azure** — Cloud Asset Inventory → Pub/Sub, Azure Event Grid, and GCP/Azure flow logs into `FlowObservation` (`docs/change_monitoring_design.md`).
-3. **Rendering Phase 3 remainder & Phase 4** — tooltips, drill-down, raw observation values, and search (`docs/graph_rendering_design.md`).
+1. **Tiers 1–2 for GCP and Azure** — Cloud Asset Inventory → Pub/Sub, Azure Event Grid, and GCP/Azure flow logs into `FlowObservation` (`docs/change_monitoring_design.md`). Azure flow logs would also let the demo show the ExpressRoute circuit carrying traffic.
+2. **Rendering Phase 3 remainder & Phase 4** — tooltips, drill-down, raw observation values, and search (`docs/graph_rendering_design.md`).
+3. **Network connectivity Phase 3** — address spaces, route tables, Virtual WAN / NCC hubs (`docs/network_connectivity_design.md`); peering, transit gateways, VPN and dedicated circuits (Phases 1–2b) are done.
 
 ## Backlog
 
@@ -30,7 +30,7 @@ All four providers collect, all three change-detection tiers run for AWS, and th
 - **Stopped-instance ENIs:** A stopped instance's ENI keeps its IP in the graph, so traffic still hitting that IP derives `Serves` to `AwsEc2Eni` (`docs/service_topology_design.md` §1).
 - **Config call volume:** The Config collector calls `ListDiscoveredResources` for every type it draws (several hundred per region per scan). Call `GetDiscoveredResourceCounts` first and list only the types present, to stay clear of throttling at a 60 s poll.
 - **EventBridge buses:** `eventbridge` collects buses every scan but the projector only logs them. Draw them as nodes or drop the collector.
-- **Demo follow-ups (F1–F6):** Scripted 5-step story, interconnect flows, isolated guard nodes, short labels, `/collection.json` UI badge (`docs/demo_design.md`).
+- **Demo follow-ups (F1, F3–F6):** Scripted 5-step story, isolated guard nodes, short labels, `/collection.json` UI badge, Tier 1 in demo mode (`docs/demo_design.md`).
 
 ## Resume
 

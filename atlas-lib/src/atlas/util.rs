@@ -96,6 +96,17 @@ pub fn mask_to_prefix(addr: &IpAddr, prefix: u8) -> Option<IpAddr> {
     })
 }
 
+pub fn offset_address(addr: &IpAddr, offset: u32) -> Option<IpAddr> {
+    match addr {
+        IpAddr::V4(v4) => u32::from(*v4)
+            .checked_add(offset)
+            .map(|shifted| IpAddr::V4(Ipv4Addr::from(shifted))),
+        IpAddr::V6(v6) => u128::from(*v6)
+            .checked_add(u128::from(offset))
+            .map(|shifted| IpAddr::V6(Ipv6Addr::from(shifted))),
+    }
+}
+
 pub fn canonical_hostname(value: &str) -> Option<String> {
     let trimmed = value.trim_end_matches('.');
     (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
