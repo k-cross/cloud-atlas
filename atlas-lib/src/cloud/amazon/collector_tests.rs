@@ -1,6 +1,6 @@
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
-    AWSRoute53, TableName,
+    AWSRoute53, AWSTransitGatewayRouting, TableName,
 };
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
@@ -314,7 +314,13 @@ async fn route53_refuses_a_record_cursor_that_does_not_advance() {
 #[tokio::test]
 async fn ec2_networking_plane() {
     let route_tables = r#"<DescribeRouteTablesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
-  <routeTableSet><item><routeTableId>rtb-1</routeTableId><vpcId>vpc-aaa</vpcId><routeSet/><associationSet/></item></routeTableSet>
+  <routeTableSet><item><routeTableId>rtb-1</routeTableId><vpcId>vpc-aaa</vpcId>
+    <routeSet>
+      <item><destinationCidrBlock>10.0.0.0/16</destinationCidrBlock><gatewayId>local</gatewayId><state>active</state></item>
+      <item><destinationPrefixListId>pl-0shared</destinationPrefixListId><transitGatewayId>tgw-1</transitGatewayId><state>blackhole</state></item>
+    </routeSet>
+    <associationSet><item><subnetId>subnet-1</subnetId></item></associationSet>
+  </item></routeTableSet>
 </DescribeRouteTablesResponse>"#;
     let igws = r#"<DescribeInternetGatewaysResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
   <internetGatewaySet><item><internetGatewayId>igw-1</internetGatewayId><attachmentSet/></item></internetGatewaySet>
@@ -333,6 +339,22 @@ async fn ec2_networking_plane() {
         addresses,
     } = super::networking::collector::runner(&cfg).await.unwrap();
     assert_eq!(route_tables[0].route_table_id(), Some("rtb-1"));
+    assert_eq!(route_tables[0].vpc_id(), Some("vpc-aaa"));
+    assert_eq!(
+        route_tables[0].associations()[0].subnet_id(),
+        Some("subnet-1")
+    );
+    let [local, listed] = route_tables[0].routes() else {
+        panic!("two routes, got {:?}", route_tables[0].routes());
+    };
+    assert_eq!(local.destination_cidr_block(), Some("10.0.0.0/16"));
+    assert_eq!(local.gateway_id(), Some("local"));
+    assert_eq!(listed.destination_prefix_list_id(), Some("pl-0shared"));
+    assert_eq!(listed.transit_gateway_id(), Some("tgw-1"));
+    assert_eq!(
+        listed.state(),
+        Some(&aws_sdk_ec2::types::RouteState::Blackhole)
+    );
     assert_eq!(internet_gateways[0].internet_gateway_id(), Some("igw-1"));
     assert_eq!(nat_gateways[0].nat_gateway_id(), Some("nat-1"));
     assert_eq!(addresses[0].public_ip(), Some("52.1.2.3"));
@@ -341,7 +363,11 @@ async fn ec2_networking_plane() {
 #[tokio::test]
 async fn ec2_connectivity_follows_every_page() {
     let vpcs_first = r#"<DescribeVpcsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
-  <vpcSet><item><vpcId>vpc-a</vpcId><cidrBlock>10.0.0.0/16</cidrBlock></item></vpcSet>
+  <vpcSet><item><vpcId>vpc-a</vpcId><cidrBlock>10.0.0.0/16</cidrBlock>
+    <cidrBlockAssociationSet><item><cidrBlock>10.0.0.0/16</cidrBlock><cidrBlockState><state>associated</state></cidrBlockState></item>
+    <item><cidrBlock>10.5.0.0/16</cidrBlock><cidrBlockState><state>associated</state></cidrBlockState></item></cidrBlockAssociationSet>
+    <ipv6CidrBlockAssociationSet><item><ipv6CidrBlock>2600:1f18:aaaa::/56</ipv6CidrBlock><ipv6CidrBlockState><state>associated</state></ipv6CidrBlockState></item></ipv6CidrBlockAssociationSet>
+  </item></vpcSet>
   <nextToken>page-2</nextToken>
 </DescribeVpcsResponse>"#;
     let vpcs_second = r#"<DescribeVpcsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
@@ -420,6 +446,27 @@ async fn ec2_connectivity_follows_every_page() {
 
     let vpc_ids: Vec<_> = vpcs.iter().filter_map(|vpc| vpc.vpc_id()).collect();
     assert_eq!(vpc_ids, vec!["vpc-a", "vpc-b"], "the second page is read");
+    let associated: Vec<_> = vpcs[0]
+        .cidr_block_association_set()
+        .iter()
+        .filter_map(|association| {
+            association.cidr_block().zip(
+                association
+                    .cidr_block_state()
+                    .and_then(|state| state.state()),
+            )
+        })
+        .map(|(cidr, _)| cidr)
+        .collect();
+    assert_eq!(associated, vec!["10.0.0.0/16", "10.5.0.0/16"]);
+    let ipv6 = &vpcs[0].ipv6_cidr_block_association_set()[0];
+    assert_eq!(ipv6.ipv6_cidr_block(), Some("2600:1f18:aaaa::/56"));
+    assert!(
+        ipv6.ipv6_cidr_block_state()
+            .and_then(|state| state.state())
+            .is_some()
+    );
+
     let pcx = &peering_connections[0];
     assert_eq!(pcx.vpc_peering_connection_id(), Some("pcx-1"));
     assert_eq!(
@@ -479,6 +526,126 @@ async fn ec2_connectivity_follows_every_page() {
         Some("192.0.2.8")
     );
     assert_eq!(vpn_connections[1].transit_gateway_id(), Some("tgw-1"));
+}
+
+#[tokio::test]
+async fn ec2_transit_gateway_routing_follows_every_page() {
+    let tables = r#"<DescribeTransitGatewayRouteTablesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <transitGatewayRouteTables>
+    <item><transitGatewayRouteTableId>tgw-rtb-1</transitGatewayRouteTableId><transitGatewayId>tgw-1</transitGatewayId><state>available</state></item>
+    <item><transitGatewayRouteTableId>tgw-rtb-old</transitGatewayRouteTableId><transitGatewayId>tgw-1</transitGatewayId><state>deleting</state></item>
+  </transitGatewayRouteTables>
+</DescribeTransitGatewayRouteTablesResponse>"#;
+    let associations = r#"<GetTransitGatewayRouteTableAssociationsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <associations><item>
+    <transitGatewayAttachmentId>tgw-attach-1</transitGatewayAttachmentId>
+    <resourceId>vpc-b</resourceId><resourceType>vpc</resourceType><state>associated</state>
+  </item></associations>
+</GetTransitGatewayRouteTableAssociationsResponse>"#;
+    let propagations = r#"<GetTransitGatewayRouteTablePropagationsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <transitGatewayRouteTablePropagations><item>
+    <transitGatewayAttachmentId>tgw-attach-vpn</transitGatewayAttachmentId>
+    <resourceId>vpn-2</resourceId><resourceType>vpn</resourceType><state>enabled</state>
+  </item></transitGatewayRouteTablePropagations>
+</GetTransitGatewayRouteTablePropagationsResponse>"#;
+    let routes_first = r#"<SearchTransitGatewayRoutesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <routeSet><item>
+    <destinationCidrBlock>10.9.0.0/16</destinationCidrBlock>
+    <transitGatewayAttachments><item>
+      <resourceId>tgw-2</resourceId><transitGatewayAttachmentId>tgw-attach-peer</transitGatewayAttachmentId><resourceType>peering</resourceType>
+    </item></transitGatewayAttachments>
+    <type>static</type><state>active</state>
+  </item></routeSet>
+  <nextToken>routes-2</nextToken>
+</SearchTransitGatewayRoutesResponse>"#;
+    let routes_second = r#"<SearchTransitGatewayRoutesResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <routeSet>
+    <item><destinationCidrBlock>10.66.0.0/16</destinationCidrBlock><type>static</type><state>blackhole</state></item>
+    <item><prefixListId>pl-0shared</prefixListId><type>static</type><state>active</state></item>
+  </routeSet>
+</SearchTransitGatewayRoutesResponse>"#;
+    let peering_attachments = r#"<DescribeTransitGatewayPeeringAttachmentsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+  <transitGatewayPeeringAttachments><item>
+    <transitGatewayAttachmentId>tgw-attach-peer</transitGatewayAttachmentId>
+    <requesterTgwInfo><transitGatewayId>tgw-1</transitGatewayId><region>us-east-1</region></requesterTgwInfo>
+    <accepterTgwInfo><transitGatewayId>tgw-2</transitGatewayId><region>us-west-2</region></accepterTgwInfo>
+    <state>available</state>
+  </item></transitGatewayPeeringAttachments>
+</DescribeTransitGatewayPeeringAttachmentsResponse>"#;
+    let (cfg, http) = replay(&[
+        (XML, tables),
+        (XML, associations),
+        (XML, propagations),
+        (XML, routes_first),
+        (XML, routes_second),
+        (XML, peering_attachments),
+    ])
+    .await;
+
+    let AWSTransitGatewayRouting {
+        route_tables,
+        peerings,
+    } = super::connectivity::collector::transit_gateway_routing(&cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        route_tables.len(),
+        1,
+        "a table being deleted is not read further"
+    );
+    let routing = &route_tables[0];
+    assert_eq!(
+        routing.table.transit_gateway_route_table_id(),
+        Some("tgw-rtb-1")
+    );
+    assert_eq!(routing.table.transit_gateway_id(), Some("tgw-1"));
+    let association = &routing.associations[0];
+    assert_eq!(association.resource_id(), Some("vpc-b"));
+    assert!(association.resource_type().is_some() && association.state().is_some());
+    let propagation = &routing.propagations[0];
+    assert_eq!(propagation.resource_id(), Some("vpn-2"));
+    assert!(propagation.resource_type().is_some() && propagation.state().is_some());
+    let destinations: Vec<_> = routing
+        .static_routes
+        .iter()
+        .filter_map(|route| route.destination_cidr_block())
+        .collect();
+    assert_eq!(
+        destinations,
+        vec!["10.9.0.0/16", "10.66.0.0/16"],
+        "every page of routes"
+    );
+    assert_eq!(
+        routing.static_routes[2].prefix_list_id(),
+        Some("pl-0shared")
+    );
+    let target = &routing.static_routes[0].transit_gateway_attachments()[0];
+    assert_eq!(
+        target.transit_gateway_attachment_id(),
+        Some("tgw-attach-peer")
+    );
+    assert!(target.resource_type().is_some() && routing.static_routes[0].state().is_some());
+    let peering = &peerings[0];
+    assert_eq!(
+        peering.transit_gateway_attachment_id(),
+        Some("tgw-attach-peer")
+    );
+    assert_eq!(
+        peering
+            .accepter_tgw_info()
+            .and_then(|side| side.transit_gateway_id()),
+        Some("tgw-2")
+    );
+    assert!(peering.state().is_some());
+    let search = request_bodies(&http)
+        .into_iter()
+        .find(|body| body.contains("SearchTransitGatewayRoutes"))
+        .expect("the static routes are searched");
+    assert!(
+        search.contains("tgw-rtb-1") && search.contains("static") && search.contains("blackhole"),
+        "{search}"
+    );
 }
 
 #[tokio::test]

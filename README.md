@@ -4,14 +4,14 @@ Discovers cloud configuration and maintains a live, in-memory property graph of 
 
 ## Architecture
 
-- **Typed graph:** 90 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
+- **Typed graph:** 99 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
 - **`AtlasEngine`:** Concurrent multi-cloud collection, structured failure reporting, and persistent graph state.
 - **Live backend (`atlas-server/`):** Reconciles against providers, diffs by stable resource key, and streams patches over WebSocket across three change tiers: control-plane event streams (Tier 1), flow-log liveness overlays (Tier 2), and full-scan polling (Tier 3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
 - **Liveness overlay:** Observed traffic lives beside the graph in a bounded, expiring `FlowIndex`. `Edge::TrafficFlow` asserts only that traffic occurred; counters and timestamps ride the snapshot's `observations` list.
 - **Service topology:** Derived `Edge::Serves` links collapse load balancer → interface → address → instance paths into direct resource edges, `inferred` from control-plane wiring and `confirmed` by traffic. See [`docs/service_topology_design.md`](docs/service_topology_design.md).
 - **Interactive rendering (`atlas-render/`):** Rust/WebAssembly ForceAtlas2 layout feeding a Sigma.js WebGL frontend. See [`atlas-render/README.md`](atlas-render/README.md).
 
-Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together (e.g. Route 53 resolving to Azure App Service or GCP Cloud Run). Private addresses scope to their network (`GenericPrivateIpAddress`) and resolve across modelled peerings, transit gateways, VPN tunnels and dedicated circuits (`docs/network_connectivity_design.md`). DNS across all providers projects `name -ResolvesTo-> record -ResolvesTo-> target`.
+Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together (e.g. Route 53 resolving to Azure App Service or GCP Cloud Run). Private addresses scope to their network (`GenericPrivateIpAddress`) and resolve across modelled peerings, transit gateways, Virtual WAN and NCC hubs, VPN tunnels and dedicated circuits, gated by each network's address space and by VPC and transit gateway route tables (`docs/network_connectivity_design.md`). DNS across all providers projects `name -ResolvesTo-> record -ResolvesTo-> target`.
 
 ## Status & Roadmap
 
@@ -26,14 +26,15 @@ Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together (e.
   - [ ] GCP and Azure flow logs
 - [x] Site-to-site VPNs across AWS, Azure, and GCP
 - [x] Direct Connect, ExpressRoute, and Cloud Interconnect
+- [x] Address spaces, VPC and transit gateway route tables, transit gateway peering, Virtual WAN and NCC hubs
 - [ ] On-prem discovery
 
 ## Providers
 
-- **AWS** (`--regions`, standard credential chain): EC2, VPC, ENIs, Peering, Transit Gateways, Site-to-Site VPN, Direct Connect, ELB, Route 53, S3, RDS, DynamoDB, Lambda, ECS, EKS, API Gateway, SQS, SNS, CloudFront, IAM, Config. S3 and Route 53 collect under `global`.
-- **GCP** (`--gcp-projects`, gcloud ADC or browser OAuth): Compute, Firewalls, Forwarding Rules, VPC Networks/Subnetworks/Peerings, HA VPN, Cloud Routers, Interconnects/VLAN attachments, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, Cloud Storage.
+- **AWS** (`--regions`, standard credential chain): EC2, VPC (CIDRs, route tables), ENIs, Peering, Transit Gateways (route tables, peering), Site-to-Site VPN, Direct Connect, ELB, Route 53, S3, RDS, DynamoDB, Lambda, ECS, EKS, API Gateway, SQS, SNS, CloudFront, IAM, Config. S3 and Route 53 collect under `global`.
+- **GCP** (`--gcp-projects`, gcloud ADC or browser OAuth): Compute, Firewalls, Forwarding Rules, VPC Networks/Subnetworks/Peerings, Network Connectivity Center hubs and VPC spokes, HA VPN, Cloud Routers, Interconnects/VLAN attachments, Cloud SQL, Cloud DNS, GKE, Cloud Functions, Pub/Sub, Cloud Run, Cloud Storage.
 - **Cloudflare** (`--cloudflare`, `CLOUDFLARE_API_TOKEN`): Zones, DNS records, Workers, Durable Objects, KV, R2, D1.
-- **Azure** (`--azure-subscriptions`, `az login`, Resource Graph): VMs, AKS, App Services, Function Apps, API Management, VNets/Subnets/Peerings, Virtual/Local Network Gateways, Gateway Connections, ExpressRoute Circuits, NICs, Load Balancers, NSGs, Public IPs, DNS Zones, CDN, Storage, SQL, Cosmos DB, Service Bus, Event Grid.
+- **Azure** (`--azure-subscriptions`, `az login`, Resource Graph): VMs, AKS, App Services, Function Apps, API Management, VNets (address spaces)/Subnets/Peerings, Virtual WAN hubs and VNet connections, Virtual/Local Network Gateways, Gateway Connections, ExpressRoute Circuits, NICs, Load Balancers, NSGs, Public IPs, DNS Zones, CDN, Storage, SQL, Cosmos DB, Service Bus, Event Grid.
 
 ## CLI (`atlas`)
 

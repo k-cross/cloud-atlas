@@ -7,8 +7,8 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
-    AWSRoute53, AmazonCollection, CloudflareCollection, GoogleCollection, MicrosoftCollection,
-    Provider, QueueUrl, TableName,
+    AWSRoute53, AWSTransitGatewayRouteTable, AWSTransitGatewayRouting, AmazonCollection,
+    CloudflareCollection, GoogleCollection, MicrosoftCollection, Provider, QueueUrl, TableName,
 };
 use std::collections::HashMap;
 
@@ -247,6 +247,13 @@ pub fn flows() -> Vec<FlowObservation> {
             8_400,
             Some(FlowAction::Accepted),
         ),
+        flow(
+            ("10.10.1.11", 43100),
+            (WEST_API, 443),
+            web02(),
+            6_200,
+            Some(FlowAction::Accepted),
+        ),
         flow_in(
             DATA_NETWORK,
             ("10.40.1.20", 47100),
@@ -291,6 +298,13 @@ const AZURE_VPN_ADDRESS: &str = "198.51.100.60";
 const GCP_VPN_ADDRESS: &str = "198.51.100.70";
 const AWS_VPN_ADDRESSES: [&str; 3] = ["192.0.2.101", "192.0.2.102", "192.0.2.103"];
 const DATA_NETWORK: &str = "vpc-globex-data";
+const WEST_REGION: &str = "us-west-2";
+const WEST_NETWORK: &str = "vpc-globex-west";
+const WEST_RANGE: &str = "10.70.0.0/16";
+const WEST_API: &str = "10.70.1.15";
+const WEST_PEERING: &str = "tgw-attach-globex-peer-west";
+const AZURE_SPOKE_RANGE: &str = "10.20.1.0/24";
+const CLOUD_SQL_RANGE: &str = "10.20.0.0/24";
 const DX_AMAZON_ADDRESS: &str = "169.254.60.1/30";
 const DX_GOOGLE_ADDRESS: &str = "169.254.60.2/30";
 const ER_PRIMARY_PREFIX: &str = "169.254.70.0/30";
@@ -310,12 +324,17 @@ pub fn aws() -> Provider {
         InternetGateway, InternetGatewayAttachment, IpPermission, IpRange, Ipv6Range, NatGateway,
         NatGatewayAddress, NetworkInterface, NetworkInterfaceAssociation,
         NetworkInterfaceAttachment, NetworkInterfacePrivateIpAddress, NetworkInterfaceType,
-        Placement, Route, RouteState, RouteTable, RouteTableAssociation, SecurityGroup, Tag,
-        TransitGateway, TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
-        TransitGatewayAttachmentState, TransitGatewayState, TunnelOption, UserIdGroupPair, Vpc,
-        VpcAttachment, VpcPeeringConnection, VpcPeeringConnectionStateReason,
-        VpcPeeringConnectionStateReasonCode, VpcPeeringConnectionVpcInfo, VpnConnection,
-        VpnConnectionOptions, VpnGateway, VpnState, builders::InstanceBuilder,
+        PeeringTgwInfo, Placement, Route, RouteState, RouteTable, RouteTableAssociation,
+        SecurityGroup, Tag, TransitGateway, TransitGatewayAssociationState,
+        TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
+        TransitGatewayAttachmentState, TransitGatewayPeeringAttachment,
+        TransitGatewayPropagationState, TransitGatewayRoute, TransitGatewayRouteAttachment,
+        TransitGatewayRouteState, TransitGatewayRouteTable, TransitGatewayRouteTableAssociation,
+        TransitGatewayRouteTablePropagation, TransitGatewayRouteTableState, TransitGatewayState,
+        TunnelOption, UserIdGroupPair, Vpc, VpcAttachment, VpcPeeringConnection,
+        VpcPeeringConnectionStateReason, VpcPeeringConnectionStateReasonCode,
+        VpcPeeringConnectionVpcInfo, VpnConnection, VpnConnectionOptions, VpnGateway, VpnState,
+        builders::InstanceBuilder,
     };
 
     let sg_web = GroupIdentifier::builder()
@@ -686,6 +705,12 @@ pub fn aws() -> Provider {
         .network_interface_id("eni-globex-web-02a")
         .instance_id("i-globex-web-02")
         .build();
+    let route = |destination: &str| {
+        Route::builder()
+            .destination_cidr_block(destination)
+            .state(RouteState::Active)
+    };
+    let local = |cidr: &str| route(cidr).gateway_id("local").build();
     let public_rt = RouteTable::builder()
         .route_table_id("rtb-public")
         .vpc_id("vpc-globex")
@@ -694,12 +719,8 @@ pub fn aws() -> Provider {
                 .subnet_id("subnet-public-1a")
                 .build(),
         )
-        .routes(
-            Route::builder()
-                .destination_cidr_block("0.0.0.0/0")
-                .gateway_id("igw-globex")
-                .build(),
-        )
+        .routes(local("10.10.0.0/16"))
+        .routes(route("0.0.0.0/0").gateway_id("igw-globex").build())
         .build();
     let private_rt = RouteTable::builder()
         .route_table_id("rtb-private")
@@ -709,24 +730,40 @@ pub fn aws() -> Provider {
                 .subnet_id("subnet-private-1a")
                 .build(),
         )
+        .routes(local("10.10.0.0/16"))
+        .routes(route("0.0.0.0/0").nat_gateway_id("nat-globex").build())
         .routes(
-            Route::builder()
-                .destination_cidr_block("0.0.0.0/0")
-                .nat_gateway_id("nat-globex")
-                .build(),
-        )
-        .routes(
-            Route::builder()
-                .destination_cidr_block("10.40.0.0/16")
+            route("10.40.0.0/16")
                 .vpc_peering_connection_id("pcx-globex-data")
-                .state(RouteState::Active)
                 .build(),
         )
         .routes(
-            Route::builder()
-                .destination_cidr_block("10.50.0.0/16")
+            route("10.50.0.0/16")
                 .transit_gateway_id("tgw-globex")
-                .state(RouteState::Active)
+                .build(),
+        )
+        .routes(route(AZURE_SPOKE_RANGE).gateway_id("vgw-globex").build())
+        .routes(
+            route(CLOUD_SQL_RANGE)
+                .transit_gateway_id("tgw-globex")
+                .build(),
+        )
+        .routes(route(WEST_RANGE).transit_gateway_id("tgw-globex").build())
+        .build();
+    let data_rt = RouteTable::builder()
+        .route_table_id("rtb-data")
+        .vpc_id(DATA_NETWORK)
+        .routes(local("10.40.0.0/16"))
+        .routes(
+            route("10.10.0.0/16")
+                .vpc_peering_connection_id("pcx-globex-data")
+                .build(),
+        )
+        .routes(route(CLOUD_SQL_RANGE).gateway_id("vgw-globex-data").build())
+        .routes(
+            route("10.60.0.0/16")
+                .vpc_peering_connection_id("pcx-globex-retired")
+                .state(RouteState::Blackhole)
                 .build(),
         )
         .build();
@@ -786,6 +823,147 @@ pub fn aws() -> Provider {
         attachment("tgw-attach-globex-prod", AWS_NETWORK),
         attachment("tgw-attach-globex-shared", "vpc-globex-shared"),
     ];
+    let attached_to = |kind: TransitGatewayAttachmentResourceType, resource: &str, id: &str| {
+        (kind, resource.to_owned(), id.to_owned())
+    };
+    let prod = attached_to(
+        TransitGatewayAttachmentResourceType::Vpc,
+        AWS_NETWORK,
+        "tgw-attach-globex-prod",
+    );
+    let shared = attached_to(
+        TransitGatewayAttachmentResourceType::Vpc,
+        "vpc-globex-shared",
+        "tgw-attach-globex-shared",
+    );
+    let gcp_vpn = attached_to(
+        TransitGatewayAttachmentResourceType::Vpn,
+        "vpn-globex-gcp",
+        "tgw-attach-globex-gcp",
+    );
+    let to_west = attached_to(
+        TransitGatewayAttachmentResourceType::Peering,
+        "tgw-globex-west",
+        WEST_PEERING,
+    );
+    let to_east = attached_to(
+        TransitGatewayAttachmentResourceType::Peering,
+        "tgw-globex",
+        WEST_PEERING,
+    );
+    let west_vpc = attached_to(
+        TransitGatewayAttachmentResourceType::Vpc,
+        WEST_NETWORK,
+        "tgw-attach-globex-west-vpc",
+    );
+    type Attached = (TransitGatewayAttachmentResourceType, String, String);
+    let route_table = |id: &str,
+                       tgw: &str,
+                       associated: &[&Attached],
+                       propagated: &[&Attached],
+                       routes: Vec<TransitGatewayRoute>| {
+        AWSTransitGatewayRouteTable {
+            table: TransitGatewayRouteTable::builder()
+                .transit_gateway_route_table_id(id)
+                .transit_gateway_id(tgw)
+                .state(TransitGatewayRouteTableState::Available)
+                .build(),
+            associations: associated
+                .iter()
+                .map(|(kind, resource, attachment)| {
+                    TransitGatewayRouteTableAssociation::builder()
+                        .resource_type(kind.clone())
+                        .resource_id(resource)
+                        .transit_gateway_attachment_id(attachment)
+                        .state(TransitGatewayAssociationState::Associated)
+                        .build()
+                })
+                .collect(),
+            propagations: propagated
+                .iter()
+                .map(|(kind, resource, attachment)| {
+                    TransitGatewayRouteTablePropagation::builder()
+                        .resource_type(kind.clone())
+                        .resource_id(resource)
+                        .transit_gateway_attachment_id(attachment)
+                        .state(TransitGatewayPropagationState::Enabled)
+                        .build()
+                })
+                .collect(),
+            static_routes: routes,
+        }
+    };
+    let static_route =
+        |destination: &str, state: TransitGatewayRouteState, to: Option<&Attached>| {
+            let route = TransitGatewayRoute::builder()
+                .destination_cidr_block(destination)
+                .state(state);
+            match to {
+                Some((kind, resource, attachment)) => route.transit_gateway_attachments(
+                    TransitGatewayRouteAttachment::builder()
+                        .resource_type(kind.clone())
+                        .resource_id(resource)
+                        .transit_gateway_attachment_id(attachment)
+                        .build(),
+                ),
+                None => route,
+            }
+            .build()
+        };
+    let transit_gateway_route_tables = vec![route_table(
+        "tgw-rtb-globex",
+        "tgw-globex",
+        &[&prod, &shared, &gcp_vpn, &to_west],
+        &[&prod, &shared, &gcp_vpn],
+        vec![
+            static_route(WEST_RANGE, TransitGatewayRouteState::Active, Some(&to_west)),
+            static_route("10.66.0.0/16", TransitGatewayRouteState::Blackhole, None),
+        ],
+    )];
+    let west_route_tables = vec![route_table(
+        "tgw-rtb-globex-west",
+        "tgw-globex-west",
+        &[&west_vpc, &to_east],
+        &[&west_vpc],
+        vec![static_route(
+            "10.10.0.0/16",
+            TransitGatewayRouteState::Active,
+            Some(&to_east),
+        )],
+    )];
+    let peering_to_west = || {
+        let side = |tgw: &str, region: &str| {
+            PeeringTgwInfo::builder()
+                .transit_gateway_id(tgw)
+                .region(region)
+                .build()
+        };
+        TransitGatewayPeeringAttachment::builder()
+            .transit_gateway_attachment_id(WEST_PEERING)
+            .requester_tgw_info(side("tgw-globex", REGION))
+            .accepter_tgw_info(side("tgw-globex-west", WEST_REGION))
+            .state(TransitGatewayAttachmentState::Available)
+            .build()
+    };
+    let west = AWSConnectivity {
+        vpcs: vec![vpc(WEST_NETWORK, WEST_RANGE)],
+        transit_gateways: vec![
+            TransitGateway::builder()
+                .transit_gateway_id("tgw-globex-west")
+                .state(TransitGatewayState::Available)
+                .build(),
+        ],
+        transit_gateway_attachments: vec![
+            TransitGatewayAttachment::builder()
+                .transit_gateway_attachment_id("tgw-attach-globex-west-vpc")
+                .transit_gateway_id("tgw-globex-west")
+                .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+                .resource_id(WEST_NETWORK)
+                .state(TransitGatewayAttachmentState::Available)
+                .build(),
+        ],
+        ..Default::default()
+    };
 
     let vpn_gateway = |id: &str, vpc_id: &str| {
         VpnGateway::builder()
@@ -914,6 +1092,15 @@ pub fn aws() -> Provider {
     let attached = |id: &str, subnet: &str, ip: &str, instance: &str| {
         attached_in(AWS_NETWORK, id, subnet, ip, instance)
     };
+    let west_api = interface_in(
+        WEST_NETWORK,
+        "eni-globex-west-api",
+        "subnet-west-1a",
+        WEST_API,
+    )
+    .description("VPC Endpoint Interface vpce-globex-west-api")
+    .interface_type(NetworkInterfaceType::VpcEndpoint)
+    .build();
     let interfaces = vec![
         attached(
             "eni-globex-web-01a",
@@ -1050,6 +1237,28 @@ pub fn aws() -> Provider {
         ),
         (
             r.clone(),
+            AmazonCollection::AmazonTransitGatewayRouting(AWSTransitGatewayRouting {
+                route_tables: transit_gateway_route_tables,
+                peerings: vec![peering_to_west()],
+            }),
+        ),
+        (
+            WEST_REGION.to_owned(),
+            AmazonCollection::AmazonConnectivity(west),
+        ),
+        (
+            WEST_REGION.to_owned(),
+            AmazonCollection::AmazonTransitGatewayRouting(AWSTransitGatewayRouting {
+                route_tables: west_route_tables,
+                peerings: vec![peering_to_west()],
+            }),
+        ),
+        (
+            WEST_REGION.to_owned(),
+            AmazonCollection::AmazonNetworkInterfaces(vec![west_api]),
+        ),
+        (
+            r.clone(),
             AmazonCollection::AmazonDirectConnect(direct_connect),
         ),
         (
@@ -1059,7 +1268,7 @@ pub fn aws() -> Provider {
         (
             r,
             AmazonCollection::AmazonNetworking(AWSNetworking {
-                route_tables: vec![public_rt, private_rt],
+                route_tables: vec![public_rt, private_rt, data_rt],
                 internet_gateways: vec![igw],
                 nat_gateways: vec![nat],
                 addresses: vec![eip, web_eip],
@@ -1077,6 +1286,7 @@ pub fn gcp() -> Provider {
     use crate::api::google::functions::CloudFunction;
     use crate::api::google::gke::{Cluster, NetworkConfig};
     use crate::api::google::interconnect::{Interconnect, InterconnectAttachment, Router};
+    use crate::api::google::network_connectivity::{Hub, LinkedVpcNetwork, Spoke};
     use crate::api::google::pubsub::{Subscription, Topic};
     use crate::api::google::run::Service;
     use crate::api::google::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
@@ -1213,9 +1423,33 @@ pub fn gcp() -> Provider {
         ]),
         ..Default::default()
     };
+    let hub_name = format!("projects/{GCP_PROJECT}/locations/global/hubs/globex-hub");
+    let hub = Hub {
+        name: Some(hub_name.clone()),
+        state: Some("ACTIVE".to_owned()),
+    };
+    let spoke = |name: &str, network: &str| Spoke {
+        name: Some(format!(
+            "projects/{GCP_PROJECT}/locations/global/spokes/{name}"
+        )),
+        hub: Some(hub_name.clone()),
+        group: Some(format!("{hub_name}/groups/default")),
+        state: Some("ACTIVE".to_owned()),
+        linked_vpc_network: Some(LinkedVpcNetwork {
+            uri: Some(format!(
+                "https://www.googleapis.com/compute/v1/projects/{GCP_PROJECT}/global/networks/{network}"
+            )),
+        }),
+    };
+    let spokes = vec![
+        spoke("spoke-globex", "vpc-globex"),
+        spoke("spoke-analytics", "vpc-globex-analytics"),
+    ];
+
     let subnet = Subnetwork {
         self_link: Some(subnet_link),
         network: Some(network_link),
+        ip_cidr_range: Some("10.30.0.0/24".to_owned()),
         ..Default::default()
     };
 
@@ -1354,9 +1588,11 @@ pub fn gcp() -> Provider {
             GoogleCollection::GoogleInterconnects(interconnects),
         ),
         (
-            p,
+            p.clone(),
             GoogleCollection::GoogleInterconnectAttachments(attachments),
         ),
+        (p.clone(), GoogleCollection::GoogleHubs(vec![hub])),
+        (p, GoogleCollection::GoogleSpokes(spokes)),
     ])
 }
 
@@ -1381,6 +1617,7 @@ pub fn azure() -> Provider {
         id: Some(azure_id("Microsoft.Network/virtualNetworks/vnet-globex")),
         name: Some("vnet-globex".to_owned()),
         location: Some("eastus".to_owned()),
+        address_prefixes: vec![AZURE_SPOKE_RANGE.to_owned()],
         subnets: vec![azure_id(
             "Microsoft.Network/virtualNetworks/vnet-globex/subnets/default",
         )],
@@ -1395,6 +1632,7 @@ pub fn azure() -> Provider {
         )),
         name: Some("vnet-globex-hub".to_owned()),
         location: Some("eastus".to_owned()),
+        address_prefixes: vec!["10.20.100.0/24".to_owned()],
         subnets: Vec::new(),
         peerings: vec![peering("vnet-globex", "Connected", false)],
     };
@@ -1651,6 +1889,47 @@ pub fn azure() -> Provider {
         location: Some("global".to_owned()),
     };
 
+    let wan_id = azure_id("Microsoft.Network/virtualWans/vwan-globex");
+    let wan = VirtualWan {
+        id: Some(wan_id.clone()),
+        name: Some("vwan-globex".to_owned()),
+        location: Some("eastus".to_owned()),
+        wan_type: Some("Standard".to_owned()),
+        provisioning_state: Some("Succeeded".to_owned()),
+    };
+    let virtual_hub_id = azure_id("Microsoft.Network/virtualHubs/vhub-globex-eastus");
+    let virtual_hub = VirtualHub {
+        id: Some(virtual_hub_id.clone()),
+        name: Some("vhub-globex-eastus".to_owned()),
+        location: Some("eastus".to_owned()),
+        virtual_wan_id: Some(wan_id),
+        provisioning_state: Some("Succeeded".to_owned()),
+    };
+    let wan_network = |name: &str, prefix: &str| VirtualNetwork {
+        id: Some(azure_id(&format!(
+            "Microsoft.Network/virtualNetworks/{name}"
+        ))),
+        name: Some(name.to_owned()),
+        location: Some("eastus".to_owned()),
+        address_prefixes: vec![prefix.to_owned()],
+        ..Default::default()
+    };
+    let apps = wan_network("vnet-globex-apps", "10.22.0.0/16");
+    let data = wan_network("vnet-globex-data", "10.23.0.0/16");
+    let hub_connections = ["vnet-globex-apps", "vnet-globex-data"]
+        .into_iter()
+        .map(|name| HubVirtualNetworkConnection {
+            id: Some(format!(
+                "{virtual_hub_id}/hubVirtualNetworkConnections/conn-{name}"
+            )),
+            hub_id: Some(virtual_hub_id.clone()),
+            remote_virtual_network_id: Some(azure_id(&format!(
+                "Microsoft.Network/virtualNetworks/{name}"
+            ))),
+            provisioning_state: Some("Succeeded".to_owned()),
+        })
+        .collect();
+
     let (cdn_id, cdn_name) = leaf("Microsoft.Cdn/profiles/cdn-globex", "cdn-globex");
     let cdn = CdnProfile {
         id: Some(cdn_id),
@@ -1660,7 +1939,7 @@ pub fn azure() -> Provider {
 
     Provider::Azure(vec![
         MicrosoftCollection::AzureVirtualMachines(vec![vm]),
-        MicrosoftCollection::AzureVirtualNetworks(vec![vnet, hub]),
+        MicrosoftCollection::AzureVirtualNetworks(vec![vnet, hub, apps, data]),
         MicrosoftCollection::AzureSubnets(vec![subnet]),
         MicrosoftCollection::AzureNetworkInterfaces(vec![nic]),
         MicrosoftCollection::AzureLoadBalancers(vec![balancer]),
@@ -1670,6 +1949,9 @@ pub fn azure() -> Provider {
         MicrosoftCollection::AzureLocalNetworkGateways(vec![local_gateway]),
         MicrosoftCollection::AzureGatewayConnections(vec![vpn_connection, expressroute_connection]),
         MicrosoftCollection::AzureExpressRouteCircuits(vec![circuit]),
+        MicrosoftCollection::AzureVirtualWans(vec![wan]),
+        MicrosoftCollection::AzureVirtualHubs(vec![virtual_hub]),
+        MicrosoftCollection::AzureHubVirtualNetworkConnections(hub_connections),
         MicrosoftCollection::AzureStorageAccounts(vec![storage]),
         MicrosoftCollection::AzureManagedClusters(vec![aks]),
         MicrosoftCollection::AzureSqlServers(vec![sql]),

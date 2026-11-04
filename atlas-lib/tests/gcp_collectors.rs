@@ -65,7 +65,14 @@ async fn compute_subnetworks_aggregated() {
     let (_s, c) = serve(
         "/compute/v1/projects/p/aggregated/subnetworks",
         json!({ "items": {
-            "regions/us-central1": { "subnetworks": [ { "name": "sn", "network": "vpc", "selfLink": "https://x/sn" } ] },
+            "regions/us-central1": { "subnetworks": [ {
+                "name": "sn", "network": "vpc", "selfLink": "https://x/sn",
+                "ipCidrRange": "10.30.0.0/24",
+                "secondaryIpRanges": [ { "rangeName": "pods", "ipCidrRange": "10.31.0.0/16" } ],
+                "internalIpv6Prefix": "fd20:1:2:3::/64",
+                "externalIpv6Prefix": "2600:1900:4000:1::/64",
+                "stackType": "IPV4_IPV6"
+            } ] },
             "regions/empty": { "warning": { "code": "NO_RESULTS_ON_PAGE" } }
         } }),
     )
@@ -73,6 +80,74 @@ async fn compute_subnetworks_aggregated() {
     let subs = list_subnetworks(&c, "p").await.expect("ok");
     assert_eq!(subs.len(), 1, "empty scope skipped");
     assert_eq!(subs[0].network.as_deref(), Some("vpc"));
+    assert_eq!(
+        subs[0].address_space().collect::<Vec<_>>(),
+        vec![
+            "10.30.0.0/24",
+            "fd20:1:2:3::/64",
+            "2600:1900:4000:1::/64",
+            "10.31.0.0/16"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn ncc_hubs_and_spokes() {
+    use atlas_lib::api::google::network_connectivity::{list_hubs, list_spokes};
+    let (_s, c) = serve(
+        "/v1/projects/p/locations/global/hubs",
+        json!({ "hubs": [ {
+            "name": "projects/p/locations/global/hubs/hub-1",
+            "state": "ACTIVE",
+            "presetTopology": "MESH",
+            "routingVpcs": [ { "uri": "https://x/projects/p/global/networks/vpc" } ]
+        } ] }),
+    )
+    .await;
+    let hubs = list_hubs(&c, "p").await.expect("ok");
+    assert_eq!(
+        hubs[0].name.as_deref(),
+        Some("projects/p/locations/global/hubs/hub-1")
+    );
+    assert_eq!(hubs[0].state.as_deref(), Some("ACTIVE"));
+
+    let (_s, c) = serve(
+        "/v1/projects/p/locations/global/spokes",
+        json!({ "spokes": [ {
+            "name": "projects/p/locations/global/spokes/spoke-1",
+            "hub": "projects/p/locations/global/hubs/hub-1",
+            "group": "projects/p/locations/global/hubs/hub-1/groups/default",
+            "state": "ACTIVE",
+            "spokeType": "VPC_NETWORK",
+            "linkedVpcNetwork": {
+                "uri": "https://www.googleapis.com/compute/v1/projects/p/global/networks/vpc",
+                "excludeExportRanges": []
+            }
+        } ], "unreachable": [] }),
+    )
+    .await;
+    let spokes = list_spokes(&c, "p").await.expect("ok");
+    let spoke = &spokes[0];
+    assert_eq!(
+        spoke.name.as_deref(),
+        Some("projects/p/locations/global/spokes/spoke-1")
+    );
+    assert_eq!(
+        spoke.hub.as_deref(),
+        Some("projects/p/locations/global/hubs/hub-1")
+    );
+    assert_eq!(
+        spoke.group.as_deref(),
+        Some("projects/p/locations/global/hubs/hub-1/groups/default")
+    );
+    assert_eq!(spoke.state.as_deref(), Some("ACTIVE"));
+    assert_eq!(
+        spoke
+            .linked_vpc_network
+            .as_ref()
+            .and_then(|linked| linked.uri.as_deref()),
+        Some("https://www.googleapis.com/compute/v1/projects/p/global/networks/vpc")
+    );
 }
 
 #[tokio::test]
@@ -384,4 +459,147 @@ async fn storage_buckets() {
     let buckets = c.list_buckets("p").await.expect("ok");
     assert_eq!(buckets[0].name.as_deref(), Some("bucket-1"));
     assert_eq!(buckets[0].location.as_deref(), Some("US"));
+}
+
+mod disabled_apis {
+    use atlas_lib::api::google::client::{GoogleApiClient, ProjectApis};
+    use atlas_lib::api::google::network_connectivity::{list_hubs, list_spokes};
+    use serde_json::{Value, json};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const HUBS: &str = "/v1/projects/globex-prod/locations/global/hubs";
+    const SPOKES: &str = "/v1/projects/globex-prod/locations/global/spokes";
+    const PROJECT: &str = "/v3/projects/globex-prod";
+
+    fn service_disabled(consumer: &str) -> Value {
+        json!({ "error": {
+            "code": 403,
+            "message": format!("Network Connectivity API has not been used in {consumer} before or it is disabled."),
+            "status": "PERMISSION_DENIED",
+            "details": [
+                {
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "SERVICE_DISABLED",
+                    "domain": "googleapis.com",
+                    "metadata": {
+                        "consumer": consumer,
+                        "service": "networkconnectivity.googleapis.com"
+                    }
+                },
+                { "@type": "type.googleapis.com/google.rpc.Help", "links": [] }
+            ]
+        } })
+    }
+
+    async fn answer(server: &MockServer, at: &str, status: u16, body: Value, calls: u64) {
+        Mock::given(method("GET"))
+            .and(path(at))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(calls)
+            .mount(server)
+            .await;
+    }
+
+    async fn named(server: &MockServer, number: &str) {
+        answer(
+            server,
+            PROJECT,
+            200,
+            json!({ "name": format!("projects/{number}"), "projectId": "globex-prod" }),
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_api_off_in_the_scanned_project_reads_as_empty_and_names_it_once() {
+        let server = MockServer::start().await;
+        answer(&server, HUBS, 403, service_disabled("projects/4815"), 1).await;
+        answer(&server, SPOKES, 403, service_disabled("projects/4815"), 1).await;
+        named(&server, "4815").await;
+        let client = GoogleApiClient::with_base_url("test-token".into(), server.uri());
+        let apis = ProjectApis::new(&client, "globex-prod");
+
+        let (hubs, spokes) = futures::join!(
+            apis.unless_disabled(list_hubs(&client, "globex-prod")),
+            apis.unless_disabled(list_spokes(&client, "globex-prod")),
+        );
+
+        assert!(hubs.expect("an API that is off holds no hubs").is_empty());
+        assert!(spokes.expect("nor spokes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_api_off_in_another_project_is_still_a_failure() {
+        let server = MockServer::start().await;
+        answer(
+            &server,
+            HUBS,
+            403,
+            service_disabled("projects/764086051850"),
+            1,
+        )
+        .await;
+        named(&server, "4815").await;
+        let client = GoogleApiClient::with_base_url("test-token".into(), server.uri());
+
+        let hubs = ProjectApis::new(&client, "globex-prod")
+            .unless_disabled(list_hubs(&client, "globex-prod"))
+            .await;
+
+        let error = hubs.expect_err("a quota project's switch says nothing about globex-prod");
+        assert!(error.to_string().contains("764086051850"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_api_off_where_the_project_cannot_be_named_is_still_a_failure() {
+        let server = MockServer::start().await;
+        answer(&server, HUBS, 403, service_disabled("projects/4815"), 1).await;
+        answer(
+            &server,
+            PROJECT,
+            403,
+            json!({ "error": { "code": 403, "status": "PERMISSION_DENIED" } }),
+            1,
+        )
+        .await;
+        let client = GoogleApiClient::with_base_url("test-token".into(), server.uri());
+
+        let hubs = ProjectApis::new(&client, "globex-prod")
+            .unless_disabled(list_hubs(&client, "globex-prod"))
+            .await;
+
+        let error = hubs.expect_err("an unconfirmed switch is a failure");
+        assert!(error.to_string().contains("could not tell"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_throttled_project_is_still_a_failure() {
+        let server = MockServer::start().await;
+        answer(
+            &server,
+            HUBS,
+            429,
+            json!({ "error": { "code": 429, "status": "RESOURCE_EXHAUSTED", "details": [{
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "RATE_LIMIT_EXCEEDED",
+                "domain": "googleapis.com",
+                "metadata": {
+                    "consumer": "projects/4815",
+                    "service": "networkconnectivity.googleapis.com"
+                }
+            }] } }),
+            1,
+        )
+        .await;
+        answer(&server, PROJECT, 200, json!({}), 0).await;
+        let client = GoogleApiClient::with_base_url("test-token".into(), server.uri());
+
+        let hubs = ProjectApis::new(&client, "globex-prod")
+            .unless_disabled(list_hubs(&client, "globex-prod"))
+            .await;
+
+        assert!(hubs.is_err());
+    }
 }

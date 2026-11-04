@@ -31,6 +31,36 @@ pub struct Subnetwork {
     pub name: Option<String>,
     pub network: Option<String>,
     pub self_link: Option<String>,
+    pub ip_cidr_range: Option<String>,
+    #[serde(default)]
+    pub secondary_ip_ranges: Vec<SecondaryRange>,
+    pub internal_ipv6_prefix: Option<String>,
+    pub external_ipv6_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SecondaryRange {
+    pub range_name: Option<String>,
+    pub ip_cidr_range: Option<String>,
+}
+
+impl Subnetwork {
+    pub fn address_space(&self) -> impl Iterator<Item = &str> {
+        [
+            &self.ip_cidr_range,
+            &self.internal_ipv6_prefix,
+            &self.external_ipv6_prefix,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(
+            self.secondary_ip_ranges
+                .iter()
+                .filter_map(|range| range.ip_cidr_range.as_ref()),
+        )
+        .map(String::as_str)
+    }
 }
 
 #[derive(Debug, Deserialize)]

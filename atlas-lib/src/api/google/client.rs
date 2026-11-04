@@ -1,4 +1,10 @@
 use reqwest::{Client, RequestBuilder};
+use serde::Deserialize;
+use std::error::Error;
+use std::fmt;
+use tokio::sync::OnceCell;
+
+const RESOURCE_MANAGER: &str = "https://cloudresourcemanager.googleapis.com";
 
 #[derive(Clone)]
 pub struct GoogleApiClient {
@@ -33,12 +39,38 @@ impl GoogleApiClient {
         self.client.get(url).bearer_auth(&self.token)
     }
 
+    async fn read(&self, url: &str, context: &str) -> Result<String, Box<dyn Error>> {
+        let res = self.get(url).send().await?;
+        let status = res.status();
+        let body = res.text().await?;
+        if !status.is_success() {
+            return Err(ApiError {
+                context: context.to_owned(),
+                body,
+            }
+            .into());
+        }
+        Ok(body)
+    }
+
+    async fn project_name(&self, project: &str) -> Result<String, Box<dyn Error>> {
+        #[derive(Deserialize)]
+        struct Project {
+            name: Option<String>,
+        }
+        let url = self.endpoint(RESOURCE_MANAGER, &format!("/v3/projects/{project}"));
+        let found: Project = serde_json::from_str(&self.read(&url, "project").await?)?;
+        found
+            .name
+            .ok_or_else(|| format!("Resource Manager named no project number for {project}").into())
+    }
+
     pub async fn paginated_list<T, I, F>(
         &self,
         base_url: &str,
         context: &str,
         extract: F,
-    ) -> Result<Vec<I>, Box<dyn std::error::Error>>
+    ) -> Result<Vec<I>, Box<dyn Error>>
     where
         T: serde::de::DeserializeOwned,
         F: Fn(T) -> Option<Vec<I>>,
@@ -57,13 +89,7 @@ impl GoogleApiClient {
                 None => base_url.to_owned(),
             };
 
-            let res = self.get(&url).send().await?;
-            let status = res.status();
-            let text = res.text().await?;
-            if !status.is_success() {
-                return Err(format!("GCP API error ({}): {}", context, text).into());
-            }
-
+            let text = self.read(&url, context).await?;
             let value: serde_json::Value = serde_json::from_str(&text)?;
             page_token = value
                 .get("nextPageToken")
@@ -77,6 +103,92 @@ impl GoogleApiClient {
             if page_token.is_none() {
                 return Ok(all_items);
             }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    context: String,
+    body: String,
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GCP API error ({}): {}", self.context, self.body)
+    }
+}
+
+impl Error for ApiError {}
+
+impl ApiError {
+    fn disabled_consumer(&self) -> Option<String> {
+        let body: serde_json::Value = serde_json::from_str(&self.body).ok()?;
+        body.get("error")?
+            .get("details")?
+            .as_array()?
+            .iter()
+            .find(|detail| {
+                detail
+                    .get("@type")
+                    .and_then(|kind| kind.as_str())
+                    .is_some_and(|kind| kind.ends_with("google.rpc.ErrorInfo"))
+                    && detail.get("reason").and_then(|reason| reason.as_str())
+                        == Some("SERVICE_DISABLED")
+            })?
+            .get("metadata")?
+            .get("consumer")?
+            .as_str()
+            .map(str::to_owned)
+    }
+}
+
+pub struct ProjectApis<'a> {
+    client: &'a GoogleApiClient,
+    project: &'a str,
+    name: OnceCell<Result<String, String>>,
+}
+
+impl<'a> ProjectApis<'a> {
+    pub fn new(client: &'a GoogleApiClient, project: &'a str) -> Self {
+        Self {
+            client,
+            project,
+            name: OnceCell::new(),
+        }
+    }
+
+    pub async fn unless_disabled<T: Default>(
+        &self,
+        collection: impl Future<Output = Result<T, Box<dyn Error>>>,
+    ) -> Result<T, Box<dyn Error>> {
+        let error = match collection.await {
+            Err(error) => error,
+            listed => return listed,
+        };
+        let Some(consumer) = error
+            .downcast_ref::<ApiError>()
+            .and_then(ApiError::disabled_consumer)
+        else {
+            return Err(error);
+        };
+        let name = self
+            .name
+            .get_or_init(|| async {
+                self.client
+                    .project_name(self.project)
+                    .await
+                    .map_err(|lookup| lookup.to_string())
+            })
+            .await;
+        match name {
+            Ok(name) if *name == consumer => Ok(T::default()),
+            Ok(_) => Err(error),
+            Err(lookup) => Err(format!(
+                "{error} (could not tell whether the API is off in {}: {lookup})",
+                self.project
+            )
+            .into()),
         }
     }
 }

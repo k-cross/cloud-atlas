@@ -3,19 +3,20 @@ use crate::Settings;
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::derive::{self, HeldAddresses};
 use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::util::is_large_cidr;
+use crate::atlas::util::{canonical_address, is_large_cidr};
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
-    AWSRoute53, AmazonCollection,
+    AWSRoute53, AWSTransitGatewayRouting, AmazonCollection,
 };
 use aws_sdk_directconnect::types::{
     BgpPeerState, ConnectionState, DirectConnectGateway, DirectConnectGatewayAssociationState,
     DirectConnectGatewayState, GatewayType, VirtualInterface, VirtualInterfaceState,
 };
 use aws_sdk_ec2::types::{
-    AttachmentStatus, NetworkInterface, RouteState, TransitGatewayAttachmentResourceType,
-    TransitGatewayAttachmentState, TransitGatewayState, VpcPeeringConnectionStateReasonCode,
-    VpnState,
+    AttachmentStatus, NetworkInterface, RouteState, TransitGateway, TransitGatewayAssociationState,
+    TransitGatewayAttachmentResourceType, TransitGatewayAttachmentState,
+    TransitGatewayPropagationState, TransitGatewayRouteState, TransitGatewayState, Vpc,
+    VpcCidrBlockState, VpcCidrBlockStateCode, VpcPeeringConnectionStateReasonCode, VpnState,
 };
 use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
 use petgraph::graph::NodeIndex;
@@ -27,8 +28,9 @@ pub fn aws_projector(
     aws_data: &[(String, AmazonCollection)],
     opts: &Settings,
 ) {
+    let skipped_transit_gateways = skipped_transit_gateways(aws_data);
     project_parallel(builder, aws_data, |local, (region, collection)| {
-        project_amazon_collection(local, region, collection, opts)
+        project_amazon_collection(local, region, collection, opts, &skipped_transit_gateways)
     });
     link_direct_connect_gateways(builder, aws_data);
     let scanned = scanned_instances(aws_data);
@@ -225,6 +227,7 @@ fn project_amazon_collection(
     region: &str,
     x: &AmazonCollection,
     opts: &Settings,
+    skipped_transit_gateways: &HashSet<&str>,
 ) {
     let region_node = Node::AwsRegion(region.into());
     let region_idx = builder.get_or_add_node(region_node);
@@ -591,57 +594,39 @@ fn project_amazon_collection(
                 }
             }
 
-            for rt in route_tables {
-                if let Some(rt_id) = rt.route_table_id() {
-                    let rt_idx = builder.get_or_add_node(Node::AwsEc2RouteTable(rt_id.into()));
-
-                    if let Some(vpc_id) = rt.vpc_id() {
-                        builder.link_from(rt_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
-                    }
-
-                    for assoc in rt.associations() {
-                        if let Some(subnet_id) = assoc.subnet_id() {
-                            builder.link_from(
-                                rt_idx,
-                                Node::AwsEc2Subnet(subnet_id.into()),
-                                Edge::AttachedTo,
-                            );
-                        }
-                    }
-
-                    for route in rt
-                        .routes()
-                        .iter()
-                        .filter(|route| route.state() != Some(&RouteState::Blackhole))
-                    {
-                        if let Some(nat_id) = route.nat_gateway_id() {
-                            builder.link_to(
-                                rt_idx,
-                                Node::AwsEc2NatGateway(nat_id.into()),
-                                Edge::RoutesTo,
-                            );
-                        } else if let Some(gw_id) = route.gateway_id()
-                            && gw_id.starts_with("igw-")
-                        {
-                            builder.link_to(
-                                rt_idx,
-                                Node::AwsEc2InternetGateway(gw_id.into()),
-                                Edge::RoutesTo,
-                            );
-                        } else if let Some(pcx_id) = route.vpc_peering_connection_id() {
-                            builder.link_to(
-                                rt_idx,
-                                Node::AwsEc2VpcPeeringConnection(pcx_id.into()),
-                                Edge::RoutesTo,
-                            );
-                        } else if let Some(tgw_id) = route.transit_gateway_id() {
-                            builder.link_to(
-                                rt_idx,
-                                Node::AwsEc2TransitGateway(tgw_id.into()),
-                                Edge::RoutesTo,
-                            );
-                        }
-                    }
+            for table in route_tables {
+                if let Some(id) = table.route_table_id() {
+                    project_route_table(
+                        builder,
+                        &RouteTableFacts {
+                            id,
+                            vpc_id: table.vpc_id(),
+                            subnet_ids: table
+                                .associations()
+                                .iter()
+                                .filter_map(|association| association.subnet_id())
+                                .collect(),
+                            routes: table
+                                .routes()
+                                .iter()
+                                .filter_map(|route| {
+                                    Some(RouteFacts {
+                                        destination: route
+                                            .destination_cidr_block()
+                                            .or(route.destination_ipv6_cidr_block())
+                                            .or(route.destination_prefix_list_id())?,
+                                        active: route.state() != Some(&RouteState::Blackhole),
+                                        gateway_id: route.gateway_id(),
+                                        nat_gateway_id: route.nat_gateway_id(),
+                                        transit_gateway_id: route.transit_gateway_id(),
+                                        vpc_peering_connection_id: route
+                                            .vpc_peering_connection_id(),
+                                        network_interface_id: route.network_interface_id(),
+                                    })
+                                })
+                                .collect(),
+                        },
+                    );
                 }
             }
         }
@@ -654,34 +639,41 @@ fn project_amazon_collection(
             customer_gateways,
             vpn_connections,
         }) => {
-            for vpc_id in vpcs.iter().filter_map(|vpc| vpc.vpc_id()) {
-                builder.link_to(region_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
+            for vpc in vpcs {
+                if let Some(id) = vpc.vpc_id() {
+                    project_vpc(
+                        builder,
+                        region_idx,
+                        &VpcFacts {
+                            id,
+                            address_space: vpc_address_space(vpc).collect(),
+                        },
+                    );
+                }
             }
 
             for pcx in peering_connections.iter().filter(|pcx| {
                 pcx.status().and_then(|status| status.code())
                     == Some(&VpcPeeringConnectionStateReasonCode::Active)
             }) {
-                let Some(pcx_id) = pcx.vpc_peering_connection_id() else {
-                    continue;
-                };
-                let pcx_idx =
-                    builder.get_or_add_node(Node::AwsEc2VpcPeeringConnection(pcx_id.into()));
-                for side in [pcx.requester_vpc_info(), pcx.accepter_vpc_info()] {
-                    if let Some(vpc_id) = side.and_then(|info| info.vpc_id()) {
-                        builder.link_to(pcx_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::AttachedTo);
-                    }
+                if let Some(id) = pcx.vpc_peering_connection_id() {
+                    project_peering(
+                        builder,
+                        &PeeringFacts {
+                            id,
+                            vpc_ids: [pcx.requester_vpc_info(), pcx.accepter_vpc_info()]
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|side| side.vpc_id())
+                                .collect(),
+                        },
+                    );
                 }
             }
 
             for tgw_id in transit_gateways
                 .iter()
-                .filter(|tgw| {
-                    matches!(
-                        tgw.state(),
-                        Some(TransitGatewayState::Available | TransitGatewayState::Modifying)
-                    )
-                })
+                .filter(|tgw| transit_gateway_serves(tgw))
                 .filter_map(|tgw| tgw.transit_gateway_id())
             {
                 builder.link_to(
@@ -713,21 +705,22 @@ fn project_amazon_collection(
                 .iter()
                 .filter(|vgw| vgw.state() == Some(&VpnState::Available))
             {
-                let Some(vgw_id) = vgw.vpn_gateway_id() else {
-                    continue;
-                };
-                let vgw_idx = builder.link_to(
-                    region_idx,
-                    Node::AwsEc2VpnGateway(vgw_id.into()),
-                    Edge::Contains,
-                );
-                for vpc_id in vgw
-                    .vpc_attachments()
-                    .iter()
-                    .filter(|attachment| attachment.state() == Some(&AttachmentStatus::Attached))
-                    .filter_map(|attachment| attachment.vpc_id())
-                {
-                    builder.link_to(vgw_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::AttachedTo);
+                if let Some(id) = vgw.vpn_gateway_id() {
+                    project_vpn_gateway(
+                        builder,
+                        region_idx,
+                        &VpnGatewayFacts {
+                            id,
+                            attached_vpc_ids: vgw
+                                .vpc_attachments()
+                                .iter()
+                                .filter(|attachment| {
+                                    attachment.state() == Some(&AttachmentStatus::Attached)
+                                })
+                                .filter_map(|attachment| attachment.vpc_id())
+                                .collect(),
+                        },
+                    );
                 }
             }
 
@@ -735,16 +728,15 @@ fn project_amazon_collection(
                 .iter()
                 .filter(|cgw| cgw.state() == Some("available"))
             {
-                let Some(cgw_id) = cgw.customer_gateway_id() else {
-                    continue;
-                };
-                let cgw_idx = builder.link_to(
-                    region_idx,
-                    Node::AwsEc2CustomerGateway(cgw_id.into()),
-                    Edge::Contains,
-                );
-                if let Some(address) = cgw.ip_address() {
-                    builder.link_to(cgw_idx, Node::ip(address, cgw_id), Edge::RoutesTo);
+                if let Some(id) = cgw.customer_gateway_id() {
+                    project_customer_gateway(
+                        builder,
+                        region_idx,
+                        &CustomerGatewayFacts {
+                            id,
+                            ip_address: cgw.ip_address(),
+                        },
+                    );
                 }
             }
 
@@ -752,35 +744,9 @@ fn project_amazon_collection(
                 .iter()
                 .filter(|connection| connection.state() == Some(&VpnState::Available))
             {
-                let Some(connection_id) = connection.vpn_connection_id() else {
+                let Some(id) = connection.vpn_connection_id() else {
                     continue;
                 };
-                let connection_idx = builder.link_to(
-                    region_idx,
-                    Node::AwsEc2VpnConnection(connection_id.into()),
-                    Edge::Contains,
-                );
-                if let Some(vgw_id) = connection.vpn_gateway_id() {
-                    builder.link_to(
-                        connection_idx,
-                        Node::AwsEc2VpnGateway(vgw_id.into()),
-                        Edge::AttachedTo,
-                    );
-                }
-                if let Some(tgw_id) = connection.transit_gateway_id() {
-                    builder.link_to(
-                        connection_idx,
-                        Node::AwsEc2TransitGateway(tgw_id.into()),
-                        Edge::AttachedTo,
-                    );
-                }
-                if let Some(cgw_id) = connection.customer_gateway_id() {
-                    builder.link_to(
-                        connection_idx,
-                        Node::AwsEc2CustomerGateway(cgw_id.into()),
-                        Edge::AttachedTo,
-                    );
-                }
                 let configured = connection
                     .options()
                     .into_iter()
@@ -790,11 +756,130 @@ fn project_amazon_collection(
                     .vgw_telemetry()
                     .iter()
                     .filter_map(|telemetry| telemetry.outside_ip_address());
-                for address in configured.chain(reported) {
+                project_vpn_connection(
+                    builder,
+                    region_idx,
+                    &VpnConnectionFacts {
+                        id,
+                        vpn_gateway_id: connection.vpn_gateway_id(),
+                        transit_gateway_id: connection.transit_gateway_id(),
+                        customer_gateway_id: connection.customer_gateway_id(),
+                        outside_addresses: configured.chain(reported).collect(),
+                    },
+                );
+            }
+        }
+        AmazonCollection::AmazonTransitGatewayRouting(AWSTransitGatewayRouting {
+            route_tables,
+            peerings,
+        }) => {
+            for routing in route_tables {
+                let (Some(table_id), Some(tgw_id)) = (
+                    routing.table.transit_gateway_route_table_id(),
+                    routing
+                        .table
+                        .transit_gateway_id()
+                        .filter(|id| !skipped_transit_gateways.contains(id)),
+                ) else {
+                    continue;
+                };
+                let tgw_idx = builder.get_or_add_node(Node::AwsEc2TransitGateway(tgw_id.into()));
+                let table_idx = builder.link_to(
+                    tgw_idx,
+                    Node::AwsEc2TransitGatewayRouteTable(table_id.into()),
+                    Edge::Contains,
+                );
+                for association in routing.associations.iter().filter(|association| {
+                    matches!(
+                        association.state(),
+                        Some(
+                            TransitGatewayAssociationState::Associated
+                                | TransitGatewayAssociationState::Disassociating
+                        )
+                    )
+                }) {
+                    if let Some(resource) = attached_resource(
+                        association.resource_type(),
+                        association.resource_id(),
+                        association.transit_gateway_attachment_id(),
+                    ) {
+                        builder.link_from(table_idx, resource, Edge::AttachedTo);
+                    }
+                }
+                for propagation in routing.propagations.iter().filter(|propagation| {
+                    matches!(
+                        propagation.state(),
+                        Some(
+                            TransitGatewayPropagationState::Enabled
+                                | TransitGatewayPropagationState::Disabling
+                        )
+                    )
+                }) {
+                    if let Some(resource) = attached_resource(
+                        propagation.resource_type(),
+                        propagation.resource_id(),
+                        propagation.transit_gateway_attachment_id(),
+                    ) {
+                        builder.link_to(table_idx, resource, Edge::RoutesTo);
+                    }
+                }
+                for route in &routing.static_routes {
+                    let Some(destination) =
+                        route.destination_cidr_block().or(route.prefix_list_id())
+                    else {
+                        continue;
+                    };
+                    let canonical = canonical_address(destination);
+                    let route_idx = builder.link_to(
+                        table_idx,
+                        Node::AwsEc2TransitGatewayRoute {
+                            table: table_id.into(),
+                            destination: canonical.as_deref().unwrap_or(destination).into(),
+                        },
+                        Edge::Contains,
+                    );
+                    if route.state() != Some(&TransitGatewayRouteState::Active) {
+                        continue;
+                    }
+                    for attachment in route.transit_gateway_attachments() {
+                        if let Some(resource) = attached_resource(
+                            attachment.resource_type(),
+                            attachment.resource_id(),
+                            attachment.transit_gateway_attachment_id(),
+                        ) {
+                            builder.link_to(route_idx, resource, Edge::RoutesTo);
+                        }
+                    }
+                }
+            }
+
+            for peering in peerings.iter().filter(|peering| {
+                matches!(
+                    peering.state(),
+                    Some(
+                        TransitGatewayAttachmentState::Available
+                            | TransitGatewayAttachmentState::Modifying
+                    )
+                )
+            }) {
+                let Some(attachment_id) = peering.transit_gateway_attachment_id() else {
+                    continue;
+                };
+                let peering_idx = builder.link_to(
+                    region_idx,
+                    Node::AwsEc2TransitGatewayPeeringAttachment(attachment_id.into()),
+                    Edge::Contains,
+                );
+                for tgw_id in [peering.requester_tgw_info(), peering.accepter_tgw_info()]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|side| side.transit_gateway_id())
+                    .filter(|id| !skipped_transit_gateways.contains(id))
+                {
                     builder.link_to(
-                        connection_idx,
-                        Node::ip(address, connection_id),
-                        Edge::ConnectsTo,
+                        peering_idx,
+                        Node::AwsEc2TransitGateway(tgw_id.into()),
+                        Edge::AttachedTo,
                     );
                 }
             }
@@ -1017,6 +1102,28 @@ fn drawn_interface(interface: &VirtualInterface) -> bool {
     )
 }
 
+fn transit_gateway_serves(tgw: &TransitGateway) -> bool {
+    matches!(
+        tgw.state(),
+        Some(TransitGatewayState::Available | TransitGatewayState::Modifying)
+    )
+}
+
+fn skipped_transit_gateways(aws_data: &[(String, AmazonCollection)]) -> HashSet<&str> {
+    aws_data
+        .iter()
+        .filter_map(|(_, collection)| match collection {
+            AmazonCollection::AmazonConnectivity(AWSConnectivity {
+                transit_gateways, ..
+            }) => Some(transit_gateways),
+            _ => None,
+        })
+        .flatten()
+        .filter(|tgw| !transit_gateway_serves(tgw))
+        .filter_map(|tgw| tgw.transit_gateway_id())
+        .collect()
+}
+
 fn skipped_direct_connect_gateways(
     gateways: &[DirectConnectGateway],
 ) -> impl Iterator<Item = &str> {
@@ -1026,6 +1133,26 @@ fn skipped_direct_connect_gateways(
             gateway.direct_connect_gateway_state() != Some(&DirectConnectGatewayState::Available)
         })
         .filter_map(|gateway| gateway.direct_connect_gateway_id())
+}
+
+fn attached_resource(
+    kind: Option<&TransitGatewayAttachmentResourceType>,
+    resource_id: Option<&str>,
+    attachment_id: Option<&str>,
+) -> Option<Node> {
+    match kind? {
+        TransitGatewayAttachmentResourceType::Vpc => Some(Node::AwsEc2Vpc(resource_id?.into())),
+        TransitGatewayAttachmentResourceType::Vpn => {
+            Some(Node::AwsEc2VpnConnection(resource_id?.into()))
+        }
+        TransitGatewayAttachmentResourceType::DirectConnectGateway => {
+            Some(Node::AwsDirectConnectGateway(resource_id?.into()))
+        }
+        TransitGatewayAttachmentResourceType::Peering => Some(
+            Node::AwsEc2TransitGatewayPeeringAttachment(attachment_id?.into()),
+        ),
+        _ => None,
+    }
 }
 
 fn bgp_sessions(interface: &VirtualInterface) -> Vec<(&str, &str)> {
@@ -1042,6 +1169,208 @@ fn bgp_sessions(interface: &VirtualInterface) -> Vec<(&str, &str)> {
         .filter(|peer| peer.bgp_peer_state() == Some(&BgpPeerState::Available))
         .filter_map(|peer| peer.amazon_address().zip(peer.customer_address()))
         .collect()
+}
+
+pub(crate) struct PeeringFacts<'a> {
+    pub id: &'a str,
+    pub vpc_ids: Vec<&'a str>,
+}
+
+pub(crate) fn project_peering(builder: &mut GraphBuilder, facts: &PeeringFacts) {
+    let pcx_idx = builder.get_or_add_node(Node::AwsEc2VpcPeeringConnection(facts.id.into()));
+    for vpc_id in &facts.vpc_ids {
+        builder.link_to(pcx_idx, Node::AwsEc2Vpc((*vpc_id).into()), Edge::AttachedTo);
+    }
+}
+
+pub(crate) struct VpnGatewayFacts<'a> {
+    pub id: &'a str,
+    pub attached_vpc_ids: Vec<&'a str>,
+}
+
+pub(crate) fn project_vpn_gateway(
+    builder: &mut GraphBuilder,
+    region_idx: NodeIndex,
+    facts: &VpnGatewayFacts,
+) {
+    let vgw_idx = builder.link_to(
+        region_idx,
+        Node::AwsEc2VpnGateway(facts.id.into()),
+        Edge::Contains,
+    );
+    for vpc_id in &facts.attached_vpc_ids {
+        builder.link_to(vgw_idx, Node::AwsEc2Vpc((*vpc_id).into()), Edge::AttachedTo);
+    }
+}
+
+pub(crate) struct CustomerGatewayFacts<'a> {
+    pub id: &'a str,
+    pub ip_address: Option<&'a str>,
+}
+
+pub(crate) fn project_customer_gateway(
+    builder: &mut GraphBuilder,
+    region_idx: NodeIndex,
+    facts: &CustomerGatewayFacts,
+) {
+    let cgw_idx = builder.link_to(
+        region_idx,
+        Node::AwsEc2CustomerGateway(facts.id.into()),
+        Edge::Contains,
+    );
+    if let Some(address) = facts.ip_address {
+        builder.link_to(cgw_idx, Node::ip(address, facts.id), Edge::RoutesTo);
+    }
+}
+
+pub(crate) struct VpnConnectionFacts<'a> {
+    pub id: &'a str,
+    pub vpn_gateway_id: Option<&'a str>,
+    pub transit_gateway_id: Option<&'a str>,
+    pub customer_gateway_id: Option<&'a str>,
+    pub outside_addresses: Vec<&'a str>,
+}
+
+pub(crate) fn project_vpn_connection(
+    builder: &mut GraphBuilder,
+    region_idx: NodeIndex,
+    facts: &VpnConnectionFacts,
+) {
+    let connection_idx = builder.link_to(
+        region_idx,
+        Node::AwsEc2VpnConnection(facts.id.into()),
+        Edge::Contains,
+    );
+    if let Some(id) = facts.vpn_gateway_id {
+        builder.link_to(
+            connection_idx,
+            Node::AwsEc2VpnGateway(id.into()),
+            Edge::AttachedTo,
+        );
+    }
+    if let Some(id) = facts.transit_gateway_id {
+        builder.link_to(
+            connection_idx,
+            Node::AwsEc2TransitGateway(id.into()),
+            Edge::AttachedTo,
+        );
+    }
+    if let Some(id) = facts.customer_gateway_id {
+        builder.link_to(
+            connection_idx,
+            Node::AwsEc2CustomerGateway(id.into()),
+            Edge::AttachedTo,
+        );
+    }
+    for address in &facts.outside_addresses {
+        builder.link_to(
+            connection_idx,
+            Node::ip(address, facts.id),
+            Edge::ConnectsTo,
+        );
+    }
+}
+
+pub(crate) struct RouteTableFacts<'a> {
+    pub id: &'a str,
+    pub vpc_id: Option<&'a str>,
+    pub subnet_ids: Vec<&'a str>,
+    pub routes: Vec<RouteFacts<'a>>,
+}
+
+pub(crate) struct RouteFacts<'a> {
+    pub destination: &'a str,
+    pub active: bool,
+    pub gateway_id: Option<&'a str>,
+    pub nat_gateway_id: Option<&'a str>,
+    pub transit_gateway_id: Option<&'a str>,
+    pub vpc_peering_connection_id: Option<&'a str>,
+    pub network_interface_id: Option<&'a str>,
+}
+
+impl RouteFacts<'_> {
+    fn target(&self, vpc_id: Option<&str>) -> Option<Node> {
+        let gateway = self.gateway_id.filter(|id| !id.is_empty());
+        if gateway == Some("local") {
+            return vpc_id.map(|id| Node::AwsEc2Vpc(id.into()));
+        }
+        if let Some(id) = self.nat_gateway_id {
+            return Some(Node::AwsEc2NatGateway(id.into()));
+        }
+        if let Some(id) = self.vpc_peering_connection_id {
+            return Some(Node::AwsEc2VpcPeeringConnection(id.into()));
+        }
+        if let Some(id) = self.transit_gateway_id {
+            return Some(Node::AwsEc2TransitGateway(id.into()));
+        }
+        if let Some(id) = self.network_interface_id {
+            return Some(Node::AwsEc2Eni(id.into()));
+        }
+        match gateway {
+            Some(id) if id.starts_with("igw-") => Some(Node::AwsEc2InternetGateway(id.into())),
+            Some(id) if id.starts_with("vgw-") => Some(Node::AwsEc2VpnGateway(id.into())),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn project_route_table(builder: &mut GraphBuilder, facts: &RouteTableFacts) {
+    let table_idx = builder.get_or_add_node(Node::AwsEc2RouteTable(facts.id.into()));
+    if let Some(vpc_id) = facts.vpc_id {
+        builder.link_from(table_idx, Node::AwsEc2Vpc(vpc_id.into()), Edge::Contains);
+    }
+    for subnet_id in &facts.subnet_ids {
+        builder.link_from(
+            table_idx,
+            Node::AwsEc2Subnet((*subnet_id).into()),
+            Edge::AttachedTo,
+        );
+    }
+    for route in &facts.routes {
+        let destination = canonical_address(route.destination);
+        let route_idx = builder.link_to(
+            table_idx,
+            Node::AwsEc2Route {
+                table: facts.id.into(),
+                destination: destination.as_deref().unwrap_or(route.destination).into(),
+            },
+            Edge::Contains,
+        );
+        if route.active
+            && let Some(target) = route.target(facts.vpc_id)
+        {
+            builder.link_to(route_idx, target, Edge::RoutesTo);
+        }
+    }
+}
+
+pub(crate) struct VpcFacts<'a> {
+    pub id: &'a str,
+    pub address_space: Vec<&'a str>,
+}
+
+pub(crate) fn project_vpc(builder: &mut GraphBuilder, region_idx: NodeIndex, facts: &VpcFacts) {
+    let vpc_idx = builder.link_to(region_idx, Node::AwsEc2Vpc(facts.id.into()), Edge::Contains);
+    for range in &facts.address_space {
+        builder.link_to(vpc_idx, Node::ip(range, facts.id), Edge::ConnectsTo);
+    }
+}
+
+fn vpc_address_space(vpc: &Vpc) -> impl Iterator<Item = &str> {
+    let associated = |state: Option<&VpcCidrBlockState>| {
+        state.and_then(|state| state.state()) == Some(&VpcCidrBlockStateCode::Associated)
+    };
+    let ipv4 = vpc
+        .cidr_block_association_set()
+        .iter()
+        .filter(move |association| associated(association.cidr_block_state()))
+        .filter_map(|association| association.cidr_block());
+    let ipv6 = vpc
+        .ipv6_cidr_block_association_set()
+        .iter()
+        .filter(move |association| associated(association.ipv6_cidr_block_state()))
+        .filter_map(|association| association.ipv6_cidr_block());
+    vpc.cidr_block().into_iter().chain(ipv4).chain(ipv6)
 }
 
 pub(crate) struct InstanceFacts<'a> {
@@ -1299,16 +1628,33 @@ pub(crate) const TYPED_CONFIG_TYPES: &[TypedConfigType] = &[
     typed(
         "AWS::EC2::VPCPeeringConnection",
         Node::AwsEc2VpcPeeringConnection,
-        None,
+        Some(ConfigKey::ResourceId),
     ),
-    typed("AWS::EC2::TransitGateway", Node::AwsEc2TransitGateway, None),
-    typed("AWS::EC2::VPNGateway", Node::AwsEc2VpnGateway, None),
+    typed(
+        "AWS::EC2::TransitGateway",
+        Node::AwsEc2TransitGateway,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::TransitGatewayRouteTable",
+        Node::AwsEc2TransitGatewayRouteTable,
+        Some(ConfigKey::ResourceId),
+    ),
+    typed(
+        "AWS::EC2::VPNGateway",
+        Node::AwsEc2VpnGateway,
+        Some(ConfigKey::ResourceId),
+    ),
     typed(
         "AWS::EC2::CustomerGateway",
         Node::AwsEc2CustomerGateway,
-        None,
+        Some(ConfigKey::ResourceId),
     ),
-    typed("AWS::EC2::VPNConnection", Node::AwsEc2VpnConnection, None),
+    typed(
+        "AWS::EC2::VPNConnection",
+        Node::AwsEc2VpnConnection,
+        Some(ConfigKey::ResourceId),
+    ),
     typed(
         "AWS::Lambda::Function",
         Node::AwsLambdaFunction,

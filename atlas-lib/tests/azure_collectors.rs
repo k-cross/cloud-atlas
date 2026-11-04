@@ -110,6 +110,7 @@ fn vnet_extracts_inline_subnets_with_nsg() {
         "type": "microsoft.network/virtualnetworks",
         "location": "eastus",
         "properties": {
+            "addressSpace": { "addressPrefixes": [ "10.20.0.0/16", "fd00:20::/48" ] },
             "subnets": [ {
                 "id": "/subscriptions/s/.../subnets/sn1",
                 "name": "sn1",
@@ -129,6 +130,10 @@ fn vnet_extracts_inline_subnets_with_nsg() {
     })]);
 
     let vnets = variant!(cols, AzureVirtualNetworks);
+    assert_eq!(
+        vnets[0].address_prefixes,
+        vec!["10.20.0.0/16", "fd00:20::/48"]
+    );
     assert_eq!(
         vnets[0].subnets,
         vec!["/subscriptions/s/.../subnets/sn1".to_string()]
@@ -513,4 +518,207 @@ fn an_ipv6_peering_with_no_state_of_its_own_takes_its_peering_state() {
         .map(|peering| peering.state.as_deref())
         .collect();
     assert_eq!(states, vec![Some("Disabled"), Some("Disabled")]);
+}
+
+#[test]
+fn virtual_wans_and_their_hubs_are_extracted() {
+    let cols = map(vec![
+        json!({
+            "id": "/subscriptions/s/.../virtualWans/wan1",
+            "name": "wan1",
+            "type": "microsoft.network/virtualwans",
+            "location": "eastus",
+            "properties": { "type": "Standard", "provisioningState": "Succeeded" }
+        }),
+        json!({
+            "id": "/subscriptions/s/.../virtualHubs/hub1",
+            "name": "hub1",
+            "type": "microsoft.network/virtualhubs",
+            "location": "eastus",
+            "properties": {
+                "addressPrefix": "10.100.0.0/23",
+                "virtualWan": { "id": "/subscriptions/s/.../virtualWans/wan1" },
+                "provisioningState": "Succeeded",
+                "routingState": "Provisioned"
+            }
+        }),
+    ]);
+
+    let wans = variant!(cols, AzureVirtualWans);
+    assert_eq!(
+        wans[0].id.as_deref(),
+        Some("/subscriptions/s/.../virtualWans/wan1")
+    );
+    assert_eq!(wans[0].provisioning_state.as_deref(), Some("Succeeded"));
+    assert_eq!(wans[0].wan_type.as_deref(), Some("Standard"));
+    let hubs = variant!(cols, AzureVirtualHubs);
+    assert_eq!(
+        hubs[0].id.as_deref(),
+        Some("/subscriptions/s/.../virtualHubs/hub1")
+    );
+    assert_eq!(
+        hubs[0].virtual_wan_id.as_deref(),
+        Some("/subscriptions/s/.../virtualWans/wan1")
+    );
+    assert_eq!(hubs[0].provisioning_state.as_deref(), Some("Succeeded"));
+}
+
+mod hub_connections {
+    use atlas_lib::api::azure::client::AzureApiClient;
+    use atlas_lib::api::azure::models::VirtualHub;
+    use atlas_lib::cloud::azure::provider::hub_connections;
+    use atlas_lib::cloud::definition::MicrosoftCollection;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const HUB: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualHubs";
+
+    fn hubs(names: &[&str]) -> Vec<MicrosoftCollection> {
+        vec![MicrosoftCollection::AzureVirtualHubs(
+            names
+                .iter()
+                .map(|name| VirtualHub {
+                    id: Some(format!("{HUB}/{name}")),
+                    ..Default::default()
+                })
+                .collect(),
+        )]
+    }
+
+    fn connection(name: &str, vnet: &str) -> serde_json::Value {
+        json!({
+            "id": format!("{HUB}/hub1/hubVirtualNetworkConnections/{name}"),
+            "name": name,
+            "properties": {
+                "remoteVirtualNetwork": { "id": format!("/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/{vnet}") },
+                "provisioningState": "Succeeded",
+                "routingConfiguration": { "associatedRouteTable": { "id": format!("{HUB}/hub1/hubRouteTables/defaultRouteTable") } }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn every_page_of_every_hub_is_read() {
+        let server = MockServer::start().await;
+        let listing = format!("{HUB}/hub1/hubVirtualNetworkConnections");
+        Mock::given(method("GET"))
+            .and(path(listing.clone()))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [connection("conn-b", "vnet-b")]
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(listing))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [connection("conn-a", "vnet-a")],
+                "nextLink": format!("{}{HUB}/hub1/hubVirtualNetworkConnections?api-version=2024-05-01&page=2", server.uri())
+            })))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        let client = AzureApiClient::with_base_url("test-token".into(), server.uri());
+
+        let (connections, report) = hub_connections(&client, &hubs(&["hub1"])).await;
+
+        assert!(report.is_complete(), "{}", report.summary());
+        let vnets: Vec<_> = connections
+            .iter()
+            .filter_map(|connection| connection.remote_virtual_network_id.as_deref())
+            .collect();
+        assert_eq!(
+            vnets,
+            vec![
+                "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet-a",
+                "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet-b",
+            ]
+        );
+        assert_eq!(
+            connections[0].hub_id.as_deref(),
+            Some(format!("{HUB}/hub1").as_str())
+        );
+        assert_eq!(
+            connections[0].provisioning_state.as_deref(),
+            Some("Succeeded")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hub_whose_connections_cannot_be_read_is_reported_not_emptied() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{HUB}/hub1/hubVirtualNetworkConnections")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [connection("conn-a", "vnet-a")]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{HUB}/hub2/hubVirtualNetworkConnections")))
+            .respond_with(ResponseTemplate::new(429).set_body_string("throttled"))
+            .mount(&server)
+            .await;
+        let client = AzureApiClient::with_base_url("test-token".into(), server.uri());
+
+        let (connections, report) = hub_connections(&client, &hubs(&["hub1", "hub2"])).await;
+
+        assert_eq!(connections.len(), 1, "the readable hub still counts");
+        assert!(!report.is_complete());
+        assert!(report.summary().contains("hub2"), "{}", report.summary());
+    }
+
+    #[tokio::test]
+    async fn a_hub_that_is_going_away_is_not_read() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{HUB}/hub1/hubVirtualNetworkConnections")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [connection("conn-a", "vnet-a")]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "{HUB}/hub-going/hubVirtualNetworkConnections"
+            )))
+            .respond_with(ResponseTemplate::new(404).set_body_string("ParentResourceNotFound"))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = AzureApiClient::with_base_url("test-token".into(), server.uri());
+        let mut collections = hubs(&["hub1", "hub-going"]);
+        if let MicrosoftCollection::AzureVirtualHubs(listed) = &mut collections[0] {
+            listed[1].provisioning_state = Some("Deleting".into());
+        }
+
+        let (connections, report) = hub_connections(&client, &collections).await;
+
+        assert!(report.is_complete(), "{}", report.summary());
+        assert_eq!(connections.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_next_link_that_comes_back_is_an_error_not_a_loop() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("{HUB}/hub1/hubVirtualNetworkConnections")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": [],
+                "nextLink": format!("{}{HUB}/hub1/hubVirtualNetworkConnections?page=again", server.uri())
+            })))
+            .mount(&server)
+            .await;
+        let client = AzureApiClient::with_base_url("test-token".into(), server.uri());
+
+        let (_, report) = hub_connections(&client, &hubs(&["hub1"])).await;
+
+        assert!(
+            report.summary().contains("repeated"),
+            "{}",
+            report.summary()
+        );
+    }
 }

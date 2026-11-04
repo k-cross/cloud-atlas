@@ -25,7 +25,7 @@ pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
 
     let subscriptions = opts.azure_subscriptions.as_deref().unwrap_or_default();
 
-    let collections = match client.query_graph(&arg_query(), subscriptions).await {
+    let mut collections = match client.query_graph(&arg_query(), subscriptions).await {
         Ok(rows) => {
             let (collections, mapping) = map_resources(rows);
             report.merge(mapping);
@@ -36,6 +36,11 @@ pub async fn build_azure(_verbose: bool, opts: &Settings) -> ProviderScan {
             Vec::new()
         }
     };
+    let (connections, hub_report) = hub_connections(&client, &collections).await;
+    report.merge(hub_report);
+    collections.push(MicrosoftCollection::AzureHubVirtualNetworkConnections(
+        connections,
+    ));
 
     ProviderScan {
         provider: Provider::Azure(collections),
@@ -80,6 +85,8 @@ azure_types! {
     LocalNetworkGateways => "microsoft.network/localnetworkgateways",
     Connections => "microsoft.network/connections",
     ExpressRouteCircuits => "microsoft.network/expressroutecircuits",
+    VirtualWans => "microsoft.network/virtualwans",
+    VirtualHubs => "microsoft.network/virtualhubs",
     StorageAccounts => "microsoft.storage/storageaccounts",
     ManagedClusters => "microsoft.containerservice/managedclusters",
     SqlServers => "microsoft.sql/servers",
@@ -120,6 +127,8 @@ pub fn map_resources(
     let mut local_gateways = Vec::new();
     let mut gateway_connections = Vec::new();
     let mut circuits = Vec::new();
+    let mut wans = Vec::new();
+    let mut hubs = Vec::new();
     let mut storage = Vec::new();
     let mut aks = Vec::new();
     let mut sql = Vec::new();
@@ -242,10 +251,22 @@ pub fn map_resources(
                             .collect()
                     })
                     .unwrap_or_default();
+                let address_prefixes = res
+                    .properties
+                    .as_ref()
+                    .and_then(|p| p.get("addressSpace"))
+                    .and_then(|space| space.get("addressPrefixes"))
+                    .and_then(|prefixes| prefixes.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|prefix| prefix.as_str())
+                    .map(str::to_owned)
+                    .collect();
                 vnets.push(VirtualNetwork {
                     id: res.id,
                     name: res.name,
                     location: res.location,
+                    address_prefixes,
                     subnets: subnet_ids,
                     peerings,
                 });
@@ -333,6 +354,26 @@ pub fn map_resources(
                     peerings,
                 });
             }
+            AzureType::VirtualWans => {
+                let properties = res.properties.as_ref();
+                wans.push(VirtualWan {
+                    wan_type: property_text(properties, "type"),
+                    provisioning_state: property_text(properties, "provisioningState"),
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
+            AzureType::VirtualHubs => {
+                let properties = res.properties.as_ref();
+                hubs.push(VirtualHub {
+                    virtual_wan_id: referenced_id(properties, "virtualWan"),
+                    provisioning_state: property_text(properties, "provisioningState"),
+                    id: res.id,
+                    name: res.name,
+                    location: res.location,
+                });
+            }
             AzureType::NetworkInterfaces => {
                 let properties = res.properties.as_ref().and_then(properties_of);
                 nics.push(NetworkInterface {
@@ -411,6 +452,8 @@ pub fn map_resources(
         MicrosoftCollection::AzureLocalNetworkGateways(local_gateways),
         MicrosoftCollection::AzureGatewayConnections(gateway_connections),
         MicrosoftCollection::AzureExpressRouteCircuits(circuits),
+        MicrosoftCollection::AzureVirtualWans(wans),
+        MicrosoftCollection::AzureVirtualHubs(hubs),
         MicrosoftCollection::AzureStorageAccounts(storage),
         MicrosoftCollection::AzureManagedClusters(aks),
         MicrosoftCollection::AzureSqlServers(sql),
@@ -444,6 +487,51 @@ pub fn map_resources(
     }
 
     (collections, report)
+}
+
+const HUB_CONNECTIONS_API: &str = "2024-05-01";
+
+pub async fn hub_connections(
+    client: &AzureApiClient,
+    collections: &[MicrosoftCollection],
+) -> (Vec<HubVirtualNetworkConnection>, CollectionReport) {
+    let mut connections = Vec::new();
+    let mut report = CollectionReport::default();
+    let hubs = collections
+        .iter()
+        .filter_map(|collection| match collection {
+            MicrosoftCollection::AzureVirtualHubs(hubs) => Some(hubs),
+            _ => None,
+        })
+        .flatten()
+        .filter(|hub| in_service(hub.provisioning_state.as_deref()))
+        .filter_map(|hub| hub.id.as_deref());
+    let listed = futures::future::join_all(hubs.map(|hub_id| async move {
+        let path =
+            format!("{hub_id}/hubVirtualNetworkConnections?api-version={HUB_CONNECTIONS_API}");
+        (hub_id, client.list_arm(&path).await)
+    }))
+    .await;
+    for (hub_id, listing) in listed {
+        match listing {
+            Ok(rows) => connections.extend(rows.iter().map(|row| {
+                let properties = row.get("properties");
+                HubVirtualNetworkConnection {
+                    id: row.get("id").and_then(|id| id.as_str()).map(str::to_owned),
+                    hub_id: Some(hub_id.to_owned()),
+                    remote_virtual_network_id: referenced_id(properties, "remoteVirtualNetwork"),
+                    provisioning_state: property_text(properties, "provisioningState"),
+                }
+            })),
+            Err(e) => report.record(
+                SOURCE,
+                FailureKind::Unavailable,
+                format!("hub_connections/{hub_id}"),
+                e,
+            ),
+        }
+    }
+    (connections, report)
 }
 
 fn referenced_id(properties: Option<&serde_json::Value>, key: &str) -> Option<String> {
@@ -508,6 +596,9 @@ mod tests {
                 MicrosoftCollection::AzureLocalNetworkGateways(items) => items.len(),
                 MicrosoftCollection::AzureGatewayConnections(items) => items.len(),
                 MicrosoftCollection::AzureExpressRouteCircuits(items) => items.len(),
+                MicrosoftCollection::AzureVirtualWans(items) => items.len(),
+                MicrosoftCollection::AzureVirtualHubs(items) => items.len(),
+                MicrosoftCollection::AzureHubVirtualNetworkConnections(items) => items.len(),
                 MicrosoftCollection::AzureStorageAccounts(items) => items.len(),
                 MicrosoftCollection::AzureManagedClusters(items) => items.len(),
                 MicrosoftCollection::AzureSqlServers(items) => items.len(),

@@ -121,6 +121,54 @@ impl AzureApiClient {
     }
 }
 
+impl AzureApiClient {
+    pub async fn list_arm(&self, path: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+        let base = self
+            .base_url
+            .as_deref()
+            .unwrap_or("https://management.azure.com");
+        let mut url = format!("{base}{path}");
+        let mut followed = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        loop {
+            let res = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.token)
+                .send()
+                .await?;
+            let status = res.status();
+            let text = res.text().await?;
+            if !status.is_success() {
+                return Err(format!("Azure Resource Manager error ({path}): {text}").into());
+            }
+            let mut parsed: Value = serde_json::from_str(&text)?;
+            let Some(page) = parsed.get_mut("value").and_then(|v| v.as_array_mut()) else {
+                return Err(format!(
+                    "Azure Resource Manager returned no `value` array for {path}. Response \
+                     starts: {}",
+                    preview(&text)
+                )
+                .into());
+            };
+            rows.append(page);
+            match parsed.get("nextLink").and_then(|link| link.as_str()) {
+                Some(next) if !next.is_empty() => {
+                    if !followed.insert(next.to_owned()) {
+                        return Err(format!(
+                            "Azure Resource Manager repeated a nextLink for {path}, so paging \
+                             would never end"
+                        )
+                        .into());
+                    }
+                    url = next.to_owned();
+                }
+                _ => return Ok(rows),
+            }
+        }
+    }
+}
+
 fn preview(body: &str) -> String {
     const MAX_CHARS: usize = 200;
     match body.char_indices().nth(MAX_CHARS) {

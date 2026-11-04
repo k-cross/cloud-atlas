@@ -8,31 +8,55 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn gcp_projector(builder: &mut GraphBuilder, gcp_data: &[(String, GoogleCollection)]) {
-    let skipped = skipped_interconnects(gcp_data);
+    let skipped = Skipped::of(gcp_data);
     project_parallel(builder, gcp_data, |local, (project, collection)| {
         project_google_collection(local, project, collection, &skipped)
     });
 }
 
-fn skipped_interconnects(gcp_data: &[(String, GoogleCollection)]) -> HashSet<Arc<str>> {
-    gcp_data
-        .iter()
-        .filter_map(|(_, collection)| match collection {
-            GoogleCollection::GoogleInterconnects(interconnects) => Some(interconnects),
-            _ => None,
-        })
-        .flatten()
-        .filter(|interconnect| !interconnect_provisioned(interconnect.state.as_deref()))
-        .filter_map(|interconnect| interconnect.self_link.as_deref())
-        .map(canonical_resource)
-        .collect()
+#[derive(Default)]
+struct Skipped {
+    interconnects: HashSet<Arc<str>>,
+    hubs: HashSet<String>,
+}
+
+impl Skipped {
+    fn of(gcp_data: &[(String, GoogleCollection)]) -> Self {
+        let mut skipped = Skipped::default();
+        for (_, collection) in gcp_data {
+            match collection {
+                GoogleCollection::GoogleInterconnects(interconnects) => {
+                    skipped.interconnects.extend(
+                        interconnects
+                            .iter()
+                            .filter(|interconnect| {
+                                !interconnect_provisioned(interconnect.state.as_deref())
+                            })
+                            .filter_map(|interconnect| interconnect.self_link.as_deref())
+                            .map(canonical_resource),
+                    )
+                }
+                GoogleCollection::GoogleHubs(hubs) => skipped.hubs.extend(
+                    hubs.iter()
+                        .filter(|hub| !hub_serving(hub.state.as_deref()))
+                        .filter_map(|hub| hub.name.clone()),
+                ),
+                _ => {}
+            }
+        }
+        skipped
+    }
+}
+
+fn hub_serving(state: Option<&str>) -> bool {
+    matches!(state, None | Some("ACTIVE" | "UPDATING"))
 }
 
 fn project_google_collection(
     builder: &mut GraphBuilder,
     project: &str,
     x: &GoogleCollection,
-    skipped_interconnects: &HashSet<Arc<str>>,
+    skipped: &Skipped,
 ) {
     let project_idx = builder.get_or_add_node(Node::GcpProject(project.into()));
 
@@ -228,11 +252,15 @@ fn project_google_collection(
                         .get_or_add_node(Node::GcpComputeSubnetwork(self_link.as_str().into()));
 
                     if let Some(network) = &subnetwork.network {
-                        builder.link_from(
+                        let scope = canonical_network(network, project);
+                        let network_idx = builder.link_from(
                             idx,
-                            Node::GcpComputeNetwork(canonical_network(network, project)),
+                            Node::GcpComputeNetwork(scope.clone()),
                             Edge::Contains,
                         );
+                        for range in subnetwork.address_space() {
+                            builder.link_to(network_idx, Node::ip(range, &scope), Edge::ConnectsTo);
+                        }
                     }
                 }
             }
@@ -318,6 +346,63 @@ fn project_google_collection(
                 }
             }
         }
+        GoogleCollection::GoogleHubs(hubs) => {
+            for name in hubs
+                .iter()
+                .filter(|hub| hub_serving(hub.state.as_deref()))
+                .filter_map(|hub| hub.name.as_deref())
+            {
+                builder.link_to(
+                    project_idx,
+                    Node::GcpNetworkConnectivityHub(name.into()),
+                    Edge::Contains,
+                );
+            }
+        }
+        GoogleCollection::GoogleSpokes(spokes) => {
+            for spoke in spokes
+                .iter()
+                .filter(|spoke| hub_serving(spoke.state.as_deref()))
+            {
+                let (Some(name), Some(hub), Some(network)) = (
+                    spoke.name.as_deref(),
+                    spoke
+                        .hub
+                        .as_deref()
+                        .filter(|hub| !skipped.hubs.contains(*hub)),
+                    spoke
+                        .linked_vpc_network
+                        .as_ref()
+                        .and_then(|linked| linked.uri.as_deref()),
+                ) else {
+                    continue;
+                };
+                let spoke_idx = builder.link_to(
+                    project_idx,
+                    Node::GcpNetworkConnectivitySpoke(name.into()),
+                    Edge::Contains,
+                );
+                builder.link_to(
+                    spoke_idx,
+                    Node::GcpComputeNetwork(canonical_network(network, project)),
+                    Edge::AttachedTo,
+                );
+                let group = spoke
+                    .group
+                    .clone()
+                    .unwrap_or_else(|| format!("{hub}/groups/default"));
+                let group_idx = builder.link_to(
+                    spoke_idx,
+                    Node::GcpNetworkConnectivityGroup(group.into()),
+                    Edge::AttachedTo,
+                );
+                builder.link_from(
+                    group_idx,
+                    Node::GcpNetworkConnectivityHub(hub.into()),
+                    Edge::Contains,
+                );
+            }
+        }
         GoogleCollection::GoogleRouters(routers) => {
             for router in routers {
                 let Some(link) = &router.self_link else {
@@ -364,7 +449,7 @@ fn project_google_collection(
                     .interconnect
                     .as_deref()
                     .map(canonical_resource)
-                    .filter(|id| !skipped_interconnects.contains(id))
+                    .filter(|id| !skipped.interconnects.contains(id))
                 {
                     builder.link_to(
                         idx,

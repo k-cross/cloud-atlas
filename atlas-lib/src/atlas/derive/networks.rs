@@ -1,4 +1,6 @@
+use super::routing::Routing;
 use crate::atlas::definition::{Edge, Node};
+use crate::atlas::util::parse_address;
 use petgraph::Direction;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -7,19 +9,55 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Connector {
     Hub(NodeIndex),
+    Edge(NodeIndex),
     Link { naming: NodeIndex, named: NodeIndex },
 }
 
 impl Connector {
-    fn partner(self) -> Connector {
-        match self {
-            Connector::Hub(hub) => Connector::Hub(hub),
-            Connector::Link { naming, named } => Connector::Link {
-                naming: named,
-                named: naming,
-            },
-        }
+    fn meets(self) -> impl Iterator<Item = Connector> {
+        let partners = match self {
+            Connector::Hub(hub) => [Some(Connector::Hub(hub)), Some(Connector::Edge(hub))],
+            Connector::Edge(hub) => [Some(Connector::Hub(hub)), None],
+            Connector::Link { naming, named } => [
+                Some(Connector::Link {
+                    naming: named,
+                    named: naming,
+                }),
+                None,
+            ],
+        };
+        partners.into_iter().flatten()
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Approach {
+    via: NodeIndex,
+    beyond: Option<NodeIndex>,
+}
+
+impl Approach {
+    fn along(trail: &[NodeIndex]) -> Option<Approach> {
+        Some(Approach {
+            via: *trail.get(1)?,
+            beyond: trail.get(2).copied(),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Crossing {
+    pub(super) via: NodeIndex,
+    pub(super) entrant: NodeIndex,
+    pub(super) toward: NodeIndex,
+    pub(super) onward: Option<Onward>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Onward {
+    pub(super) hub: NodeIndex,
+    pub(super) entrant: NodeIndex,
+    pub(super) toward: NodeIndex,
 }
 
 struct Step {
@@ -45,9 +83,14 @@ const fn from(edge: Edge, kind: &'static str) -> Step {
 }
 
 enum Join {
-    Through {
+    Hub {
         network: &'static str,
-        connector: &'static str,
+        path: &'static [Step],
+        edge: Option<fn(&Node) -> bool>,
+    },
+    HubPeering {
+        hub: &'static str,
+        peering: &'static str,
     },
     Direct {
         network: &'static str,
@@ -58,6 +101,10 @@ enum Join {
         holds: &'static [&'static [Step]],
         names: &'static [&'static [Step]],
     },
+}
+
+fn is_edge_group(node: &Node) -> bool {
+    matches!(node, Node::GcpNetworkConnectivityGroup(name) if name.ends_with("/groups/edge"))
 }
 
 const BGP_HOLDS: &[&[Step]] = &[
@@ -71,13 +118,36 @@ const BGP_NAMES: &[&[Step]] = &[
 ];
 
 const JOINS: &[Join] = &[
-    Join::Through {
+    Join::Hub {
         network: "AwsEc2Vpc",
-        connector: "AwsEc2VpcPeeringConnection",
+        path: &[from(Edge::AttachedTo, "AwsEc2VpcPeeringConnection")],
+        edge: None,
     },
-    Join::Through {
+    Join::Hub {
         network: "AwsEc2Vpc",
-        connector: "AwsEc2TransitGateway",
+        path: &[from(Edge::AttachedTo, "AwsEc2TransitGateway")],
+        edge: None,
+    },
+    Join::HubPeering {
+        hub: "AwsEc2TransitGateway",
+        peering: "AwsEc2TransitGatewayPeeringAttachment",
+    },
+    Join::Hub {
+        network: "AzureVirtualNetwork",
+        path: &[
+            from(Edge::AttachedTo, "AzureVirtualHub"),
+            to(Edge::AttachedTo, "AzureVirtualWan"),
+        ],
+        edge: None,
+    },
+    Join::Hub {
+        network: "GcpComputeNetwork",
+        path: &[
+            from(Edge::AttachedTo, "GcpNetworkConnectivitySpoke"),
+            to(Edge::AttachedTo, "GcpNetworkConnectivityGroup"),
+            from(Edge::Contains, "GcpNetworkConnectivityHub"),
+        ],
+        edge: Some(is_edge_group),
     },
     Join::Direct {
         network: "AzureVirtualNetwork",
@@ -182,14 +252,18 @@ const JOINS: &[Join] = &[
     },
 ];
 
+type Members = HashMap<Connector, HashSet<Approach>>;
+
 #[derive(Default)]
 pub(super) struct Joins<'g> {
-    members: HashMap<&'g str, HashSet<Connector>>,
+    members: HashMap<&'g str, Members>,
     peers: HashMap<&'g str, HashSet<&'g str>>,
+    peered: HashMap<NodeIndex, Vec<(NodeIndex, NodeIndex)>>,
+    networks: HashMap<&'g str, NodeIndex>,
 }
 
 struct LinkEnd<'g> {
-    networks: HashSet<&'g str>,
+    networks: HashMap<&'g str, HashSet<Approach>>,
     holds: Vec<NodeIndex>,
     names: Vec<NodeIndex>,
 }
@@ -204,7 +278,7 @@ impl LinkEnd<'_> {
             addresses
         };
         LinkEnd {
-            networks: HashSet::new(),
+            networks: HashMap::new(),
             holds: reach(holds),
             names: reach(names),
         }
@@ -223,14 +297,52 @@ impl<'g> Joins<'g> {
         let mut link_ends: HashMap<NodeIndex, LinkEnd> = HashMap::new();
         for join in JOINS {
             match join {
-                Join::Through { network, connector } => {
-                    for &hub in nodes_of(connector) {
-                        for member in scopes_beside(graph, hub, network) {
+                Join::Hub {
+                    network,
+                    path,
+                    edge,
+                } => {
+                    let Some(hub_kind) = path.last().map(|step| step.kind) else {
+                        continue;
+                    };
+                    for &hub in nodes_of(hub_kind) {
+                        for trail in trails_back(graph, hub, path, network) {
+                            let (Some(scope), Some(approach)) =
+                                (graph[trail[0]].network_scope(), Approach::along(&trail))
+                            else {
+                                continue;
+                            };
+                            let at_edge = edge.is_some_and(|is_edge| {
+                                trail.iter().any(|&node| is_edge(&graph[node]))
+                            });
+                            let connector = if at_edge {
+                                Connector::Edge(hub)
+                            } else {
+                                Connector::Hub(hub)
+                            };
                             joins
                                 .members
-                                .entry(member)
+                                .entry(scope)
                                 .or_default()
-                                .insert(Connector::Hub(hub));
+                                .entry(connector)
+                                .or_default()
+                                .insert(approach);
+                        }
+                    }
+                }
+                Join::HubPeering { hub, peering } => {
+                    for &attachment in nodes_of(peering) {
+                        let hubs: Vec<NodeIndex> = neighbours(graph, attachment)
+                            .filter(|next| graph[*next].kind() == *hub)
+                            .collect();
+                        for &near in &hubs {
+                            for &far in hubs.iter().filter(|far| **far != near) {
+                                joins
+                                    .peered
+                                    .entry(near)
+                                    .or_default()
+                                    .push((far, attachment));
+                            }
                         }
                     }
                 }
@@ -256,26 +368,37 @@ impl<'g> Joins<'g> {
                             continue;
                         };
                         for &end in nodes_of(end_kind) {
-                            let mut starts = Vec::new();
-                            follow_back(graph, end, path, network, &mut starts);
-                            let mut scopes = starts
-                                .into_iter()
-                                .filter_map(|start| graph[start].network_scope())
-                                .peekable();
-                            if scopes.peek().is_none() {
+                            let mut reached: Vec<(&str, Approach)> =
+                                trails_back(graph, end, path, network)
+                                    .into_iter()
+                                    .filter_map(|trail| {
+                                        Some((
+                                            graph[trail[0]].network_scope()?,
+                                            Approach::along(&trail)?,
+                                        ))
+                                    })
+                                    .collect();
+                            if reached.is_empty() {
                                 continue;
                             }
-                            link_ends
+                            let link_end = link_ends
                                 .entry(end)
-                                .or_insert_with(|| LinkEnd::of(graph, end, holds, names))
-                                .networks
-                                .extend(scopes);
+                                .or_insert_with(|| LinkEnd::of(graph, end, holds, names));
+                            for (scope, approach) in reached.drain(..) {
+                                link_end.networks.entry(scope).or_default().insert(approach);
+                            }
                         }
                     }
                 }
             }
         }
         joins.pair(&link_ends);
+        if !joins.is_empty() {
+            joins.networks = graph
+                .node_indices()
+                .filter_map(|index| Some((graph[index].network_scope()?, index)))
+                .collect();
+        }
         joins
     }
 
@@ -294,11 +417,13 @@ impl<'g> Joins<'g> {
                 .flatten()
                 .filter(|&&named| named != naming);
             for &named in named_ends {
-                for &network in &naming_end.networks {
+                for (&network, approaches) in &naming_end.networks {
                     self.members
                         .entry(network)
                         .or_default()
-                        .insert(Connector::Link { naming, named });
+                        .entry(Connector::Link { naming, named })
+                        .or_default()
+                        .extend(approaches.iter().copied());
                 }
             }
         }
@@ -308,24 +433,74 @@ impl<'g> Joins<'g> {
         self.members.is_empty() && self.peers.is_empty()
     }
 
+    pub(super) fn crossings(&self, from: &str, to: &str) -> Vec<Crossing> {
+        let mut crossings = Vec::new();
+        if from == to {
+            return crossings;
+        }
+        let (Some(&entrant), Some(&arrival)) = (self.networks.get(from), self.networks.get(to))
+        else {
+            return crossings;
+        };
+        if self.peers.get(from).is_some_and(|peers| peers.contains(to)) {
+            crossings.push(Crossing {
+                via: arrival,
+                entrant,
+                toward: arrival,
+                onward: None,
+            });
+        }
+        let (Some(mine), Some(theirs)) = (self.members.get(from), self.members.get(to)) else {
+            return crossings;
+        };
+        for (connector, approaches) in mine {
+            let met = connector
+                .meets()
+                .any(|partner| theirs.contains_key(&partner));
+            for approach in approaches {
+                if met {
+                    let toward = match connector {
+                        Connector::Link { .. } => approach.beyond.unwrap_or(approach.via),
+                        Connector::Hub(_) | Connector::Edge(_) => arrival,
+                    };
+                    crossings.push(Crossing {
+                        via: approach.via,
+                        entrant,
+                        toward,
+                        onward: None,
+                    });
+                }
+                let Connector::Hub(hub) = connector else {
+                    continue;
+                };
+                for &(far, attachment) in self.peered.get(hub).into_iter().flatten() {
+                    if theirs.contains_key(&Connector::Hub(far)) {
+                        crossings.push(Crossing {
+                            via: approach.via,
+                            entrant,
+                            toward: attachment,
+                            onward: Some(Onward {
+                                hub: far,
+                                entrant: attachment,
+                                toward: arrival,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
+        crossings
+    }
+
+    #[cfg(test)]
     pub(super) fn joined(&self, a: &str, b: &str) -> bool {
-        if a == b {
-            return false;
-        }
-        if self.peers.get(a).is_some_and(|peers| peers.contains(b)) {
-            return true;
-        }
-        match (self.members.get(a), self.members.get(b)) {
-            (Some(left), Some(right)) => left
-                .iter()
-                .any(|connector| right.contains(&connector.partner())),
-            _ => false,
-        }
+        !self.crossings(a, b).is_empty()
     }
 }
 
 pub(crate) struct HeldAddresses<'g> {
     joins: Joins<'g>,
+    routing: Routing<'g>,
     held: HashMap<&'g str, Vec<(&'g str, NodeIndex)>>,
 }
 
@@ -341,7 +516,16 @@ impl<'g> HeldAddresses<'g> {
                 held.entry(address).or_default().push((network, pivot));
             }
         }
-        HeldAddresses { joins, held }
+        let routing = if joins.is_empty() {
+            Routing::default()
+        } else {
+            Routing::of(graph)
+        };
+        HeldAddresses {
+            joins,
+            routing,
+            held,
+        }
     }
 
     pub(crate) fn holder(&self, network: &str, address: &str) -> Option<NodeIndex> {
@@ -349,10 +533,19 @@ impl<'g> HeldAddresses<'g> {
         if let Some((_, local)) = holders.iter().find(|(held_in, _)| *held_in == network) {
             return Some(*local);
         }
-        let mut joined = holders
-            .iter()
-            .filter(|(held_in, _)| self.joins.joined(network, held_in));
-        match (joined.next(), joined.next()) {
+        let host = parse_address(address).and_then(|(addr, width)| width.is_none().then_some(addr));
+        if host.is_some_and(|addr| self.routing.is_local(network, &addr)) {
+            return None;
+        }
+        let mut reachable = holders.iter().filter(|(held_in, _)| {
+            self.joins
+                .crossings(network, held_in)
+                .iter()
+                .any(|crossing| {
+                    host.is_none_or(|addr| self.routing.allows(network, &addr, crossing))
+                })
+        });
+        match (reachable.next(), reachable.next()) {
             (Some((_, only)), None) => Some(*only),
             _ => None,
         }
@@ -408,21 +601,35 @@ fn follow(graph: &Graph<Node, Edge>, at: NodeIndex, path: &[Step], ends: &mut Ve
     }
 }
 
-fn follow_back(
+fn trails_back(
     graph: &Graph<Node, Edge>,
-    at: NodeIndex,
+    end: NodeIndex,
     path: &[Step],
     origin: &str,
-    starts: &mut Vec<NodeIndex>,
-) {
-    let Some((step, before)) = path.split_last() else {
-        starts.push(at);
-        return;
-    };
-    let kind = before.last().map_or(origin, |previous| previous.kind);
-    for next in stepped(graph, at, &step.edge, step.toward.opposite(), kind) {
-        follow_back(graph, next, before, origin, starts);
+) -> Vec<Vec<NodeIndex>> {
+    fn walk(
+        graph: &Graph<Node, Edge>,
+        at: NodeIndex,
+        path: &[Step],
+        origin: &str,
+        trail: &mut Vec<NodeIndex>,
+        trails: &mut Vec<Vec<NodeIndex>>,
+    ) {
+        trail.push(at);
+        match path.split_last() {
+            None => trails.push(trail.iter().rev().copied().collect()),
+            Some((step, before)) => {
+                let kind = before.last().map_or(origin, |previous| previous.kind);
+                for next in stepped(graph, at, &step.edge, step.toward.opposite(), kind) {
+                    walk(graph, next, before, origin, trail, trails);
+                }
+            }
+        }
+        trail.pop();
     }
+    let mut trails = Vec::new();
+    walk(graph, end, path, origin, &mut Vec::new(), &mut trails);
+    trails
 }
 
 #[cfg(test)]
@@ -446,7 +653,10 @@ mod tests {
         let networks = ["AwsEc2Vpc", "AzureVirtualNetwork", "GcpComputeNetwork"];
         for join in JOINS {
             let (network, kinds): (&str, Vec<&str>) = match join {
-                Join::Through { network, connector } => (*network, vec![*connector]),
+                Join::Hub { network, path, .. } => {
+                    (*network, path.iter().map(|step| step.kind).collect())
+                }
+                Join::HubPeering { hub, peering } => ("AwsEc2Vpc", vec![*hub, *peering]),
                 Join::Direct { network } => (*network, Vec::new()),
                 Join::Link {
                     network,
@@ -986,5 +1196,494 @@ mod tests {
             !joins.joined("vpc-a", "net-same-side"),
             "two ends that both hold the cloud address of a link are not its two ends"
         );
+    }
+
+    fn hold(builder: &mut GraphBuilder, vpc_id: &str, address: &str) -> Node {
+        let interface =
+            builder.get_or_add_node(Node::AwsEc2Eni(format!("eni-{vpc_id}-{address}").into()));
+        let pivot = Node::ip(address, vpc_id);
+        builder.link_to(interface, pivot.clone(), Edge::ConnectsTo);
+        pivot
+    }
+
+    fn address_space(builder: &mut GraphBuilder, vpc_id: &str, cidr: &str) {
+        let network = builder.get_or_add_node(vpc(vpc_id));
+        builder.link_to(network, Node::ip(cidr, vpc_id), Edge::ConnectsTo);
+    }
+
+    fn route_table(builder: &mut GraphBuilder, vpc_id: &str, routes: &[(&str, Option<Node>)]) {
+        let table_id = format!("rtb-{vpc_id}");
+        let table = builder.link_to(
+            builder.index_of(&vpc(vpc_id)),
+            Node::AwsEc2RouteTable(table_id.as_str().into()),
+            Edge::Contains,
+        );
+        for (destination, target) in routes {
+            let route = builder.link_to(
+                table,
+                Node::AwsEc2Route {
+                    table: table_id.as_str().into(),
+                    destination: (*destination).into(),
+                },
+                Edge::Contains,
+            );
+            if let Some(target) = target {
+                builder.link_to(route, target.clone(), Edge::RoutesTo);
+            }
+        }
+    }
+
+    fn hub_table(
+        builder: &mut GraphBuilder,
+        hub: &Node,
+        table_id: &str,
+        associated: &[Node],
+        propagated: &[Node],
+        routes: &[(&str, Option<Node>)],
+    ) {
+        let hub = builder.get_or_add_node(hub.clone());
+        let table = builder.link_to(
+            hub,
+            Node::AwsEc2TransitGatewayRouteTable(table_id.into()),
+            Edge::Contains,
+        );
+        for entrant in associated {
+            builder.link_from(table, entrant.clone(), Edge::AttachedTo);
+        }
+        for resource in propagated {
+            builder.link_to(table, resource.clone(), Edge::RoutesTo);
+        }
+        for (destination, target) in routes {
+            let route = builder.link_to(
+                table,
+                Node::AwsEc2TransitGatewayRoute {
+                    table: table_id.into(),
+                    destination: (*destination).into(),
+                },
+                Edge::Contains,
+            );
+            if let Some(target) = target {
+                builder.link_to(route, target.clone(), Edge::RoutesTo);
+            }
+        }
+    }
+
+    fn resolved(builder: &GraphBuilder, network: &str, address: &str) -> Option<Node> {
+        crate::atlas::derive::held_addresses(&builder.graph)
+            .holder(network, address)
+            .map(|index| builder.graph[index].clone())
+    }
+
+    #[test]
+    fn an_unheld_address_inside_the_reading_network_stays_local() {
+        let mut builder = GraphBuilder::new();
+        attach(
+            &mut builder,
+            Node::AwsEc2TransitGateway("tgw-1".into()),
+            &["vpc-a", "vpc-b"],
+        );
+        let far = hold(&mut builder, "vpc-b", "10.10.9.9");
+        assert_eq!(
+            resolved(&builder, "vpc-a", "10.10.9.9"),
+            Some(far),
+            "without its address space, the reading network looks across the join"
+        );
+
+        address_space(&mut builder, "vpc-a", "10.10.0.0/16");
+
+        assert_eq!(
+            resolved(&builder, "vpc-a", "10.10.9.9"),
+            None,
+            "an address inside vpc-a's own range is vpc-a's, held or not"
+        );
+    }
+
+    #[test]
+    fn a_route_table_chooses_which_join_an_address_crosses() {
+        let mut builder = GraphBuilder::new();
+        let peering = Node::AwsEc2VpcPeeringConnection("pcx-ab".into());
+        let transit = Node::AwsEc2TransitGateway("tgw-1".into());
+        attach(&mut builder, peering.clone(), &["vpc-a", "vpc-b"]);
+        attach(&mut builder, transit.clone(), &["vpc-a", "vpc-c"]);
+        let peered = hold(&mut builder, "vpc-b", "10.40.1.1");
+        hold(&mut builder, "vpc-c", "10.40.1.1");
+        assert_eq!(
+            resolved(&builder, "vpc-a", "10.40.1.1"),
+            None,
+            "two holders"
+        );
+
+        route_table(
+            &mut builder,
+            "vpc-a",
+            &[
+                ("10.40.0.0/16", Some(peering)),
+                ("10.0.0.0/8", Some(transit)),
+            ],
+        );
+
+        assert_eq!(resolved(&builder, "vpc-a", "10.40.1.1"), Some(peered));
+    }
+
+    #[test]
+    fn a_network_with_no_route_toward_a_join_does_not_cross_it() {
+        let mut builder = GraphBuilder::new();
+        attach(
+            &mut builder,
+            Node::AwsEc2VpcPeeringConnection("pcx-ab".into()),
+            &["vpc-a", "vpc-b"],
+        );
+        hold(&mut builder, "vpc-b", "10.40.1.1");
+        route_table(
+            &mut builder,
+            "vpc-a",
+            &[(
+                "0.0.0.0/0",
+                Some(Node::AwsEc2InternetGateway("igw-a".into())),
+            )],
+        );
+
+        assert_eq!(resolved(&builder, "vpc-a", "10.40.1.1"), None);
+    }
+
+    #[test]
+    fn a_more_specific_blackhole_route_stops_the_crossing() {
+        let mut builder = GraphBuilder::new();
+        let peering = Node::AwsEc2VpcPeeringConnection("pcx-ab".into());
+        attach(&mut builder, peering.clone(), &["vpc-a", "vpc-b"]);
+        hold(&mut builder, "vpc-b", "10.40.1.1");
+        let reachable = hold(&mut builder, "vpc-b", "10.40.2.1");
+        route_table(
+            &mut builder,
+            "vpc-a",
+            &[("10.40.0.0/16", Some(peering)), ("10.40.1.0/24", None)],
+        );
+
+        assert_eq!(resolved(&builder, "vpc-a", "10.40.1.1"), None);
+        assert_eq!(resolved(&builder, "vpc-a", "10.40.2.1"), Some(reachable));
+    }
+
+    #[test]
+    fn a_route_to_a_prefix_list_may_carry_any_address() {
+        let mut builder = GraphBuilder::new();
+        let transit = Node::AwsEc2TransitGateway("tgw-1".into());
+        attach(&mut builder, transit.clone(), &["vpc-a", "vpc-b"]);
+        let far = hold(&mut builder, "vpc-b", "10.40.1.1");
+        route_table(
+            &mut builder,
+            "vpc-a",
+            &[
+                ("10.40.1.0/24", None),
+                ("pl-0shared", Some(transit.clone())),
+            ],
+        );
+        hub_table(
+            &mut builder,
+            &transit,
+            "tgw-rtb-1",
+            &[vpc("vpc-a")],
+            &[],
+            &[("pl-0shared", Some(vpc("vpc-b")))],
+        );
+
+        assert_eq!(
+            resolved(&builder, "vpc-a", "10.40.1.1"),
+            Some(far),
+            "a prefix list's entries are unread, so its route may be the longest match on both tables"
+        );
+    }
+
+    #[test]
+    fn a_transit_gateway_route_table_segments_its_attachments() {
+        let mut builder = GraphBuilder::new();
+        let transit = Node::AwsEc2TransitGateway("tgw-1".into());
+        attach(&mut builder, transit.clone(), &["vpc-a", "vpc-b", "vpc-c"]);
+        for (vpc_id, cidr) in [
+            ("vpc-a", "10.1.0.0/16"),
+            ("vpc-b", "10.2.0.0/16"),
+            ("vpc-c", "10.3.0.0/16"),
+        ] {
+            address_space(&mut builder, vpc_id, cidr);
+        }
+        let shared = hold(&mut builder, "vpc-b", "10.2.0.9");
+        hold(&mut builder, "vpc-c", "10.3.0.9");
+        hold(&mut builder, "vpc-a", "10.1.0.9");
+        hub_table(
+            &mut builder,
+            &transit,
+            "tgw-rtb-shared",
+            &[vpc("vpc-a"), vpc("vpc-b")],
+            &[vpc("vpc-a"), vpc("vpc-b")],
+            &[],
+        );
+        hub_table(
+            &mut builder,
+            &transit,
+            "tgw-rtb-isolated",
+            &[vpc("vpc-c")],
+            &[vpc("vpc-c")],
+            &[],
+        );
+
+        assert_eq!(resolved(&builder, "vpc-a", "10.2.0.9"), Some(shared));
+        assert_eq!(
+            resolved(&builder, "vpc-a", "10.3.0.9"),
+            None,
+            "c propagates elsewhere"
+        );
+        assert_eq!(
+            resolved(&builder, "vpc-c", "10.1.0.9"),
+            None,
+            "c's table reaches only c"
+        );
+    }
+
+    #[test]
+    fn a_vpn_on_a_transit_gateway_needs_its_table_to_carry_the_far_side() {
+        let build = |propagates_vpn: bool| {
+            let mut builder = GraphBuilder::new();
+            let transit = Node::AwsEc2TransitGateway("tgw-1".into());
+            attach(&mut builder, transit.clone(), &["vpc-a"]);
+            vpn_connection(
+                &mut builder,
+                transit.clone(),
+                "tgw",
+                "192.0.2.1",
+                "203.0.113.20",
+            );
+            azure_gateway(&mut builder, "vnet-far", "203.0.113.20");
+            azure_connection(&mut builder, "vnet-far", "tgw", "192.0.2.1");
+            hold(&mut builder, "vnet-far", "10.20.0.5");
+            let propagated: Vec<Node> = if propagates_vpn {
+                vec![Node::AwsEc2VpnConnection("vpn-tgw".into())]
+            } else {
+                Vec::new()
+            };
+            hub_table(
+                &mut builder,
+                &transit,
+                "tgw-rtb-1",
+                &[vpc("vpc-a")],
+                &propagated,
+                &[],
+            );
+            builder
+        };
+
+        assert!(resolved(&build(true), "vpc-a", "10.20.0.5").is_some());
+        assert_eq!(resolved(&build(false), "vpc-a", "10.20.0.5"), None);
+    }
+
+    #[test]
+    fn transit_gateway_peering_needs_a_route_on_both_gateways_and_goes_one_hop() {
+        let build = |east_routes: bool, west_carries: bool| {
+            let mut builder = GraphBuilder::new();
+            let east = Node::AwsEc2TransitGateway("tgw-east".into());
+            let west = Node::AwsEc2TransitGateway("tgw-west".into());
+            let south = Node::AwsEc2TransitGateway("tgw-south".into());
+            attach(&mut builder, east.clone(), &["vpc-a"]);
+            attach(&mut builder, west.clone(), &["vpc-b"]);
+            attach(&mut builder, south.clone(), &["vpc-c"]);
+            address_space(&mut builder, "vpc-b", "10.2.0.0/16");
+            address_space(&mut builder, "vpc-c", "10.3.0.0/16");
+            hold(&mut builder, "vpc-b", "10.2.0.9");
+            hold(&mut builder, "vpc-c", "10.3.0.9");
+            let peer = |builder: &mut GraphBuilder, id: &str, sides: [&Node; 2]| {
+                let attachment = Node::AwsEc2TransitGatewayPeeringAttachment(id.into());
+                let index = builder.get_or_add_node(attachment.clone());
+                for side in sides {
+                    builder.link_to(index, side.clone(), Edge::AttachedTo);
+                }
+                attachment
+            };
+            let east_west = peer(&mut builder, "tgw-attach-ew", [&east, &west]);
+            let west_south = peer(&mut builder, "tgw-attach-ws", [&west, &south]);
+            let routes: Vec<(&str, Option<Node>)> = if east_routes {
+                vec![
+                    ("10.2.0.0/16", Some(east_west.clone())),
+                    ("10.3.0.0/16", Some(east_west.clone())),
+                ]
+            } else {
+                Vec::new()
+            };
+            hub_table(
+                &mut builder,
+                &east,
+                "tgw-rtb-east",
+                &[vpc("vpc-a")],
+                &[],
+                &routes,
+            );
+            let propagated = if west_carries {
+                vec![vpc("vpc-b")]
+            } else {
+                Vec::new()
+            };
+            hub_table(
+                &mut builder,
+                &west,
+                "tgw-rtb-west",
+                &[east_west, vpc("vpc-b")],
+                &propagated,
+                &[("10.3.0.0/16", Some(west_south))],
+            );
+            builder
+        };
+
+        let routed = build(true, true);
+        assert!(resolved(&routed, "vpc-a", "10.2.0.9").is_some());
+        assert_eq!(
+            resolved(&routed, "vpc-a", "10.3.0.9"),
+            None,
+            "transit gateway peering is not transitive"
+        );
+        assert_eq!(resolved(&build(false, true), "vpc-a", "10.2.0.9"), None);
+        assert_eq!(
+            resolved(&build(true, false), "vpc-a", "10.2.0.9"),
+            None,
+            "the far gateway's table must route the address on"
+        );
+    }
+
+    fn ncc_spoke(builder: &mut GraphBuilder, network: &str, group: &str) {
+        let spoke = builder.get_or_add_node(Node::GcpNetworkConnectivitySpoke(
+            format!("spokes/{network}").into(),
+        ));
+        builder.link_to(
+            spoke,
+            Node::GcpComputeNetwork(network.into()),
+            Edge::AttachedTo,
+        );
+        let group = builder.link_to(
+            spoke,
+            Node::GcpNetworkConnectivityGroup(format!("hubs/hub-1/groups/{group}").into()),
+            Edge::AttachedTo,
+        );
+        builder.link_from(
+            group,
+            Node::GcpNetworkConnectivityHub("hubs/hub-1".into()),
+            Edge::Contains,
+        );
+    }
+
+    #[test]
+    fn a_mesh_hub_joins_every_spoke_and_a_star_hub_keeps_edges_apart() {
+        let mut mesh = GraphBuilder::new();
+        for network in ["net-a", "net-b", "net-c"] {
+            ncc_spoke(&mut mesh, network, "default");
+        }
+        let joins = Joins::of(&mesh.graph);
+        assert!(joins.joined("net-a", "net-b") && joins.joined("net-b", "net-c"));
+
+        let mut star = GraphBuilder::new();
+        ncc_spoke(&mut star, "net-center", "center");
+        ncc_spoke(&mut star, "net-edge-1", "edge");
+        ncc_spoke(&mut star, "net-edge-2", "edge");
+        let joins = Joins::of(&star.graph);
+        assert!(joins.joined("net-edge-1", "net-center"));
+        assert!(joins.joined("net-center", "net-edge-2"));
+        assert!(
+            !joins.joined("net-edge-1", "net-edge-2"),
+            "edge spokes of a star reach only the centre"
+        );
+    }
+
+    #[test]
+    fn virtual_networks_on_one_virtual_wan_are_joined_across_its_hubs() {
+        let mut builder = GraphBuilder::new();
+        for (hub, wan, vnets) in [
+            ("vhub-east", "vwan-1", ["vnet-a", "vnet-b"]),
+            ("vhub-west", "vwan-1", ["vnet-c", "vnet-d"]),
+            ("vhub-other", "vwan-2", ["vnet-e", "vnet-f"]),
+        ] {
+            let hub = builder.get_or_add_node(Node::AzureVirtualHub(hub.into()));
+            builder.link_to(hub, Node::AzureVirtualWan(wan.into()), Edge::AttachedTo);
+            for vnet in vnets {
+                builder.link_to(
+                    hub,
+                    Node::AzureVirtualNetwork(vnet.into()),
+                    Edge::AttachedTo,
+                );
+            }
+        }
+
+        let joins = Joins::of(&builder.graph);
+
+        assert!(joins.joined("vnet-a", "vnet-b"));
+        assert!(
+            joins.joined("vnet-a", "vnet-d"),
+            "hubs of one WAN route to each other"
+        );
+        assert!(!joins.joined("vnet-a", "vnet-e"));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Toward {
+        Peering,
+        Transit,
+        Nowhere,
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn the_longest_matching_route_decides_the_crossing(
+            routes in proptest::collection::vec(
+                (8u8..=32, proptest::bool::ANY, proptest::prop_oneof![
+                    proptest::strategy::Just(Toward::Peering),
+                    proptest::strategy::Just(Toward::Transit),
+                    proptest::strategy::Just(Toward::Nowhere),
+                ]),
+                0..6,
+            ),
+        ) {
+            use crate::atlas::util::{format_address, mask_to_prefix};
+            use std::net::{IpAddr, Ipv4Addr};
+
+            let address = IpAddr::V4(Ipv4Addr::new(10, 40, 1, 1));
+            let mut builder = GraphBuilder::new();
+            let peering = Node::AwsEc2VpcPeeringConnection("pcx-ab".into());
+            let transit = Node::AwsEc2TransitGateway("tgw-1".into());
+            attach(&mut builder, peering.clone(), &["vpc-a", "vpc-b"]);
+            attach(&mut builder, transit.clone(), &["vpc-a", "vpc-c"]);
+            let peered = hold(&mut builder, "vpc-b", "10.40.1.1");
+            let transited = hold(&mut builder, "vpc-c", "10.40.1.1");
+
+            let mut seen = HashSet::new();
+            let mut table = Vec::new();
+            let mut best: Option<(u8, Toward)> = None;
+            for (width, covers, toward) in routes {
+                let base = if covers {
+                    address
+                } else {
+                    IpAddr::V4(Ipv4Addr::from(u32::from(Ipv4Addr::new(10, 40, 1, 1)) ^ (1 << (32 - width))))
+                };
+                let network = mask_to_prefix(&base, width).expect("a width inside v4");
+                let destination = format_address(&network, Some(width));
+                if !seen.insert(destination.clone()) {
+                    continue;
+                }
+                if covers && best.is_none_or(|(longest, _)| width > longest) {
+                    best = Some((width, toward));
+                }
+                let target = match toward {
+                    Toward::Peering => Some(peering.clone()),
+                    Toward::Transit => Some(transit.clone()),
+                    Toward::Nowhere => None,
+                };
+                table.push((destination, target));
+            }
+            let borrowed: Vec<(&str, Option<Node>)> = table
+                .iter()
+                .map(|(destination, target)| (destination.as_str(), target.clone()))
+                .collect();
+            route_table(&mut builder, "vpc-a", &borrowed);
+
+            let expected = match best {
+                Some((_, Toward::Peering)) => Some(peered),
+                Some((_, Toward::Transit)) => Some(transited),
+                Some((_, Toward::Nowhere)) | None => None,
+            };
+            proptest::prop_assert_eq!(resolved(&builder, "vpc-a", "10.40.1.1"), expected);
+        }
     }
 }

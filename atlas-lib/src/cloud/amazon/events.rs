@@ -3,7 +3,10 @@ use crate::atlas::definition::{Edge, Node};
 use crate::atlas::event::{ChangeEvent, ChangeOp};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector::aws::{
-    ConfigKey, EniFacts, InstanceFacts, InterfaceFacts, project_instance, project_interface,
+    ConfigKey, CustomerGatewayFacts, EniFacts, InstanceFacts, InterfaceFacts, PeeringFacts,
+    RouteFacts, RouteTableFacts, VpcFacts, VpnConnectionFacts, VpnGatewayFacts,
+    project_customer_gateway, project_instance, project_interface, project_peering,
+    project_route_table, project_vpc, project_vpn_connection, project_vpn_gateway,
     typed_config_type, use_aws_resource, use_global,
 };
 use crate::cloud::amazon::sqs::feed::unwrap_sns;
@@ -130,6 +133,26 @@ impl ConfigurationItem {
             .filter(|r| r.resource_type.as_deref() == Some(resource_type))
             .filter_map(|r| r.resource_id.as_deref())
             .collect()
+    }
+
+    fn configuration_value(&self) -> Option<Value> {
+        match self.configuration.as_ref()? {
+            Value::String(raw) => serde_json::from_str(raw).ok(),
+            other => Some(other.clone()),
+        }
+    }
+
+    fn configured_state(&self, key: &str) -> Option<String> {
+        let value = self.configuration_value()?;
+        let state = value.get(key)?;
+        state
+            .as_str()
+            .or_else(|| {
+                ["code", "value", "name"]
+                    .into_iter()
+                    .find_map(|field| state.get(field)?.as_str())
+            })
+            .map(str::to_owned)
     }
 
     fn configuration<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
@@ -264,10 +287,17 @@ fn from_config_item(
     let mut events = Vec::new();
 
     if let Some(node) = typed_node(&item, resource_type) {
-        let context = typed_context(&item, region, resource_type, &node);
-        events.push(
-            ChangeEvent::new(SOURCE, region, id, observed_at, op, node).with_context(context),
-        );
+        let op = match (op, lifecycle(&item, resource_type)) {
+            (ChangeOp::Deleted, _) | (_, Lifecycle::Skipped) => Some(ChangeOp::Deleted),
+            (op, Lifecycle::Drawn) => Some(op),
+            (_, Lifecycle::Unrecorded) => None,
+        };
+        if let Some(op) = op {
+            let context = typed_context(&item, region, resource_type, &node);
+            events.push(
+                ChangeEvent::new(SOURCE, region, id, observed_at, op, node).with_context(context),
+            );
+        }
     }
 
     if use_aws_resource(resource_type, exclude_by_default)
@@ -289,6 +319,28 @@ fn from_config_item(
     }
 
     Ok(events)
+}
+
+enum Lifecycle {
+    Drawn,
+    Skipped,
+    Unrecorded,
+}
+
+fn lifecycle(item: &ConfigurationItem, resource_type: &str) -> Lifecycle {
+    let drawn_when = |key: &str, drawn: &str| match item.configured_state(key) {
+        Some(state) if state.eq_ignore_ascii_case(drawn) => Lifecycle::Drawn,
+        Some(_) => Lifecycle::Skipped,
+        None => Lifecycle::Unrecorded,
+    };
+    match resource_type {
+        "AWS::EC2::VPCPeeringConnection" => drawn_when("status", "active"),
+        "AWS::EC2::VPNGateway" | "AWS::EC2::CustomerGateway" | "AWS::EC2::VPNConnection" => {
+            drawn_when("state", "available")
+        }
+        "AWS::EC2::TransitGateway" | "AWS::EC2::TransitGatewayRouteTable" => Lifecycle::Unrecorded,
+        _ => Lifecycle::Drawn,
+    }
 }
 
 fn config_op(status: Option<&str>) -> Option<ChangeOp> {
@@ -327,8 +379,99 @@ fn typed_context(
         "AWS::EC2::Instance" => instance_context(item, region),
         "AWS::EC2::NetworkInterface" => interface_context(item, region, node),
 
-        "AWS::EC2::VPC"
-        | "AWS::EC2::SecurityGroup"
+        "AWS::EC2::VPC" => connectivity_context(region, |builder, region_idx| {
+            let config: VpcConfiguration = item.configuration().unwrap_or_default();
+            if let Some(id) = item.resource_id.as_deref() {
+                project_vpc(
+                    builder,
+                    region_idx,
+                    &VpcFacts {
+                        id,
+                        address_space: config.address_space().collect(),
+                    },
+                );
+            }
+        }),
+        "AWS::EC2::RouteTable" => route_table_context(item),
+        "AWS::EC2::VPCPeeringConnection" => connectivity_context(region, |builder, _| {
+            let config: PeeringConfiguration = item.configuration().unwrap_or_default();
+            if let Some(id) = item.resource_id.as_deref() {
+                project_peering(
+                    builder,
+                    &PeeringFacts {
+                        id,
+                        vpc_ids: [&config.requester_vpc_info, &config.accepter_vpc_info]
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|side| side.vpc_id.as_deref())
+                            .collect(),
+                    },
+                );
+            }
+        }),
+        "AWS::EC2::VPNGateway" => connectivity_context(region, |builder, region_idx| {
+            let config: VpnGatewayConfiguration = item.configuration().unwrap_or_default();
+            if let Some(id) = item.resource_id.as_deref() {
+                project_vpn_gateway(
+                    builder,
+                    region_idx,
+                    &VpnGatewayFacts {
+                        id,
+                        attached_vpc_ids: config
+                            .vpc_attachments
+                            .iter()
+                            .filter(|attachment| {
+                                attachment
+                                    .state
+                                    .as_deref()
+                                    .is_some_and(|state| state.eq_ignore_ascii_case("attached"))
+                            })
+                            .filter_map(|attachment| attachment.vpc_id.as_deref())
+                            .collect(),
+                    },
+                );
+            }
+        }),
+        "AWS::EC2::CustomerGateway" => connectivity_context(region, |builder, region_idx| {
+            let config: CustomerGatewayConfiguration = item.configuration().unwrap_or_default();
+            if let Some(id) = item.resource_id.as_deref() {
+                project_customer_gateway(
+                    builder,
+                    region_idx,
+                    &CustomerGatewayFacts {
+                        id,
+                        ip_address: config.ip_address.as_deref(),
+                    },
+                );
+            }
+        }),
+        "AWS::EC2::VPNConnection" => connectivity_context(region, |builder, region_idx| {
+            let config: VpnConnectionConfiguration = item.configuration().unwrap_or_default();
+            if let Some(id) = item.resource_id.as_deref() {
+                let configured = config
+                    .options
+                    .iter()
+                    .flat_map(|options| &options.tunnel_options)
+                    .filter_map(|tunnel| tunnel.outside_ip_address.as_deref());
+                let reported = config
+                    .vgw_telemetry
+                    .iter()
+                    .filter_map(|telemetry| telemetry.outside_ip_address.as_deref());
+                project_vpn_connection(
+                    builder,
+                    region_idx,
+                    &VpnConnectionFacts {
+                        id,
+                        vpn_gateway_id: config.vpn_gateway_id.as_deref(),
+                        transit_gateway_id: config.transit_gateway_id.as_deref(),
+                        customer_gateway_id: config.customer_gateway_id.as_deref(),
+                        outside_addresses: configured.chain(reported).collect(),
+                    },
+                );
+            }
+        }),
+
+        "AWS::EC2::SecurityGroup"
         | "AWS::Lambda::Function"
         | "AWS::ECS::Cluster"
         | "AWS::DynamoDB::Table"
@@ -349,7 +492,7 @@ fn typed_context(
             Edge::Contains,
         ),
 
-        "AWS::EC2::Subnet" | "AWS::EC2::RouteTable" => match vpc() {
+        "AWS::EC2::Subnet" => match vpc() {
             Some(vpc) => linked(vpc, node.clone(), Edge::Contains),
             None => solo(node.clone()),
         },
@@ -828,6 +971,199 @@ fn string_at(value: &Value, path: &[&str]) -> Option<String> {
         cursor = cursor.get(key)?;
     }
     cursor.as_str().map(str::to_owned)
+}
+
+fn connectivity_context(
+    region: &str,
+    project: impl FnOnce(&mut GraphBuilder, petgraph::graph::NodeIndex),
+) -> Graph<Node, Edge> {
+    let mut builder = GraphBuilder::new();
+    let region_idx = builder.get_or_add_node(Node::AwsRegion(region.into()));
+    project(&mut builder, region_idx);
+    if builder.graph.edges(region_idx).next().is_none() {
+        builder.remove_node(&Node::AwsRegion(region.into()));
+    }
+    builder.graph
+}
+
+fn route_table_context(item: &ConfigurationItem) -> Graph<Node, Edge> {
+    let config: RouteTableConfiguration = item.configuration().unwrap_or_default();
+    let mut builder = GraphBuilder::new();
+    if let Some(id) = item.resource_id.as_deref() {
+        project_route_table(
+            &mut builder,
+            &RouteTableFacts {
+                id,
+                vpc_id: config
+                    .vpc_id
+                    .as_deref()
+                    .or_else(|| item.related("AWS::EC2::VPC")),
+                subnet_ids: config
+                    .associations
+                    .iter()
+                    .filter_map(|association| association.subnet_id.as_deref())
+                    .collect(),
+                routes: config
+                    .routes
+                    .iter()
+                    .filter_map(|route| {
+                        Some(RouteFacts {
+                            destination: route
+                                .destination_cidr_block
+                                .as_deref()
+                                .or(route.destination_ipv6_cidr_block.as_deref())
+                                .or(route.destination_prefix_list_id.as_deref())?,
+                            active: !route
+                                .state
+                                .as_deref()
+                                .is_some_and(|state| state.eq_ignore_ascii_case("blackhole")),
+                            gateway_id: route.gateway_id.as_deref(),
+                            nat_gateway_id: route.nat_gateway_id.as_deref(),
+                            transit_gateway_id: route.transit_gateway_id.as_deref(),
+                            vpc_peering_connection_id: route.vpc_peering_connection_id.as_deref(),
+                            network_interface_id: route.network_interface_id.as_deref(),
+                        })
+                    })
+                    .collect(),
+            },
+        );
+    }
+    builder.graph
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct VpcConfiguration {
+    cidr_block: Option<String>,
+    #[serde(default)]
+    cidr_block_association_set: Vec<CidrAssociation>,
+    #[serde(default)]
+    ipv6_cidr_block_association_set: Vec<CidrAssociation>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CidrAssociation {
+    cidr_block: Option<String>,
+    ipv6_cidr_block: Option<String>,
+    cidr_block_state: Option<CidrState>,
+    ipv6_cidr_block_state: Option<CidrState>,
+}
+
+#[derive(Deserialize, Default)]
+struct CidrState {
+    state: Option<String>,
+}
+
+impl VpcConfiguration {
+    fn address_space(&self) -> impl Iterator<Item = &str> {
+        let associated = self
+            .cidr_block_association_set
+            .iter()
+            .chain(&self.ipv6_cidr_block_association_set)
+            .filter(|association| {
+                association
+                    .cidr_block_state
+                    .as_ref()
+                    .or(association.ipv6_cidr_block_state.as_ref())
+                    .and_then(|state| state.state.as_deref())
+                    .is_some_and(|state| state.eq_ignore_ascii_case("associated"))
+            })
+            .filter_map(|association| {
+                association
+                    .cidr_block
+                    .as_deref()
+                    .or(association.ipv6_cidr_block.as_deref())
+            });
+        self.cidr_block.as_deref().into_iter().chain(associated)
+    }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RouteTableConfiguration {
+    vpc_id: Option<String>,
+    #[serde(default)]
+    associations: Vec<RouteTableAssociationRef>,
+    #[serde(default)]
+    routes: Vec<RouteRef>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RouteTableAssociationRef {
+    subnet_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RouteRef {
+    destination_cidr_block: Option<String>,
+    destination_ipv6_cidr_block: Option<String>,
+    destination_prefix_list_id: Option<String>,
+    state: Option<String>,
+    gateway_id: Option<String>,
+    nat_gateway_id: Option<String>,
+    transit_gateway_id: Option<String>,
+    vpc_peering_connection_id: Option<String>,
+    network_interface_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PeeringConfiguration {
+    requester_vpc_info: Option<PeeringSide>,
+    accepter_vpc_info: Option<PeeringSide>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PeeringSide {
+    vpc_id: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct VpnGatewayConfiguration {
+    #[serde(default)]
+    vpc_attachments: Vec<VpcAttachmentRef>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct VpcAttachmentRef {
+    vpc_id: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CustomerGatewayConfiguration {
+    ip_address: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct VpnConnectionConfiguration {
+    vpn_gateway_id: Option<String>,
+    transit_gateway_id: Option<String>,
+    customer_gateway_id: Option<String>,
+    options: Option<VpnOptions>,
+    #[serde(default)]
+    vgw_telemetry: Vec<TunnelAddress>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct VpnOptions {
+    #[serde(default)]
+    tunnel_options: Vec<TunnelAddress>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct TunnelAddress {
+    outside_ip_address: Option<String>,
 }
 
 fn solo(node: Node) -> Graph<Node, Edge> {

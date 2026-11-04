@@ -868,7 +868,8 @@ fn an_unparented_subnet_gets_no_region_edge() {
             .replace(
                 r#"{ "resourceType": "AWS::EC2::VPC", "resourceId": "vpc-globex" },"#,
                 "",
-            );
+            )
+            .replace(r#""vpcId": "vpc-globex","#, "");
 
         let events = parse_ok(&body);
         let typed = events.first().expect("a typed event for {resource_type}");
@@ -905,4 +906,372 @@ fn a_subnet_still_lands_inside_the_vpc_its_event_named() {
             && typed.context[e.target()] == Node::AwsEc2Subnet("subnet-new".into())
             && e.weight() == &Edge::Contains
     }));
+}
+
+fn connectivity_item(
+    resource_type: &str,
+    resource_id: &str,
+    status: &str,
+    configuration: &str,
+) -> String {
+    format!(
+        r#"{{
+          "version": "0",
+          "id": "cfg-{resource_id}",
+          "detail-type": "Config Configuration Item Change Notification",
+          "source": "aws.config",
+          "time": "2026-09-03T12:00:00Z",
+          "region": "us-east-1",
+          "detail": {{
+            "configurationItem": {{
+              "configurationItemStatus": "{status}",
+              "configurationItemCaptureTime": "2026-09-03T12:00:00.000Z",
+              "resourceType": "{resource_type}",
+              "resourceId": "{resource_id}",
+              "awsRegion": "us-east-1",
+              "configuration": {configuration}
+            }}
+          }}
+        }}"#
+    )
+}
+
+fn scanned_connectivity_graph() -> Graph<Node, Edge> {
+    use crate::cloud::definition::{AWSConnectivity, AWSNetworking};
+    use aws_sdk_ec2::types::{
+        AttachmentStatus, CustomerGateway, Route, RouteState, RouteTable, RouteTableAssociation,
+        TunnelOption, Vpc, VpcAttachment, VpcCidrBlockAssociation, VpcCidrBlockState,
+        VpcCidrBlockStateCode, VpcPeeringConnection, VpcPeeringConnectionStateReason,
+        VpcPeeringConnectionStateReasonCode, VpcPeeringConnectionVpcInfo, VpnConnection,
+        VpnConnectionOptions, VpnGateway, VpnState,
+    };
+
+    let side = |vpc_id: &str| {
+        VpcPeeringConnectionVpcInfo::builder()
+            .vpc_id(vpc_id)
+            .build()
+    };
+    let connectivity = AWSConnectivity {
+        vpcs: vec![
+            Vpc::builder()
+                .vpc_id("vpc-a")
+                .cidr_block("10.1.0.0/16")
+                .cidr_block_association_set(
+                    VpcCidrBlockAssociation::builder()
+                        .cidr_block("10.9.0.0/16")
+                        .cidr_block_state(
+                            VpcCidrBlockState::builder()
+                                .state(VpcCidrBlockStateCode::Associated)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        ],
+        peering_connections: vec![
+            VpcPeeringConnection::builder()
+                .vpc_peering_connection_id("pcx-a")
+                .status(
+                    VpcPeeringConnectionStateReason::builder()
+                        .code(VpcPeeringConnectionStateReasonCode::Active)
+                        .build(),
+                )
+                .requester_vpc_info(side("vpc-a"))
+                .accepter_vpc_info(side("vpc-b"))
+                .build(),
+        ],
+        vpn_gateways: vec![
+            VpnGateway::builder()
+                .vpn_gateway_id("vgw-a")
+                .state(VpnState::Available)
+                .vpc_attachments(
+                    VpcAttachment::builder()
+                        .vpc_id("vpc-a")
+                        .state(AttachmentStatus::Attached)
+                        .build(),
+                )
+                .build(),
+        ],
+        customer_gateways: vec![
+            CustomerGateway::builder()
+                .customer_gateway_id("cgw-a")
+                .ip_address("198.51.100.9")
+                .state("available")
+                .build(),
+        ],
+        vpn_connections: vec![
+            VpnConnection::builder()
+                .vpn_connection_id("vpn-a")
+                .state(VpnState::Available)
+                .vpn_gateway_id("vgw-a")
+                .customer_gateway_id("cgw-a")
+                .options(
+                    VpnConnectionOptions::builder()
+                        .tunnel_options(
+                            TunnelOption::builder()
+                                .outside_ip_address("192.0.2.7")
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        ],
+        ..Default::default()
+    };
+    let route = |destination: &str| Route::builder().destination_cidr_block(destination);
+    let networking = AWSNetworking {
+        route_tables: vec![
+            RouteTable::builder()
+                .route_table_id("rtb-a")
+                .vpc_id("vpc-a")
+                .associations(
+                    RouteTableAssociation::builder()
+                        .subnet_id("subnet-a")
+                        .build(),
+                )
+                .routes(route("10.1.0.0/16").gateway_id("local").build())
+                .routes(
+                    route("10.2.0.0/16")
+                        .vpc_peering_connection_id("pcx-a")
+                        .build(),
+                )
+                .routes(route("172.16.0.0/12").gateway_id("vgw-a").build())
+                .routes(
+                    route("10.60.0.0/16")
+                        .transit_gateway_id("tgw-gone")
+                        .state(RouteState::Blackhole)
+                        .build(),
+                )
+                .routes(
+                    Route::builder()
+                        .destination_prefix_list_id("pl-1234abcd")
+                        .transit_gateway_id("tgw-a")
+                        .build(),
+                )
+                .build(),
+        ],
+        internet_gateways: Vec::new(),
+        nat_gateways: Vec::new(),
+        addresses: Vec::new(),
+    };
+
+    let mut builder = GraphBuilder::new();
+    projector::build(
+        &mut builder,
+        &Provider::AWS(vec![
+            (
+                "us-east-1".to_owned(),
+                AmazonCollection::AmazonConnectivity(connectivity),
+            ),
+            (
+                "us-east-1".to_owned(),
+                AmazonCollection::AmazonNetworking(networking),
+            ),
+        ]),
+        &Settings::default(),
+    );
+    builder.graph
+}
+
+const CONNECTIVITY_ITEMS: &[(&str, &str, &str)] = &[
+    (
+        "AWS::EC2::VPC",
+        "vpc-a",
+        r#"{ "vpcId": "vpc-a", "cidrBlock": "10.1.0.0/16",
+             "cidrBlockAssociationSet": [
+               { "cidrBlock": "10.9.0.0/16", "cidrBlockState": { "state": "associated" } },
+               { "cidrBlock": "10.8.0.0/16", "cidrBlockState": { "state": "disassociated" } }
+             ] }"#,
+    ),
+    (
+        "AWS::EC2::RouteTable",
+        "rtb-a",
+        r#"{ "routeTableId": "rtb-a", "vpcId": "vpc-a",
+             "associations": [{ "subnetId": "subnet-a", "main": false }],
+             "routes": [
+               { "destinationCidrBlock": "10.1.0.0/16", "gatewayId": "local", "state": "active" },
+               { "destinationCidrBlock": "10.2.0.0/16", "vpcPeeringConnectionId": "pcx-a", "state": "active" },
+               { "destinationCidrBlock": "172.16.0.0/12", "gatewayId": "vgw-a", "state": "active" },
+               { "destinationCidrBlock": "10.60.0.0/16", "transitGatewayId": "tgw-gone", "state": "blackhole" },
+               { "destinationPrefixListId": "pl-1234abcd", "transitGatewayId": "tgw-a", "state": "active" }
+             ] }"#,
+    ),
+    (
+        "AWS::EC2::VPCPeeringConnection",
+        "pcx-a",
+        r#"{ "vpcPeeringConnectionId": "pcx-a", "status": "active",
+             "requesterVpcInfo": { "vpcId": "vpc-a" }, "accepterVpcInfo": { "vpcId": "vpc-b" } }"#,
+    ),
+    (
+        "AWS::EC2::VPNGateway",
+        "vgw-a",
+        r#"{ "vpnGatewayId": "vgw-a", "state": { "value": "available" },
+             "vpcAttachments": [{ "vpcId": "vpc-a", "state": "attached" },
+                                { "vpcId": "vpc-old", "state": "detached" }] }"#,
+    ),
+    (
+        "AWS::EC2::CustomerGateway",
+        "cgw-a",
+        r#"{ "customerGatewayId": "cgw-a", "ipAddress": "198.51.100.9", "state": "available" }"#,
+    ),
+    (
+        "AWS::EC2::VPNConnection",
+        "vpn-a",
+        r#"{ "vpnConnectionId": "vpn-a", "state": { "value": "available" },
+             "vpnGatewayId": "vgw-a", "customerGatewayId": "cgw-a",
+             "options": { "tunnelOptions": [{ "outsideIpAddress": "192.0.2.7" }] } }"#,
+    ),
+];
+
+#[test]
+fn every_connectivity_event_produces_only_what_a_full_scan_would() {
+    let scanned = scanned_connectivity_graph();
+    for (resource_type, resource_id, configuration) in CONNECTIVITY_ITEMS {
+        let events = parse_ok(&connectivity_item(
+            resource_type,
+            resource_id,
+            "OK",
+            configuration,
+        ));
+        let [typed] = events.as_slice() else {
+            panic!("{resource_type}: one typed event, got {events:?}");
+        };
+        assert_eq!(typed.op, ChangeOp::Modified, "{resource_type}");
+        assert!(
+            typed.context.edge_count() > 0,
+            "{resource_type} carries the edges its scan draws"
+        );
+        let extra_nodes: Vec<_> = node_keys(&typed.context)
+            .difference(&node_keys(&scanned))
+            .cloned()
+            .collect();
+        assert!(
+            extra_nodes.is_empty(),
+            "{resource_type} invented {extra_nodes:?}"
+        );
+        let extra_edges: Vec<_> = edge_keys(&typed.context)
+            .difference(&edge_keys(&scanned))
+            .cloned()
+            .collect();
+        assert!(
+            extra_edges.is_empty(),
+            "{resource_type} invented {extra_edges:?}"
+        );
+    }
+}
+
+#[test]
+fn a_route_table_event_carries_its_routes() {
+    let (_, id, configuration) = CONNECTIVITY_ITEMS[1];
+    let events = parse_ok(&connectivity_item(
+        "AWS::EC2::RouteTable",
+        id,
+        "ResourceDiscovered",
+        configuration,
+    ));
+    let route = |destination: &str| Node::AwsEc2Route {
+        table: "rtb-a".into(),
+        destination: destination.into(),
+    };
+    let edges = edge_keys(&events[0].context);
+    for (from, to) in [
+        (
+            route("10.2.0.0/16"),
+            Node::AwsEc2VpcPeeringConnection("pcx-a".into()),
+        ),
+        (
+            route("172.16.0.0/12"),
+            Node::AwsEc2VpnGateway("vgw-a".into()),
+        ),
+        (route("10.1.0.0/16"), Node::AwsEc2Vpc("vpc-a".into())),
+        (
+            route("pl-1234abcd"),
+            Node::AwsEc2TransitGateway("tgw-a".into()),
+        ),
+    ] {
+        assert!(
+            edges.contains(&edge_key(&node_key(&from), &node_key(&to), &Edge::RoutesTo)),
+            "{from} routes to {to}"
+        );
+    }
+    assert!(
+        !node_keys(&events[0].context)
+            .contains(&node_key(&Node::AwsEc2TransitGateway("tgw-gone".into()))),
+        "a blackhole route goes nowhere"
+    );
+}
+
+#[test]
+fn a_connectivity_item_in_a_state_the_scan_skips_removes_the_node() {
+    for (resource_type, resource_id, configuration) in [
+        (
+            "AWS::EC2::VPCPeeringConnection",
+            "pcx-a",
+            r#"{ "status": { "code": "deleted" } }"#,
+        ),
+        (
+            "AWS::EC2::VPCPeeringConnection",
+            "pcx-b",
+            r#"{ "status": "pending-acceptance" }"#,
+        ),
+        (
+            "AWS::EC2::VPNGateway",
+            "vgw-a",
+            r#"{ "state": "deleting" }"#,
+        ),
+        (
+            "AWS::EC2::CustomerGateway",
+            "cgw-a",
+            r#"{ "state": "pending" }"#,
+        ),
+        (
+            "AWS::EC2::VPNConnection",
+            "vpn-a",
+            r#"{ "state": { "value": "deleted" } }"#,
+        ),
+    ] {
+        let events = parse_ok(&connectivity_item(
+            resource_type,
+            resource_id,
+            "OK",
+            configuration,
+        ));
+        let [typed] = events.as_slice() else {
+            panic!("{resource_type}: one typed event, got {events:?}");
+        };
+        assert_eq!(
+            typed.op,
+            ChangeOp::Deleted,
+            "{resource_type} {configuration}"
+        );
+    }
+}
+
+#[test]
+fn a_transit_gateway_item_can_only_remove_what_the_scan_drew() {
+    for (resource_type, resource_id) in [
+        ("AWS::EC2::TransitGateway", "tgw-a"),
+        ("AWS::EC2::TransitGatewayRouteTable", "tgw-rtb-a"),
+    ] {
+        let created = parse_ok(&connectivity_item(
+            resource_type,
+            resource_id,
+            "ResourceDiscovered",
+            r#"{ "Id": "x" }"#,
+        ));
+        assert!(
+            created.is_empty(),
+            "{resource_type} records no state, so its creation waits for the scan"
+        );
+        let deleted = parse_ok(&connectivity_item(
+            resource_type,
+            resource_id,
+            "ResourceDeleted",
+            "null",
+        ));
+        let [typed] = deleted.as_slice() else {
+            panic!("{resource_type}: one typed event, got {deleted:?}");
+        };
+        assert_eq!(typed.op, ChangeOp::Deleted);
+    }
 }

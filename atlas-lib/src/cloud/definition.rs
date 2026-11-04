@@ -70,6 +70,7 @@ pub enum AmazonCollection {
     AmazonNetworking(AWSNetworking),
     AmazonNetworkInterfaces(Vec<aws_sdk_ec2::types::NetworkInterface>),
     AmazonConnectivity(AWSConnectivity),
+    AmazonTransitGatewayRouting(AWSTransitGatewayRouting),
     AmazonDirectConnect(AWSDirectConnect),
     AmazonDirectConnectGateways(AWSDirectConnectGateways),
 }
@@ -108,6 +109,20 @@ pub struct AWSConnectivity {
 }
 
 #[derive(Debug, Default)]
+pub struct AWSTransitGatewayRouting {
+    pub route_tables: Vec<AWSTransitGatewayRouteTable>,
+    pub peerings: Vec<aws_sdk_ec2::types::TransitGatewayPeeringAttachment>,
+}
+
+#[derive(Debug)]
+pub struct AWSTransitGatewayRouteTable {
+    pub table: aws_sdk_ec2::types::TransitGatewayRouteTable,
+    pub associations: Vec<aws_sdk_ec2::types::TransitGatewayRouteTableAssociation>,
+    pub propagations: Vec<aws_sdk_ec2::types::TransitGatewayRouteTablePropagation>,
+    pub static_routes: Vec<aws_sdk_ec2::types::TransitGatewayRoute>,
+}
+
+#[derive(Debug, Default)]
 pub struct AWSDirectConnect {
     pub connections: Vec<aws_sdk_directconnect::types::Connection>,
     pub virtual_interfaces: Vec<aws_sdk_directconnect::types::VirtualInterface>,
@@ -140,6 +155,8 @@ pub enum GoogleCollection {
     GoogleRouters(Vec<crate::api::google::interconnect::Router>),
     GoogleInterconnects(Vec<crate::api::google::interconnect::Interconnect>),
     GoogleInterconnectAttachments(Vec<crate::api::google::interconnect::InterconnectAttachment>),
+    GoogleHubs(Vec<crate::api::google::network_connectivity::Hub>),
+    GoogleSpokes(Vec<crate::api::google::network_connectivity::Spoke>),
 }
 
 #[derive(Debug)]
@@ -155,6 +172,9 @@ pub enum MicrosoftCollection {
     AzureLocalNetworkGateways(Vec<crate::api::azure::models::LocalNetworkGateway>),
     AzureGatewayConnections(Vec<crate::api::azure::models::GatewayConnection>),
     AzureExpressRouteCircuits(Vec<crate::api::azure::models::ExpressRouteCircuit>),
+    AzureVirtualWans(Vec<crate::api::azure::models::VirtualWan>),
+    AzureVirtualHubs(Vec<crate::api::azure::models::VirtualHub>),
+    AzureHubVirtualNetworkConnections(Vec<crate::api::azure::models::HubVirtualNetworkConnection>),
     AzureStorageAccounts(Vec<crate::api::azure::models::StorageAccount>),
     AzureManagedClusters(Vec<crate::api::azure::models::ManagedCluster>),
     AzureSqlServers(Vec<crate::api::azure::models::SqlServer>),

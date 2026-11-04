@@ -485,13 +485,22 @@ fn scope_of<'a>(addr: &IpAddr, prefix: Option<u8>, network: &'a str) -> Option<&
 proptest! {
     #[test]
     fn a_range_covers_exactly_the_addresses_inside_it_in_its_own_network(
-        ranges in prop::collection::vec((cidr(), network()), 1..5),
+        ranges in prop::collection::vec((cidr(), network(), any::<bool>()), 1..5),
         addresses in prop::collection::vec((bare_address(), network()), 1..5),
         junk in prop::collection::vec("pl-[0-9a-f]{8}|[A-Za-z]{2,8}", 0..3),
     ) {
         let mut builder = GraphBuilder::new();
-        for ((addr, prefix), network) in &ranges {
-            builder.get_or_add_node(Node::ip(&format!("{addr}/{prefix}"), network));
+        let rule = builder.get_or_add_node(Node::AwsEc2SecurityGroup("sg-rule".into()));
+        let mut named = HashSet::new();
+        for ((addr, prefix), network, by_rule) in &ranges {
+            let range = Node::ip(&format!("{addr}/{prefix}"), network);
+            if *by_rule {
+                builder.link_to(rule, range.clone(), Edge::RoutesTo);
+                named.insert(range);
+            } else {
+                let holder = builder.get_or_add_node(Node::AwsEc2Vpc((*network).into()));
+                builder.link_to(holder, range, Edge::ConnectsTo);
+            }
         }
         for (addr, network) in &addresses {
             builder.get_or_add_node(Node::ip(&addr.to_string(), network));
@@ -529,10 +538,11 @@ proptest! {
             prop_assert_eq!(from_scope, to_scope, "a range covers only its own network");
         }
 
-        for ((range_addr, prefix), range_network) in &ranges {
+        for ((range_addr, prefix), range_network, _) in &ranges {
             let range = Node::ip(&format!("{range_addr}/{prefix}"), range_network);
             for (addr, network) in &addresses {
-                let inside = range_addr.is_ipv4() == addr.is_ipv4()
+                let inside = named.contains(&range)
+                    && range_addr.is_ipv4() == addr.is_ipv4()
                     && mask_to_prefix(addr, *prefix) == mask_to_prefix(range_addr, *prefix)
                     && scope_of(range_addr, Some(*prefix), range_network)
                         == scope_of(addr, None, network);

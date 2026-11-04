@@ -1,6 +1,7 @@
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::{mask_to_prefix, parse_address};
+use petgraph::Direction;
 use petgraph::graph::NodeIndex;
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -17,7 +18,12 @@ pub fn link(builder: &mut GraphBuilder) {
         };
         match parse_address(value) {
             Some((addr, Some(prefix))) => {
-                let Some(network) = mask_to_prefix(&addr, prefix) else {
+                let Some(network) = mask_to_prefix(&addr, prefix).filter(|_| {
+                    builder
+                        .graph
+                        .edges_directed(index, Direction::Incoming)
+                        .any(|edge| edge.weight() == &Edge::RoutesTo)
+                }) else {
                     continue;
                 };
                 ranges
@@ -80,6 +86,23 @@ mod tests {
             &builder,
             &Node::ip("203.0.113.0/24", NETWORK),
             &Node::ip("203.0.113.77", NETWORK)
+        ));
+    }
+
+    #[test]
+    fn a_network_s_own_address_space_covers_nothing() {
+        let mut builder = GraphBuilder::new();
+        let vpc = builder.get_or_add_node(Node::AwsEc2Vpc(NETWORK.into()));
+        builder.link_to(vpc, Node::ip("10.10.0.0/16", NETWORK), Edge::ConnectsTo);
+        let peer = builder.get_or_add_node(Node::ip("203.0.113.9", NETWORK));
+        builder.link_to(peer, Node::ip("10.10.1.10", NETWORK), Edge::TrafficFlow);
+
+        link(&mut builder);
+
+        assert!(!covered(
+            &builder,
+            &Node::ip("10.10.0.0/16", NETWORK),
+            &Node::ip("10.10.1.10", NETWORK)
         ));
     }
 

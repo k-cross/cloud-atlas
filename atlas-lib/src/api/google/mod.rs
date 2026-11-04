@@ -5,6 +5,7 @@ pub mod dns;
 pub mod functions;
 pub mod gke;
 pub mod interconnect;
+pub mod network_connectivity;
 pub mod pubsub;
 pub mod run;
 pub mod sql;

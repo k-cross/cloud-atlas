@@ -42,6 +42,7 @@ pub async fn build_aws(verbose: bool, opts: &Settings) -> ProviderScan {
                 "networking" => AmazonCollection::AmazonNetworking, networking::collector::runner(&config),
                 "network_interfaces" => AmazonCollection::AmazonNetworkInterfaces, network_interface::collector::runner(&config),
                 "connectivity" => AmazonCollection::AmazonConnectivity, connectivity::collector::runner(&config),
+                "transit_gateway_routing" => AmazonCollection::AmazonTransitGatewayRouting, connectivity::collector::transit_gateway_routing(&config),
                 "direct_connect" => AmazonCollection::AmazonDirectConnect, direct_connect::collector::runner(&config),
             ],
         )

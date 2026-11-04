@@ -1,5 +1,7 @@
 use super::{link_bgp_session, project_leaf, project_parallel};
-use crate::api::azure::models::{ExpressRouteCircuit, ExpressRoutePeering, IpConfiguration};
+use crate::api::azure::models::{
+    ExpressRouteCircuit, ExpressRoutePeering, IpConfiguration, in_service,
+};
 use crate::atlas::definition::{Edge, Node};
 use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::{
@@ -12,10 +14,28 @@ use std::sync::Arc;
 
 pub fn azure_projector(builder: &mut GraphBuilder, azure_data: &[MicrosoftCollection]) {
     let skipped = skipped_resources(azure_data);
+    let basic_wans = basic_wans(azure_data);
     project_parallel(builder, azure_data, |local, collection| {
-        project_microsoft_collection(local, collection, &skipped)
+        project_microsoft_collection(local, collection, &skipped, &basic_wans)
     });
     link_rule_destinations(builder, azure_data);
+}
+
+fn basic_wans(azure_data: &[MicrosoftCollection]) -> HashSet<Arc<str>> {
+    azure_data
+        .iter()
+        .filter_map(|collection| match collection {
+            MicrosoftCollection::AzureVirtualWans(wans) => Some(wans),
+            _ => None,
+        })
+        .flatten()
+        .filter(|wan| {
+            wan.wan_type
+                .as_deref()
+                .is_some_and(|wan_type| wan_type.eq_ignore_ascii_case("Basic"))
+        })
+        .filter_map(|wan| wan.id.as_deref().map(canonical_azure_id))
+        .collect()
 }
 
 fn skipped_resources(azure_data: &[MicrosoftCollection]) -> HashSet<Arc<str>> {
@@ -34,6 +54,18 @@ fn skipped_resources(azure_data: &[MicrosoftCollection]) -> HashSet<Arc<str>> {
                     .iter()
                     .filter(|gateway| !in_service(gateway.provisioning_state.as_deref()))
                     .filter_map(|gateway| gateway.id.as_deref())
+                    .map(canonical_azure_id),
+            ),
+            MicrosoftCollection::AzureVirtualWans(wans) => skipped.extend(
+                wans.iter()
+                    .filter(|wan| !in_service(wan.provisioning_state.as_deref()))
+                    .filter_map(|wan| wan.id.as_deref())
+                    .map(canonical_azure_id),
+            ),
+            MicrosoftCollection::AzureVirtualHubs(hubs) => skipped.extend(
+                hubs.iter()
+                    .filter(|hub| !in_service(hub.provisioning_state.as_deref()))
+                    .filter_map(|hub| hub.id.as_deref())
                     .map(canonical_azure_id),
             ),
             MicrosoftCollection::AzureExpressRouteCircuits(circuits) => skipped.extend(
@@ -67,6 +99,7 @@ fn project_microsoft_collection(
     builder: &mut GraphBuilder,
     x: &MicrosoftCollection,
     skipped: &HashSet<Arc<str>>,
+    basic_wans: &HashSet<Arc<str>>,
 ) {
     match x {
         MicrosoftCollection::AzureVirtualMachines(vms) => {
@@ -92,8 +125,12 @@ fn project_microsoft_collection(
         MicrosoftCollection::AzureVirtualNetworks(vnets) => {
             for vnet in vnets {
                 if let Some(id) = &vnet.id {
-                    let idx =
-                        builder.get_or_add_node(Node::AzureVirtualNetwork(canonical_azure_id(id)));
+                    let scope = canonical_azure_id(id);
+                    let idx = builder.get_or_add_node(Node::AzureVirtualNetwork(scope.clone()));
+
+                    for prefix in &vnet.address_prefixes {
+                        builder.link_to(idx, Node::ip(prefix, &scope), Edge::ConnectsTo);
+                    }
 
                     for subnet_id in &vnet.subnets {
                         builder.link_to(
@@ -268,6 +305,62 @@ fn project_microsoft_collection(
                 }
             }
         }
+        MicrosoftCollection::AzureVirtualWans(wans) => {
+            for id in wans
+                .iter()
+                .filter(|wan| in_service(wan.provisioning_state.as_deref()))
+                .filter_map(|wan| wan.id.as_deref())
+            {
+                builder.get_or_add_node(Node::AzureVirtualWan(canonical_azure_id(id)));
+            }
+        }
+        MicrosoftCollection::AzureVirtualHubs(hubs) => {
+            for hub in hubs
+                .iter()
+                .filter(|hub| in_service(hub.provisioning_state.as_deref()))
+            {
+                let Some(id) = hub.id.as_deref() else {
+                    continue;
+                };
+                let hub_idx =
+                    builder.get_or_add_node(Node::AzureVirtualHub(canonical_azure_id(id)));
+                if let Some(wan) = hub
+                    .virtual_wan_id
+                    .as_deref()
+                    .map(canonical_azure_id)
+                    .filter(|wan| !skipped.contains(wan))
+                {
+                    if basic_wans.contains(&wan) {
+                        builder.link_from(hub_idx, Node::AzureVirtualWan(wan), Edge::Contains);
+                    } else {
+                        builder.link_to(hub_idx, Node::AzureVirtualWan(wan), Edge::AttachedTo);
+                    }
+                }
+            }
+        }
+        MicrosoftCollection::AzureHubVirtualNetworkConnections(connections) => {
+            for connection in connections
+                .iter()
+                .filter(|connection| in_service(connection.provisioning_state.as_deref()))
+            {
+                let (Some(hub), Some(vnet)) = (
+                    connection
+                        .hub_id
+                        .as_deref()
+                        .map(canonical_azure_id)
+                        .filter(|hub| !skipped.contains(hub)),
+                    connection.remote_virtual_network_id.as_deref(),
+                ) else {
+                    continue;
+                };
+                let hub_idx = builder.get_or_add_node(Node::AzureVirtualHub(hub));
+                builder.link_to(
+                    hub_idx,
+                    Node::AzureVirtualNetwork(canonical_azure_id(vnet)),
+                    Edge::AttachedTo,
+                );
+            }
+        }
         MicrosoftCollection::AzureExpressRouteCircuits(circuits) => {
             for circuit in circuits
                 .iter()
@@ -381,12 +474,6 @@ fn project_ip_configurations(
             );
         }
     }
-}
-
-fn in_service(provisioning_state: Option<&str>) -> bool {
-    !provisioning_state.is_some_and(|state| {
-        state.eq_ignore_ascii_case("Deleting") || state.eq_ignore_ascii_case("Failed")
-    })
 }
 
 fn circuit_in_service(circuit: &ExpressRouteCircuit) -> bool {

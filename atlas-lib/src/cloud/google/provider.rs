@@ -1,6 +1,8 @@
 use crate::Settings;
-use crate::api::google::client::GoogleApiClient;
-use crate::api::google::{compute, compute_network, dns, functions, gke, interconnect, sql, vpn};
+use crate::api::google::client::{GoogleApiClient, ProjectApis};
+use crate::api::google::{
+    compute, compute_network, dns, functions, gke, interconnect, network_connectivity, sql, vpn,
+};
 use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::collector::{NamedCollector, run_all};
 use crate::cloud::definition::{GoogleCollection, Provider};
@@ -9,8 +11,8 @@ use yup_oauth2::ApplicationSecret;
 const SOURCE: CollectionSource = CollectionSource::Gcp;
 
 macro_rules! collectors {
-    ($($name:literal => $variant:path, $run:expr),+ $(,)?) => {
-        vec![$(($name, Box::pin(async { $run.await.map($variant) }) as _)),+]
+    ($apis:expr; $($name:literal => $variant:path, $run:expr),+ $(,)?) => {
+        vec![$(($name, Box::pin(async { $apis.unless_disabled($run).await.map($variant) }) as _)),+]
     };
 }
 
@@ -51,7 +53,8 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
     for p in opts.gcp_projects.as_deref().unwrap_or_default() {
         let c = &client;
         futures.push(async move {
-            let collectors: Vec<NamedCollector<'_, GoogleCollection>> = collectors![
+            let apis = ProjectApis::new(c, p);
+            let collectors: Vec<NamedCollector<'_, GoogleCollection>> = collectors![&apis;
                 "compute_instances" => GoogleCollection::GoogleInstances, compute::list_instances(c, p),
                 "firewalls" => GoogleCollection::GoogleFirewalls, compute::list_firewalls(c, p),
                 "sql" => GoogleCollection::GoogleSql, sql::list_instances(c, p),
@@ -71,6 +74,8 @@ pub async fn build_gcp(_verbose: bool, opts: &Settings) -> ProviderScan {
                 "routers" => GoogleCollection::GoogleRouters, interconnect::list_routers(c, p),
                 "interconnects" => GoogleCollection::GoogleInterconnects, interconnect::list_interconnects(c, p),
                 "interconnect_attachments" => GoogleCollection::GoogleInterconnectAttachments, interconnect::list_interconnect_attachments(c, p),
+                "hubs" => GoogleCollection::GoogleHubs, network_connectivity::list_hubs(c, p),
+                "spokes" => GoogleCollection::GoogleSpokes, network_connectivity::list_spokes(c, p),
             ];
 
             let (collections, local_report) = run_all(collectors, SOURCE, p).await;

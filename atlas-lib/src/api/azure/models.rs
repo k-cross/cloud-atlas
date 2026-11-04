@@ -26,6 +26,7 @@ pub struct VirtualNetwork {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
+    pub address_prefixes: Vec<String>,
     pub subnets: Vec<String>,
     pub peerings: Vec<VirtualNetworkPeering>,
 }
@@ -69,6 +70,35 @@ pub struct GatewayConnection {
     pub gateway_id: Option<String>,
     pub local_gateway_id: Option<String>,
     pub circuit_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualWan {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub wan_type: Option<String>,
+    pub provisioning_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VirtualHub {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub location: Option<String>,
+    pub virtual_wan_id: Option<String>,
+    pub provisioning_state: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HubVirtualNetworkConnection {
+    pub id: Option<String>,
+    pub hub_id: Option<String>,
+    pub remote_virtual_network_id: Option<String>,
+    pub provisioning_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -287,4 +317,10 @@ pub struct CdnProfile {
     pub id: Option<String>,
     pub name: Option<String>,
     pub location: Option<String>,
+}
+
+pub fn in_service(provisioning_state: Option<&str>) -> bool {
+    !provisioning_state.is_some_and(|state| {
+        state.eq_ignore_ascii_case("Deleting") || state.eq_ignore_ascii_case("Failed")
+    })
 }

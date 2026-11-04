@@ -1,5 +1,6 @@
 mod containment;
 mod networks;
+mod routing;
 mod service;
 
 pub(crate) use networks::HeldAddresses;

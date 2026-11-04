@@ -27,7 +27,7 @@ Implemented in `atlas/flow.rs`:
 
 ## 4. Containment (`Edge::Covers`)
 
-Implemented in `atlas/derive/containment.rs`. Security rules name CIDR blocks (`203.0.113.0/24`) while flow logs name host IPs (`203.0.113.77`). The containment pass links each host pivot to every CIDR pivot covering it:
+Implemented in `atlas/derive/containment.rs`. Security rules name CIDR blocks (`203.0.113.0/24`) while flow logs name host IPs (`203.0.113.77`). The containment pass links each host pivot to every CIDR pivot a rule names (an incoming `RoutesTo`) that covers it:
 
 ```
 AwsEc2SecurityGroup -RoutesTo-> 203.0.113.0/24 -Covers-> 203.0.113.77 <-TrafficFlow- 10.10.1.11
@@ -36,6 +36,7 @@ AwsEc2SecurityGroup -RoutesTo-> 203.0.113.0/24 -Covers-> 203.0.113.77 <-TrafficF
 - **Distinct edge kind:** `Covers` represents CIDR inclusion, never traffic (`RoutesTo`).
 - **Stateless derivation:** Recomputed by `derive::all` at every finalisation point, diffed like any edge, and excluded from `carry_forward` (`!Edge::is_projected()`).
 - **Scoped & width-probed:** Host addresses probe only prefix lengths present in the estate's rules, within the same IP family and network scope (private ranges cover only private addresses in the same `network`; no range-to-range edges).
+- **Address spaces cover nothing:** A network's own ranges (`network -ConnectsTo-> range`, [`network_connectivity_design.md`](network_connectivity_design.md) §1) would cover every host in the network; they decide where an unheld address belongs at resolution time instead (`a_network_s_own_address_space_covers_nothing`).
 
 ## 5. Service Topology
 

@@ -229,10 +229,23 @@ mod tests {
         let private_subnet = Node::AwsEc2Subnet("subnet-private-1a".into());
         assert_edge(&builder, &vpc, &public_rt, &Edge::Contains);
         assert_edge(&builder, &subnet, &public_rt, &Edge::AttachedTo);
-        assert_edge(&builder, &public_rt, &igw, &Edge::RoutesTo);
+        let default_route = vpc_route("rtb-public", "0.0.0.0/0");
+        assert_edge(&builder, &public_rt, &default_route, &Edge::Contains);
+        assert_edge(&builder, &default_route, &igw, &Edge::RoutesTo);
+        assert_edge(
+            &builder,
+            &vpc_route("rtb-public", "10.10.0.0/16"),
+            &vpc,
+            &Edge::RoutesTo,
+        );
         assert_edge(&builder, &igw, &vpc, &Edge::AttachedTo);
         assert_edge(&builder, &private_subnet, &private_rt, &Edge::AttachedTo);
-        assert_edge(&builder, &private_rt, &nat, &Edge::RoutesTo);
+        assert_edge(
+            &builder,
+            &vpc_route("rtb-private", "0.0.0.0/0"),
+            &nat,
+            &Edge::RoutesTo,
+        );
         assert_edge(&builder, &nat, &subnet, &Edge::AttachedTo);
         assert_edge(&builder, &nat, &eip, &Edge::HasIp);
         assert_edge(
@@ -675,9 +688,42 @@ mod tests {
         assert_edge(&builder, &tgw, &vpc("vpc-globex-shared"), &Edge::AttachedTo);
         assert!(!builder.has_edge(&tgw, &vpc("vpc-globex-staging"), &Edge::AttachedTo));
 
-        let private_rt = Node::AwsEc2RouteTable("rtb-private".into());
-        assert_edge(&builder, &private_rt, &pcx, &Edge::RoutesTo);
-        assert_edge(&builder, &private_rt, &tgw, &Edge::RoutesTo);
+        assert_edge(
+            &builder,
+            &vpc_route("rtb-private", "10.40.0.0/16"),
+            &pcx,
+            &Edge::RoutesTo,
+        );
+        assert_edge(
+            &builder,
+            &vpc_route("rtb-private", "10.50.0.0/16"),
+            &tgw,
+            &Edge::RoutesTo,
+        );
+        assert_edge(
+            &builder,
+            &vpc_route("rtb-private", "10.20.1.0/24"),
+            &Node::AwsEc2VpnGateway("vgw-globex".into()),
+            &Edge::RoutesTo,
+        );
+        let retired = vpc_route("rtb-data", "10.60.0.0/16");
+        assert_edge(
+            &builder,
+            &Node::AwsEc2RouteTable("rtb-data".into()),
+            &retired,
+            &Edge::Contains,
+        );
+        assert!(
+            builder
+                .graph
+                .edges_directed(
+                    builder.index_of(&retired).unwrap(),
+                    petgraph::Direction::Outgoing
+                )
+                .next()
+                .is_none(),
+            "a blackhole route goes nowhere"
+        );
     }
 
     #[test]
@@ -748,6 +794,7 @@ mod tests {
             !builder.contains(&Node::AwsEc2NatGateway("nat-gone".into())),
             "a blackhole route draws nothing, whatever its target"
         );
+        assert_has_node(&builder, &vpc_route("rtb-1", "10.9.0.0/16"));
         assert!(!builder.contains(&Node::AwsEc2TransitGateway("tgw-new".into())));
         assert!(
             !builder
@@ -1801,6 +1848,531 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_network_projects_its_own_address_space() {
+        use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
+        use aws_sdk_ec2::types::{
+            Vpc, VpcCidrBlockAssociation, VpcCidrBlockState, VpcCidrBlockStateCode,
+            VpcIpv6CidrBlockAssociation,
+        };
+
+        let fixture = fixtures::build_graph();
+        assert_edge(
+            &fixture,
+            &Node::AwsEc2Vpc(fixtures::AWS_NETWORK.into()),
+            &Node::ip("10.10.0.0/16", fixtures::AWS_NETWORK),
+            &Edge::ConnectsTo,
+        );
+        let spoke = azure_networking_id("Microsoft.Network/virtualNetworks/vnet-globex");
+        assert_edge(
+            &fixture,
+            &Node::AzureVirtualNetwork(spoke.clone()),
+            &Node::ip("10.20.1.0/24", &spoke),
+            &Edge::ConnectsTo,
+        );
+        let network = format!(
+            "projects/{}/global/networks/vpc-globex",
+            fixtures::GCP_PROJECT
+        );
+        assert_edge(
+            &fixture,
+            &Node::GcpComputeNetwork(network.as_str().into()),
+            &Node::ip("10.30.0.0/24", &network),
+            &Edge::ConnectsTo,
+        );
+
+        let association = |cidr: &str, state: VpcCidrBlockStateCode| {
+            VpcCidrBlockAssociation::builder()
+                .cidr_block(cidr)
+                .cidr_block_state(VpcCidrBlockState::builder().state(state).build())
+                .build()
+        };
+        let builder = project_aws(vec![AmazonCollection::AmazonConnectivity(
+            AWSConnectivity {
+                vpcs: vec![
+                    Vpc::builder()
+                        .vpc_id("vpc-a")
+                        .cidr_block("10.1.0.0/16")
+                        .cidr_block_association_set(association(
+                            "10.1.0.0/16",
+                            VpcCidrBlockStateCode::Associated,
+                        ))
+                        .cidr_block_association_set(association(
+                            "10.2.0.0/16",
+                            VpcCidrBlockStateCode::Associated,
+                        ))
+                        .cidr_block_association_set(association(
+                            "10.3.0.0/16",
+                            VpcCidrBlockStateCode::Disassociating,
+                        ))
+                        .ipv6_cidr_block_association_set(
+                            VpcIpv6CidrBlockAssociation::builder()
+                                .ipv6_cidr_block("2600:1f18:aaaa::/56")
+                                .ipv6_cidr_block_state(
+                                    VpcCidrBlockState::builder()
+                                        .state(VpcCidrBlockStateCode::Associated)
+                                        .build(),
+                                )
+                                .build(),
+                        )
+                        .build(),
+                ],
+                ..Default::default()
+            },
+        )]);
+        let vpc = Node::AwsEc2Vpc("vpc-a".into());
+        for range in ["10.1.0.0/16", "10.2.0.0/16", "2600:1f18:aaaa::/56"] {
+            assert_edge(&builder, &vpc, &Node::ip(range, "vpc-a"), &Edge::ConnectsTo);
+        }
+        assert!(
+            !builder.contains(&Node::ip("10.3.0.0/16", "vpc-a")),
+            "a range being released is no longer the VPC's"
+        );
+    }
+
+    #[test]
+    fn the_fixture_transit_gateways_route_and_peer() {
+        let builder = fixtures::build_graph();
+        let east = Node::AwsEc2TransitGateway("tgw-globex".into());
+        let west = Node::AwsEc2TransitGateway("tgw-globex-west".into());
+        let table = Node::AwsEc2TransitGatewayRouteTable("tgw-rtb-globex".into());
+        let peering =
+            Node::AwsEc2TransitGatewayPeeringAttachment("tgw-attach-globex-peer-west".into());
+        assert_edge(&builder, &east, &table, &Edge::Contains);
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Vpc(fixtures::AWS_NETWORK.into()),
+            &table,
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &table,
+            &Node::AwsEc2VpnConnection("vpn-globex-gcp".into()),
+            &Edge::RoutesTo,
+        );
+        let to_west = Node::AwsEc2TransitGatewayRoute {
+            table: "tgw-rtb-globex".into(),
+            destination: "10.70.0.0/16".into(),
+        };
+        assert_edge(&builder, &table, &to_west, &Edge::Contains);
+        assert_edge(&builder, &to_west, &peering, &Edge::RoutesTo);
+        assert_edge(&builder, &peering, &east, &Edge::AttachedTo);
+        assert_edge(&builder, &peering, &west, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &peering,
+            &Node::AwsEc2TransitGatewayRouteTable("tgw-rtb-globex-west".into()),
+            &Edge::AttachedTo,
+        );
+    }
+
+    #[test]
+    fn only_live_transit_gateway_routing_is_projected() {
+        use crate::cloud::definition::{
+            AWSConnectivity, AWSTransitGatewayRouteTable, AWSTransitGatewayRouting,
+            AmazonCollection,
+        };
+        use aws_sdk_ec2::types::{
+            PeeringTgwInfo, TransitGateway, TransitGatewayAssociationState,
+            TransitGatewayAttachmentResourceType, TransitGatewayAttachmentState,
+            TransitGatewayPeeringAttachment, TransitGatewayPropagationState, TransitGatewayRoute,
+            TransitGatewayRouteAttachment, TransitGatewayRouteState, TransitGatewayRouteTable,
+            TransitGatewayRouteTableAssociation, TransitGatewayRouteTablePropagation,
+            TransitGatewayState,
+        };
+
+        let gateway = |id: &str, state: TransitGatewayState| {
+            TransitGateway::builder()
+                .transit_gateway_id(id)
+                .state(state)
+                .build()
+        };
+        let table = |id: &str, tgw: &str| {
+            TransitGatewayRouteTable::builder()
+                .transit_gateway_route_table_id(id)
+                .transit_gateway_id(tgw)
+                .build()
+        };
+        let association = |vpc: &str, state: TransitGatewayAssociationState| {
+            TransitGatewayRouteTableAssociation::builder()
+                .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+                .resource_id(vpc)
+                .state(state)
+                .build()
+        };
+        let propagation = |vpc: &str, state: TransitGatewayPropagationState| {
+            TransitGatewayRouteTablePropagation::builder()
+                .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+                .resource_id(vpc)
+                .state(state)
+                .build()
+        };
+        let route = |destination: &str, state: TransitGatewayRouteState| {
+            let builder = TransitGatewayRoute::builder();
+            if destination.starts_with("pl-") {
+                builder.prefix_list_id(destination)
+            } else {
+                builder.destination_cidr_block(destination)
+            }
+            .state(state)
+            .transit_gateway_attachments(
+                TransitGatewayRouteAttachment::builder()
+                    .resource_type(TransitGatewayAttachmentResourceType::Vpc)
+                    .resource_id("vpc-routed")
+                    .build(),
+            )
+            .build()
+        };
+        let peering = |id: &str, far: &str, state: TransitGatewayAttachmentState| {
+            TransitGatewayPeeringAttachment::builder()
+                .transit_gateway_attachment_id(id)
+                .requester_tgw_info(
+                    PeeringTgwInfo::builder()
+                        .transit_gateway_id("tgw-a")
+                        .build(),
+                )
+                .accepter_tgw_info(PeeringTgwInfo::builder().transit_gateway_id(far).build())
+                .state(state)
+                .build()
+        };
+        let builder = project_aws(vec![
+            AmazonCollection::AmazonConnectivity(AWSConnectivity {
+                transit_gateways: vec![
+                    gateway("tgw-a", TransitGatewayState::Available),
+                    gateway("tgw-going", TransitGatewayState::Deleting),
+                ],
+                ..Default::default()
+            }),
+            AmazonCollection::AmazonTransitGatewayRouting(AWSTransitGatewayRouting {
+                route_tables: vec![
+                    AWSTransitGatewayRouteTable {
+                        table: table("tgw-rtb-a", "tgw-a"),
+                        associations: vec![
+                            association("vpc-on", TransitGatewayAssociationState::Associated),
+                            association("vpc-joining", TransitGatewayAssociationState::Associating),
+                        ],
+                        propagations: vec![
+                            propagation("vpc-on", TransitGatewayPropagationState::Enabled),
+                            propagation("vpc-off", TransitGatewayPropagationState::Disabled),
+                        ],
+                        static_routes: vec![
+                            route("10.8.0.0/16", TransitGatewayRouteState::Active),
+                            route("10.9.0.0/16", TransitGatewayRouteState::Blackhole),
+                            route("pl-0shared", TransitGatewayRouteState::Active),
+                        ],
+                    },
+                    AWSTransitGatewayRouteTable {
+                        table: table("tgw-rtb-going", "tgw-going"),
+                        associations: Vec::new(),
+                        propagations: Vec::new(),
+                        static_routes: Vec::new(),
+                    },
+                ],
+                peerings: vec![
+                    peering(
+                        "tgw-attach-live",
+                        "tgw-far",
+                        TransitGatewayAttachmentState::Available,
+                    ),
+                    peering(
+                        "tgw-attach-asked",
+                        "tgw-far",
+                        TransitGatewayAttachmentState::PendingAcceptance,
+                    ),
+                    peering(
+                        "tgw-attach-to-going",
+                        "tgw-going",
+                        TransitGatewayAttachmentState::Available,
+                    ),
+                ],
+            }),
+        ]);
+
+        let live = Node::AwsEc2TransitGatewayRouteTable("tgw-rtb-a".into());
+        assert_edge(
+            &builder,
+            &Node::AwsEc2Vpc("vpc-on".into()),
+            &live,
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &live,
+            &Node::AwsEc2Vpc("vpc-on".into()),
+            &Edge::RoutesTo,
+        );
+        let active = Node::AwsEc2TransitGatewayRoute {
+            table: "tgw-rtb-a".into(),
+            destination: "10.8.0.0/16".into(),
+        };
+        assert_edge(
+            &builder,
+            &active,
+            &Node::AwsEc2Vpc("vpc-routed".into()),
+            &Edge::RoutesTo,
+        );
+        assert_edge(
+            &builder,
+            &Node::AwsEc2TransitGatewayRoute {
+                table: "tgw-rtb-a".into(),
+                destination: "pl-0shared".into(),
+            },
+            &Node::AwsEc2Vpc("vpc-routed".into()),
+            &Edge::RoutesTo,
+        );
+        let blackhole = Node::AwsEc2TransitGatewayRoute {
+            table: "tgw-rtb-a".into(),
+            destination: "10.9.0.0/16".into(),
+        };
+        assert_has_node(&builder, &blackhole);
+        assert!(!builder.has_edge(
+            &blackhole,
+            &Node::AwsEc2Vpc("vpc-routed".into()),
+            &Edge::RoutesTo
+        ));
+        let live_peering = Node::AwsEc2TransitGatewayPeeringAttachment("tgw-attach-live".into());
+        assert_edge(
+            &builder,
+            &live_peering,
+            &Node::AwsEc2TransitGateway("tgw-far".into()),
+            &Edge::AttachedTo,
+        );
+        for absent in [
+            Node::AwsEc2Vpc("vpc-joining".into()),
+            Node::AwsEc2Vpc("vpc-off".into()),
+            Node::AwsEc2TransitGateway("tgw-going".into()),
+            Node::AwsEc2TransitGatewayRouteTable("tgw-rtb-going".into()),
+            Node::AwsEc2TransitGatewayPeeringAttachment("tgw-attach-asked".into()),
+        ] {
+            assert!(!builder.contains(&absent), "{absent:?} is not projected");
+        }
+    }
+
+    #[test]
+    fn an_ncc_spoke_joins_its_hub_only_while_both_serve() {
+        use crate::api::google::network_connectivity::{Hub, LinkedVpcNetwork, Spoke};
+        use crate::cloud::definition::{GoogleCollection, Provider};
+
+        let hub = |name: &str, state: &str| Hub {
+            name: Some(format!("projects/p/locations/global/hubs/{name}")),
+            state: Some(state.to_owned()),
+        };
+        let spoke = |name: &str, hub: &str, group: Option<&str>, state: &str| Spoke {
+            name: Some(format!("projects/p/locations/global/spokes/{name}")),
+            hub: Some(format!("projects/p/locations/global/hubs/{hub}")),
+            group: group
+                .map(|group| format!("projects/p/locations/global/hubs/{hub}/groups/{group}")),
+            state: Some(state.to_owned()),
+            linked_vpc_network: Some(LinkedVpcNetwork {
+                uri: Some(format!(
+                    "https://x/compute/v1/projects/p/global/networks/{name}"
+                )),
+            }),
+        };
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::GCP(vec![
+                (
+                    "p".to_owned(),
+                    GoogleCollection::GoogleHubs(vec![
+                        hub("live", "ACTIVE"),
+                        hub("going", "DELETING"),
+                    ]),
+                ),
+                (
+                    "p".to_owned(),
+                    GoogleCollection::GoogleSpokes(vec![
+                        spoke("net-a", "live", Some("center"), "ACTIVE"),
+                        spoke("net-b", "live", None, "UPDATING"),
+                        spoke("net-c", "live", Some("center"), "INACTIVE"),
+                        spoke("net-d", "going", Some("default"), "ACTIVE"),
+                    ]),
+                ),
+            ]),
+            &Settings::default(),
+        );
+
+        let live = Node::GcpNetworkConnectivityHub("projects/p/locations/global/hubs/live".into());
+        let center = Node::GcpNetworkConnectivityGroup(
+            "projects/p/locations/global/hubs/live/groups/center".into(),
+        );
+        let default = Node::GcpNetworkConnectivityGroup(
+            "projects/p/locations/global/hubs/live/groups/default".into(),
+        );
+        let spoke_a =
+            Node::GcpNetworkConnectivitySpoke("projects/p/locations/global/spokes/net-a".into());
+        assert_edge(&builder, &live, &center, &Edge::Contains);
+        assert_edge(&builder, &spoke_a, &center, &Edge::AttachedTo);
+        assert_edge(
+            &builder,
+            &spoke_a,
+            &Node::GcpComputeNetwork("projects/p/global/networks/net-a".into()),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &Node::GcpNetworkConnectivitySpoke("projects/p/locations/global/spokes/net-b".into()),
+            &default,
+            &Edge::AttachedTo,
+        );
+        for absent in [
+            Node::GcpNetworkConnectivitySpoke("projects/p/locations/global/spokes/net-c".into()),
+            Node::GcpNetworkConnectivitySpoke("projects/p/locations/global/spokes/net-d".into()),
+            Node::GcpNetworkConnectivityHub("projects/p/locations/global/hubs/going".into()),
+        ] {
+            assert!(!builder.contains(&absent), "{absent:?} is not projected");
+        }
+    }
+
+    #[test]
+    fn a_virtual_wan_draws_nothing_that_is_going_away() {
+        use crate::api::azure::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
+        use crate::cloud::definition::{MicrosoftCollection, Provider};
+
+        let id = |rest: &str| fixtures::azure_id(rest);
+        let hub = |name: &str, state: &str| VirtualHub {
+            id: Some(id(&format!("Microsoft.Network/virtualHubs/{name}"))),
+            virtual_wan_id: Some(id("Microsoft.Network/virtualWans/wan")),
+            provisioning_state: Some(state.to_owned()),
+            ..Default::default()
+        };
+        let connection = |hub: &str, vnet: &str, state: &str| HubVirtualNetworkConnection {
+            hub_id: Some(id(&format!("Microsoft.Network/virtualHubs/{hub}"))),
+            remote_virtual_network_id: Some(id(&format!(
+                "Microsoft.Network/virtualNetworks/{vnet}"
+            ))),
+            provisioning_state: Some(state.to_owned()),
+            ..Default::default()
+        };
+        let mut builder = GraphBuilder::new();
+        projector::build(
+            &mut builder,
+            &Provider::Azure(vec![
+                MicrosoftCollection::AzureVirtualWans(vec![VirtualWan {
+                    id: Some(id("Microsoft.Network/virtualWans/wan")),
+                    provisioning_state: Some("Succeeded".to_owned()),
+                    ..Default::default()
+                }]),
+                MicrosoftCollection::AzureVirtualHubs(vec![
+                    hub("hub-live", "Succeeded"),
+                    hub("hub-going", "Deleting"),
+                ]),
+                MicrosoftCollection::AzureHubVirtualNetworkConnections(vec![
+                    connection("hub-live", "vnet-a", "Succeeded"),
+                    connection("hub-live", "vnet-b", "Deleting"),
+                    connection("hub-going", "vnet-c", "Succeeded"),
+                ]),
+            ]),
+            &Settings::default(),
+        );
+
+        let live = Node::AzureVirtualHub(azure_networking_id(
+            "Microsoft.Network/virtualHubs/hub-live",
+        ));
+        assert_edge(
+            &builder,
+            &live,
+            &Node::AzureVirtualWan(azure_networking_id("Microsoft.Network/virtualWans/wan")),
+            &Edge::AttachedTo,
+        );
+        assert_edge(
+            &builder,
+            &live,
+            &Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/vnet-a",
+            )),
+            &Edge::AttachedTo,
+        );
+        for absent in [
+            Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/vnet-b",
+            )),
+            Node::AzureVirtualNetwork(azure_networking_id(
+                "Microsoft.Network/virtualNetworks/vnet-c",
+            )),
+            Node::AzureVirtualHub(azure_networking_id(
+                "Microsoft.Network/virtualHubs/hub-going",
+            )),
+        ] {
+            assert!(!builder.contains(&absent), "{absent:?} is not projected");
+        }
+    }
+
+    #[test]
+    fn only_a_standard_virtual_wan_carries_traffic_between_its_networks() {
+        use crate::api::azure::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
+        use crate::atlas::derive::held_addresses;
+        use crate::cloud::definition::{MicrosoftCollection, Provider};
+
+        let vnet =
+            |name: &str| azure_networking_id(&format!("Microsoft.Network/virtualNetworks/{name}"));
+        let project = |wan_type: &str| {
+            let mut builder = GraphBuilder::new();
+            projector::build(
+                &mut builder,
+                &Provider::Azure(vec![
+                    MicrosoftCollection::AzureVirtualWans(vec![VirtualWan {
+                        id: Some(azure_id("Microsoft.Network/virtualWans/wan")),
+                        wan_type: Some(wan_type.to_owned()),
+                        ..Default::default()
+                    }]),
+                    MicrosoftCollection::AzureVirtualHubs(vec![VirtualHub {
+                        id: Some(azure_id("Microsoft.Network/virtualHubs/hub")),
+                        virtual_wan_id: Some(azure_id("Microsoft.Network/virtualWans/wan")),
+                        ..Default::default()
+                    }]),
+                    MicrosoftCollection::AzureHubVirtualNetworkConnections(
+                        ["vnet-a", "vnet-b"]
+                            .iter()
+                            .map(|name| HubVirtualNetworkConnection {
+                                hub_id: Some(azure_id("Microsoft.Network/virtualHubs/hub")),
+                                remote_virtual_network_id: Some(azure_id(&format!(
+                                    "Microsoft.Network/virtualNetworks/{name}"
+                                ))),
+                                ..Default::default()
+                            })
+                            .collect(),
+                    ),
+                ]),
+                &Settings::default(),
+            );
+            let nic = builder.get_or_add_node(Node::AzureNetworkInterface("nic-b".into()));
+            builder.link_to(nic, Node::ip("10.2.0.4", &vnet("vnet-b")), Edge::ConnectsTo);
+            builder
+        };
+        let reached_from_a = |builder: &GraphBuilder| {
+            held_addresses(&builder.graph)
+                .holder(&vnet("vnet-a"), "10.2.0.4")
+                .map(|index| builder.graph[index].clone())
+        };
+        let wan = Node::AzureVirtualWan(azure_networking_id("Microsoft.Network/virtualWans/wan"));
+        let hub = Node::AzureVirtualHub(azure_networking_id("Microsoft.Network/virtualHubs/hub"));
+
+        let standard = project("Standard");
+        assert_edge(&standard, &hub, &wan, &Edge::AttachedTo);
+        assert_eq!(
+            reached_from_a(&standard),
+            Some(Node::ip("10.2.0.4", &vnet("vnet-b")))
+        );
+
+        let basic = project("Basic");
+        assert_edge(&basic, &wan, &hub, &Edge::Contains);
+        assert_eq!(
+            reached_from_a(&basic),
+            None,
+            "a Basic hub carries no traffic between the networks on it"
+        );
+    }
+
+    fn vpc_route(table: &str, destination: &str) -> Node {
+        Node::AwsEc2Route {
+            table: table.into(),
+            destination: destination.into(),
+        }
+    }
+
     fn project_aws(collections: Vec<crate::cloud::definition::AmazonCollection>) -> GraphBuilder {
         let mut builder = GraphBuilder::new();
         projector::build(
@@ -2262,6 +2834,9 @@ mod tests {
             "AwsDirectConnectConnection",
             "AwsDirectConnectGateway",
             "AwsDirectConnectVirtualInterface",
+            "AwsEc2Route",
+            "AwsEc2TransitGatewayRoute",
+            "AwsEc2TransitGatewayPeeringAttachment",
         ];
         let typed: Vec<&str> = TYPED_CONFIG_TYPES
             .iter()

@@ -4,11 +4,11 @@
 
 All four providers collect, all three change-detection tiers run for AWS, and the full stack runs credential-free in demo mode.
 
-- **`atlas-lib`:** Collectors and projectors for AWS, GCP, Azure, and Cloudflare; 90 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
+- **`atlas-lib`:** Collectors and projectors for AWS, GCP, Azure, and Cloudflare; 99 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
 - **Tier 1 (Events):** `atlas::event` + `cloud/amazon/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
 - **Tier 2 (Flows):** `atlas::flow` + `cloud/amazon/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
 - **Tier 3 (Reconciliation):** `patch::diff` over a persistent graph; `CollectionReport` + `carry_forward` + `Retention` distinguish collection failures from deletions.
-- **Address & network coverage:** AWS `DescribeNetworkInterfaces` and RDS endpoint hostnames; GCP instance internal/NAT IPs, forwarding rules, and Cloud SQL; Azure NICs and load balancers. Private IPs scope to their network (`GenericPrivateIpAddress`) and resolve across AWS VPC peering, Transit Gateways, Azure VNet peering, GCP network peering, site-to-site VPN tunnels, and dedicated circuits (Direct Connect, ExpressRoute and Cloud Interconnect, paired across clouds over Cross-Cloud Interconnect) (`docs/network_connectivity_design.md`).
+- **Address & network coverage:** AWS `DescribeNetworkInterfaces` and RDS endpoint hostnames; GCP instance internal/NAT IPs, forwarding rules, and Cloud SQL; Azure NICs and load balancers. Private IPs scope to their network (`GenericPrivateIpAddress`) and resolve across AWS VPC peering, Transit Gateways and their peering, Azure VNet peering and Virtual WAN, GCP network peering and NCC hubs, site-to-site VPN tunnels, and dedicated circuits (Direct Connect, ExpressRoute and Cloud Interconnect, paired across clouds over Cross-Cloud Interconnect), with each network's address space keeping its own unheld addresses local and VPC and transit gateway route tables deciding which join traffic takes (`docs/network_connectivity_design.md`).
 - **Derived edges (`atlas::derive::all`):** `Covers` (host IP in CIDR, per network) and `Serves` (`inferred`/`confirmed` service topology across instance and IP target groups, gated on `scanned_instances`).
 - **`atlas-server` & `atlas-web`:** `/snapshot.json` (v3), `/collection.json`, `/ws`; Wasm ForceAtlas2 layout + Sigma.js WebGL with traffic overlay, `Serves` status styling, and service view.
 - **`cargo xtask`:** `dev [--demo]`, `wasm`, `demo`, `test [--e2e]`.
@@ -17,7 +17,7 @@ All four providers collect, all three change-detection tiers run for AWS, and th
 
 1. **Tiers 1–2 for GCP and Azure** — Cloud Asset Inventory → Pub/Sub, Azure Event Grid, and GCP/Azure flow logs into `FlowObservation` (`docs/change_monitoring_design.md`). Azure flow logs would also let the demo show the ExpressRoute circuit carrying traffic.
 2. **Rendering Phase 3 remainder & Phase 4** — tooltips, drill-down, raw observation values, and search (`docs/graph_rendering_design.md`).
-3. **Network connectivity Phase 3** — address spaces, route tables, Virtual WAN / NCC hubs (`docs/network_connectivity_design.md`); peering, transit gateways, VPN and dedicated circuits (Phases 1–2b) are done.
+3. **Network connectivity Phase 4** — Azure user-defined routes and GCP routes, Virtual WAN routing, NCC hybrid spokes, link-to-link transit (`docs/network_connectivity_design.md`); Phases 1–3 (peering, transit gateways, VPN, dedicated circuits, address spaces, route tables, hubs) are done.
 
 ## Backlog
 

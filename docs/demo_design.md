@@ -18,18 +18,20 @@ The credential-free demo showcases Cloud Atlas without cloud accounts. **Keep th
 | All `Node` and `Edge` kinds projected | Yes (exhaustiveness guards + CLI example) | |
 | Cross-cloud stitching (public IPs & DNS) | Yes, static (Route 53 & Cloudflare → Azure App Service & Cloud Run; AWS flows → Azure LB frontend & GCE NAT IP) | |
 | Per-network private address scoping | Yes, static (`vpc-globex-staging` reuses `10.10.0.0/16` with its own isolated `10.10.1.10`); the two VPN flows resolve across tunnels (below) | |
-| Cross-network private resolution | Yes, static (`web-01` → warehouse via `pcx-globex-data`; `web-02` → shared-services ENI via `tgw-globex`; Azure & GCP peerings projected) | |
+| Cross-network private resolution | Yes, static (`web-01` → warehouse via `pcx-globex-data`; `web-02` → shared-services ENI via `tgw-globex`; `web-02` → west API interface across `tgw-globex` ↔ `tgw-globex-west` peering; Azure & GCP peerings projected) | |
+| Address spaces & route tables | Yes, static (every network's ranges; VPC routes and the transit gateways' associations, propagations and static routes gate each crossing; blackhole routes on both route types) | |
+| Hubs | Yes, static for transit gateway peering (above); Virtual WAN `vwan-globex` and NCC `globex-hub` are drawn and joined but no flow crosses them | |
 | Site-to-site VPN | Yes, static (AWS `vgw-globex` ↔ Azure hub gateway, with the spoke reaching it by gateway transit: `web-01` → Azure VM; `tgw-globex` ↔ GCP HA VPN: `web-02` → Cloud SQL) | |
 | Dedicated circuits | Yes, static (Direct Connect ↔ GCP Cross-Cloud Interconnect: warehouse → Cloud SQL; ExpressRoute ↔ Cross-Cloud Interconnect is drawn and joined, but no Azure flow log feeds it) | |
 | Tier 3 scan → diff → patch | Trivially (canary DNS record toggle) | F1 |
-| Tier 2 traffic overlay | Yes (18 steady flows with verdicts, volume, and beads; periodic burst flow) | |
+| Tier 2 traffic overlay | Yes (19 steady flows with verdicts, volume, and beads; periodic burst flow) | |
 | `Covers` derivation | Yes, static (`203.0.113.0/24` covers `203.0.113.77`) | |
-| `Serves` (`inferred` vs. `confirmed`) | Static only (12 `confirmed`, 2 `inferred`; no live status transition) | F1 |
+| `Serves` (`inferred` vs. `confirmed`) | Static only (13 `confirmed`, 2 `inferred`; no live status transition) | F1 |
 | Service view | Yes | |
 | Failure semantics (`CollectionReport`, `carry_forward`, `Retention`) | No (demo report is always complete; UI does not surface `/collection.json`) | F1, F5 |
 | Tier 1 events | No (`--aws-event-queue` is unused in demo mode) | F6 |
 
-**Baseline metrics:** 180 nodes and 250 edges in 16 components (the main one holds 159 nodes), 13 edgeless nodes, 8 region-only leaves, labels up to 156 characters.
+**Baseline metrics:** 226 nodes and 323 edges in 17 components (the main one holds 199 nodes; the Virtual WAN, its hub and its two VNets form a 6-node island), 13 edgeless nodes, 8 region-only leaves, labels up to 156 characters.
 
 ## Invariants
 
