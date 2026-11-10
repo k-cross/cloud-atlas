@@ -33,6 +33,9 @@ pub struct ScriptId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostedZoneId(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableName(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -86,7 +89,7 @@ pub struct AWSLoadBalancing {
 #[derive(Debug)]
 pub struct AWSRoute53 {
     pub hosted_zones: Vec<aws_sdk_route53::types::HostedZone>,
-    pub record_sets: Vec<aws_sdk_route53::types::ResourceRecordSet>,
+    pub record_sets: HashMap<HostedZoneId, Vec<aws_sdk_route53::types::ResourceRecordSet>>,
 }
 
 #[derive(Debug)]

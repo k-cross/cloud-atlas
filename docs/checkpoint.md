@@ -25,10 +25,9 @@ All four providers collect, all three change-detection tiers run for AWS, and th
 - **WebSocket backpressure:** Per-client patch coalescing under high churn.
 - **`cargo xtask dev` flag forwarding:** Forward `--aws-event-queue`, `--aws-flow-log-queue`, `--retain-scans`, and `--flow-ttl-secs`.
 - **GCP and Azure `CHAINS` rows:** Add GCP backend-service and Azure load-balancer backend-pool kinds for `inferred` `Serves` edges.
-- **Route 53 private zones & record identity:** Scope private answers to associated VPCs (`GetHostedZone`) rather than the record name; include record type/zone in `AwsRoute53RecordSet` identity so same-name records (e.g. `A` + `TXT`, or split-horizon zones) do not collide.
+- **Route 53 private zones & alias records:** Scope private answers to the zone's associated VPCs (`GetHostedZone`) rather than the zone itself, so private DNS reaches the ENIs it names; project `AliasTarget` (balancers, CloudFront, S3 websites), which today resolves to nothing.
 - **NIC-only Azure NSGs:** Collect NIC `networkSecurityGroup` references so NSGs not attached to a subnet inherit the NIC's VNet scope.
 - **Stopped-instance ENIs:** A stopped instance's ENI keeps its IP in the graph, so traffic still hitting that IP derives `Serves` to `AwsEc2Eni` (`docs/service_topology_design.md` §1).
-- **Config call volume:** The Config collector calls `ListDiscoveredResources` for every type it draws (several hundred per region per scan). Call `GetDiscoveredResourceCounts` first and list only the types present, to stay clear of throttling at a 60 s poll.
 - **EventBridge buses:** `eventbridge` collects buses every scan but the projector only logs them. Draw them as nodes or drop the collector.
 - **Demo follow-ups (F1, F3–F6):** Scripted 5-step story, isolated guard nodes, short labels, `/collection.json` UI badge, Tier 1 in demo mode (`docs/demo_design.md`).
 

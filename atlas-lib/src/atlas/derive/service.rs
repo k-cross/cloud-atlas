@@ -534,7 +534,7 @@ mod tests {
                     [e.source(), e.target()].iter().any(|end| {
                         matches!(
                             builder.graph[*end],
-                            Node::AwsRoute53RecordSet(_) | Node::CloudflareDnsRecord(_)
+                            Node::AwsRoute53RecordSet { .. } | Node::CloudflareDnsRecord(_)
                         )
                     })
                 }),

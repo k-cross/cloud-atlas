@@ -1,7 +1,8 @@
 pub mod collector {
-    use crate::cloud::definition::AWSRoute53;
+    use crate::cloud::definition::{AWSRoute53, HostedZoneId};
     use aws_sdk_route53::Client;
     use aws_sdk_route53::types::{HostedZone, ResourceRecordSet, RrType};
+    use std::collections::HashMap;
 
     pub async fn runner(
         config: &aws_config::SdkConfig,
@@ -16,9 +17,12 @@ pub mod collector {
             .try_collect()
             .await?;
 
-        let mut record_sets = Vec::new();
+        let mut record_sets = HashMap::new();
         for zone in &hosted_zones {
-            record_sets.extend(records_of(&client, zone.id()).await?);
+            record_sets.insert(
+                HostedZoneId(zone.id().to_owned()),
+                records_of(&client, zone.id()).await?,
+            );
         }
 
         Ok(AWSRoute53 {

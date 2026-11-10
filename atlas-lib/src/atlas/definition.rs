@@ -104,7 +104,7 @@ nodes!(
         AwsElbLoadBalancer(id) => "AWS::ELB::LoadBalancer({id})",
         AwsElbTargetGroup(id) => "AWS::ELB::TargetGroup({id})",
         AwsRoute53HostedZone(id) => "AWS::Route53::HostedZone({id})",
-        AwsRoute53RecordSet(id) => "AWS::Route53::RecordSet({id})",
+        AwsRoute53RecordSet { zone, name, record_type } => "AWS::Route53::RecordSet({zone} {name} {record_type})",
         AwsEksCluster(id) => "AWS::EKS::Cluster({id})",
         AwsApiGatewayRestApi(id) => "AWS::ApiGateway::RestApi({id})",
         AwsRdsDbInstance(id) => "AWS::RDS::DbInstance({id})",

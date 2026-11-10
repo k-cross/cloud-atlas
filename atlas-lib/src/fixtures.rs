@@ -8,12 +8,14 @@ use crate::atlas::projector;
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
     AWSRoute53, AWSTransitGatewayRouteTable, AWSTransitGatewayRouting, AmazonCollection,
-    CloudflareCollection, GoogleCollection, MicrosoftCollection, Provider, QueueUrl, TableName,
+    CloudflareCollection, GoogleCollection, HostedZoneId, MicrosoftCollection, Provider, QueueUrl,
+    TableName,
 };
 use std::collections::HashMap;
 
 pub const REGION: &str = "us-east-1";
 pub const AWS_NETWORK: &str = "vpc-globex";
+pub const GLOBEX_ZONE: &str = "/hostedzone/ZGLOBEX";
 const AVERAGE_PACKET_BYTES: u64 = 128;
 pub const GCP_PROJECT: &str = "globex-prod";
 pub const AZURE_SUBSCRIPTION: &str = "sub-globex";
@@ -517,7 +519,7 @@ pub fn aws() -> Provider {
     );
 
     let hosted_zone = aws_sdk_route53::types::HostedZone::builder()
-        .id("/hostedzone/ZGLOBEX")
+        .id(GLOBEX_ZONE)
         .name("globex.io.")
         .caller_reference("fixture")
         .build()
@@ -1201,7 +1203,10 @@ pub fn aws() -> Provider {
             "global".to_owned(),
             AmazonCollection::AmazonRoute53(AWSRoute53 {
                 hosted_zones: vec![hosted_zone],
-                record_sets: vec![record_a, record_cname, record_db_cname],
+                record_sets: HashMap::from([(
+                    HostedZoneId(GLOBEX_ZONE.into()),
+                    vec![record_a, record_cname, record_db_cname],
+                )]),
             }),
         ),
         (r.clone(), AmazonCollection::AmazonEks(vec![eks])),

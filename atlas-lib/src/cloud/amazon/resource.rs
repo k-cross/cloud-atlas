@@ -4,6 +4,25 @@ pub mod collector {
     use aws_sdk_config::{Client, Error};
     use std::collections::HashMap;
 
+    async fn counted_types(
+        client: &Client,
+    ) -> Result<Vec<ResourceType>, Box<dyn std::error::Error>> {
+        let pages: Vec<_> = client
+            .get_discovered_resource_counts()
+            .into_paginator()
+            .send()
+            .try_collect()
+            .await
+            .map_err(Error::from)?;
+
+        Ok(pages
+            .iter()
+            .flat_map(|page| page.resource_counts())
+            .filter(|counted| counted.count() > 0)
+            .filter_map(|counted| counted.resource_type().cloned())
+            .collect())
+    }
+
     async fn scan_resources(
         client: &Client,
         exclude_by_default: bool,
@@ -12,31 +31,29 @@ pub mod collector {
 
         use futures::stream::{self, StreamExt};
 
-        let drawn = ResourceType::values()
-            .iter()
-            .filter(|value| use_aws_resource(value, exclude_by_default));
-        let requests = stream::iter(drawn).map(|value| {
-            let parsed = ResourceType::from(*value);
-            async move {
-                let resources: Result<Vec<ResourceIdentifier>, _> = client
-                    .list_discovered_resources()
-                    .resource_type(parsed)
-                    .into_paginator()
-                    .items()
-                    .send()
-                    .try_collect()
-                    .await;
-                (value, resources)
-            }
+        let drawn = counted_types(client)
+            .await?
+            .into_iter()
+            .filter(|resource_type| use_aws_resource(resource_type.as_str(), exclude_by_default));
+        let requests = stream::iter(drawn).map(|resource_type| async move {
+            let resources: Result<Vec<ResourceIdentifier>, _> = client
+                .list_discovered_resources()
+                .resource_type(resource_type.clone())
+                .into_paginator()
+                .items()
+                .send()
+                .try_collect()
+                .await;
+            (resource_type, resources)
         });
 
         let mut results = requests.buffer_unordered(10);
 
-        while let Some((value, resources)) = results.next().await {
+        while let Some((resource_type, resources)) = results.next().await {
             let resources = resources.map_err(Error::from)?;
 
             if !resources.is_empty() {
-                r_map.insert(value.to_string(), resources);
+                r_map.insert(resource_type.as_str().to_owned(), resources);
             }
         }
 

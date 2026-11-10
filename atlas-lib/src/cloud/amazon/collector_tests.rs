@@ -1,6 +1,6 @@
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
-    AWSRoute53, AWSTransitGatewayRouting, TableName,
+    AWSRoute53, AWSTransitGatewayRouting, HostedZoneId, TableName,
 };
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
@@ -114,6 +114,55 @@ async fn an_ecs_cluster_that_could_not_be_described_is_an_error_not_an_absence()
         .await
         .expect_err("a cluster that exists but was not described must not read as absent");
     assert!(error.to_string().contains("ACCESS_DENIED"), "{error}");
+}
+
+const CONFIG_BUCKETS: &str = r#"{"resourceIdentifiers":[{"resourceType":"AWS::S3::Bucket","resourceId":"globex-assets","resourceName":"globex-assets"}]}"#;
+
+#[tokio::test]
+async fn config_lists_only_the_drawn_types_it_counted() {
+    let counts = r#"{"totalDiscoveredResources":7,"resourceCounts":[
+        {"resourceType":"AWS::EC2::VPC","count":2},
+        {"resourceType":"AWS::EC2::NetworkAcl","count":4},
+        {"resourceType":"AWS::RDS::DBCluster","count":0},
+        {"resourceType":"AWS::S3::Bucket","count":1}
+    ]}"#;
+    let (cfg, http) = replay(&[(JSON11, counts), (JSON11, CONFIG_BUCKETS)]).await;
+    let resources = super::resource::collector::runner(false, false, &cfg)
+        .await
+        .unwrap();
+
+    let ids: Vec<_> = resources["AWS::S3::Bucket"]
+        .iter()
+        .filter_map(|resource| resource.resource_id())
+        .collect();
+    assert_eq!(ids, vec!["globex-assets"]);
+    assert_eq!(resources.len(), 1);
+
+    let requests = request_bodies(&http);
+    assert_eq!(
+        requests.len(),
+        2,
+        "typed, excluded and empty types cost no list call: {requests:?}"
+    );
+    assert!(requests[1].contains("AWS::S3::Bucket"), "{}", requests[1]);
+}
+
+#[tokio::test]
+async fn config_counts_follow_every_page() {
+    let first =
+        r#"{"resourceCounts":[{"resourceType":"AWS::EC2::VPC","count":2}],"nextToken":"page-2"}"#;
+    let second = r#"{"resourceCounts":[{"resourceType":"AWS::S3::Bucket","count":1}]}"#;
+    let (cfg, http) = replay(&[(JSON11, first), (JSON11, second), (JSON11, CONFIG_BUCKETS)]).await;
+    let resources = super::resource::collector::runner(false, false, &cfg)
+        .await
+        .unwrap();
+
+    assert!(
+        resources.contains_key("AWS::S3::Bucket"),
+        "a type counted only on the second page is still listed"
+    );
+    let requests = request_bodies(&http);
+    assert!(requests[1].contains("page-2"), "{}", requests[1]);
 }
 
 #[tokio::test]
@@ -249,7 +298,9 @@ async fn route53_zones_and_records() {
         record_sets,
     } = super::route53::collector::runner(&cfg).await.unwrap();
     assert_eq!(hosted_zones[0].name(), "example.com.");
-    assert_eq!(record_sets[0].name(), "example.com.");
+    let records = &record_sets[&HostedZoneId("/hostedzone/Z123".into())];
+    assert_eq!(records[0].name(), "example.com.");
+    assert_eq!(records[0].r#type().as_str(), "A");
 }
 
 const ZONE: &str = r#"<ListHostedZonesResponse xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
@@ -289,7 +340,7 @@ async fn route53_resumes_weighted_records_at_their_set_identifier() {
     let (cfg, http) = replay(&[(XML, ZONE), (XML, WEIGHTED_FIRST), (XML, second)]).await;
     let AWSRoute53 { record_sets, .. } = super::route53::collector::runner(&cfg).await.unwrap();
 
-    let identifiers: Vec<_> = record_sets
+    let identifiers: Vec<_> = record_sets[&HostedZoneId("/hostedzone/Z123".into())]
         .iter()
         .filter_map(|record| record.set_identifier())
         .collect();

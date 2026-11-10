@@ -23,6 +23,18 @@ mod tests {
         Node::public_ip(address).expect("a public address")
     }
 
+    fn record(zone: &str, name: &str, record_type: &str) -> Node {
+        Node::AwsRoute53RecordSet {
+            zone: zone.into(),
+            name: name.into(),
+            record_type: record_type.into(),
+        }
+    }
+
+    fn globex_record(name: &str, record_type: &str) -> Node {
+        record(fixtures::GLOBEX_ZONE, name, record_type)
+    }
+
     fn gcp_network() -> String {
         format!(
             "projects/{}/global/networks/vpc-globex",
@@ -205,13 +217,13 @@ mod tests {
         assert_resolves(
             &builder,
             "origin.globex.io",
-            &Node::AwsRoute53RecordSet("origin.globex.io.".into()),
+            &globex_record("origin.globex.io.", "A"),
             &public("203.0.113.10"),
         );
         assert_resolves(
             &builder,
             "app.globex.io",
-            &Node::AwsRoute53RecordSet("app.globex.io.".into()),
+            &globex_record("app.globex.io.", "CNAME"),
             &Node::hostname("app-globex.azurewebsites.net"),
         );
 
@@ -617,7 +629,7 @@ mod tests {
 
         for record in [
             Node::CloudflareDnsRecord("rec-app".into()),
-            Node::AwsRoute53RecordSet("app.globex.io.".into()),
+            globex_record("app.globex.io.", "CNAME"),
         ] {
             assert_resolves(&builder, "app.globex.io", &record, &azure_hostname);
         }
@@ -1842,10 +1854,144 @@ mod tests {
         );
         assert_edge(
             &builder,
-            &Node::AwsRoute53RecordSet("db.globex.io.".into()),
+            &globex_record("db.globex.io.", "CNAME"),
             &endpoint,
             &Edge::ResolvesTo,
         );
+    }
+
+    const PUBLIC_ZONE: &str = "/hostedzone/ZPUBLIC";
+    const PRIVATE_ZONE: &str = "/hostedzone/ZPRIVATE";
+
+    fn split_horizon_zones() -> GraphBuilder {
+        use crate::cloud::definition::{AWSRoute53, AmazonCollection, HostedZoneId};
+        use aws_sdk_route53::types::{HostedZone, ResourceRecord, ResourceRecordSet, RrType};
+
+        let zone = |id: &str| {
+            HostedZone::builder()
+                .id(id)
+                .name("globex.io.")
+                .caller_reference(id)
+                .build()
+                .unwrap()
+        };
+        let record_set = |name: &str, record_type: RrType, values: &[&str]| {
+            values
+                .iter()
+                .fold(
+                    ResourceRecordSet::builder().name(name).r#type(record_type),
+                    |set, value| {
+                        set.resource_records(
+                            ResourceRecord::builder().value(*value).build().unwrap(),
+                        )
+                    },
+                )
+                .build()
+                .unwrap()
+        };
+
+        project_aws(vec![AmazonCollection::AmazonRoute53(AWSRoute53 {
+            hosted_zones: vec![zone(PUBLIC_ZONE), zone(PRIVATE_ZONE)],
+            record_sets: std::collections::HashMap::from([
+                (
+                    HostedZoneId(PUBLIC_ZONE.into()),
+                    vec![
+                        record_set("api.globex.io.", RrType::A, &["203.0.113.20"]),
+                        record_set("api.globex.io.", RrType::Txt, &["\"v=spf1 -all\""]),
+                        record_set("globex.io.", RrType::Mx, &["10 mail.globex.io."]),
+                        record_set("globex.io.", RrType::Ns, &["ns-1.awsdns-01.org."]),
+                    ],
+                ),
+                (
+                    HostedZoneId(PRIVATE_ZONE.into()),
+                    vec![
+                        record_set("api.globex.io.", RrType::A, &["10.10.1.50"]),
+                        record_set("db.globex.io.", RrType::A, &["10.10.1.50"]),
+                    ],
+                ),
+            ]),
+        })])
+    }
+
+    #[test]
+    fn records_sharing_a_name_stay_distinct_by_zone_and_type() {
+        let builder = split_horizon_zones();
+        let public_a = record(PUBLIC_ZONE, "api.globex.io.", "A");
+        let public_txt = record(PUBLIC_ZONE, "api.globex.io.", "TXT");
+        let private_a = record(PRIVATE_ZONE, "api.globex.io.", "A");
+
+        assert_resolves(
+            &builder,
+            "api.globex.io",
+            &public_a,
+            &public("203.0.113.20"),
+        );
+        assert_resolves(
+            &builder,
+            "api.globex.io",
+            &private_a,
+            &Node::ip("10.10.1.50", PRIVATE_ZONE),
+        );
+        assert_edge(
+            &builder,
+            &Node::hostname("api.globex.io"),
+            &public_txt,
+            &Edge::ResolvesTo,
+        );
+
+        for (zone, records) in [
+            (PUBLIC_ZONE, vec![&public_a, &public_txt]),
+            (PRIVATE_ZONE, vec![&private_a]),
+        ] {
+            for record in records {
+                assert_edge(
+                    &builder,
+                    &Node::AwsRoute53HostedZone(zone.into()),
+                    record,
+                    &Edge::Contains,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_private_answer_is_scoped_to_its_hosted_zone() {
+        let builder = split_horizon_zones();
+        let answer = Node::ip("10.10.1.50", PRIVATE_ZONE);
+
+        for name in ["api.globex.io.", "db.globex.io."] {
+            assert_edge(
+                &builder,
+                &record(PRIVATE_ZONE, name, "A"),
+                &answer,
+                &Edge::ResolvesTo,
+            );
+            assert!(
+                !builder.contains(&Node::ip("10.10.1.50", name)),
+                "the zone is the namespace its private answers share, not each record's name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_naming_no_address_or_host_resolves_to_nothing() {
+        let builder = split_horizon_zones();
+
+        for record in [
+            record(PUBLIC_ZONE, "api.globex.io.", "TXT"),
+            record(PUBLIC_ZONE, "globex.io.", "MX"),
+            record(PUBLIC_ZONE, "globex.io.", "NS"),
+        ] {
+            let index = builder.node_map[&record];
+            assert_eq!(
+                builder
+                    .graph
+                    .edges_directed(index, petgraph::Direction::Outgoing)
+                    .count(),
+                0,
+                "{record} must not turn its value into a hostname pivot"
+            );
+        }
     }
 
     #[test]

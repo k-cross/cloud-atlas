@@ -6,7 +6,7 @@ use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::util::{canonical_address, is_large_cidr};
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
-    AWSRoute53, AWSTransitGatewayRouting, AmazonCollection,
+    AWSRoute53, AWSTransitGatewayRouting, AmazonCollection, HostedZoneId,
 };
 use aws_sdk_directconnect::types::{
     BgpPeerState, ConnectionState, DirectConnectGateway, DirectConnectGatewayAssociationState,
@@ -19,6 +19,7 @@ use aws_sdk_ec2::types::{
     VpcCidrBlockState, VpcCidrBlockStateCode, VpcPeeringConnectionStateReasonCode, VpnState,
 };
 use aws_sdk_elasticloadbalancingv2::types::TargetTypeEnum;
+use aws_sdk_route53::types::RrType;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -398,32 +399,36 @@ fn project_amazon_collection(
             let g_idx = builder.get_or_add_node(Node::AwsRegion("global".into()));
 
             for hz in hosted_zones {
-                builder.link_to(
+                let zone = hz.id();
+                let zone_idx = builder.link_to(
                     g_idx,
-                    Node::AwsRoute53HostedZone(hz.id().into()),
+                    Node::AwsRoute53HostedZone(zone.into()),
                     Edge::Contains,
                 );
-            }
 
-            for rs in record_sets {
-                let rs_idx = builder.link_to(
-                    g_idx,
-                    Node::AwsRoute53RecordSet(rs.name().into()),
-                    Edge::Contains,
-                );
-                builder.link_from(rs_idx, Node::hostname(rs.name()), Edge::ResolvesTo);
+                let Some(records) = record_sets.get(&HostedZoneId(zone.to_owned())) else {
+                    continue;
+                };
+                for rs in records {
+                    let rs_idx = builder.link_to(
+                        zone_idx,
+                        Node::AwsRoute53RecordSet {
+                            zone: zone.into(),
+                            name: rs.name().into(),
+                            record_type: rs.r#type().as_str().into(),
+                        },
+                        Edge::Contains,
+                    );
+                    builder.link_from(rs_idx, Node::hostname(rs.name()), Edge::ResolvesTo);
 
-                let is_ip = rs.r#type() == &aws_sdk_route53::types::RrType::A
-                    || rs.r#type() == &aws_sdk_route53::types::RrType::Aaaa;
-
-                for r in rs.resource_records() {
-                    let val = r.value();
-                    let pivot_node = if is_ip {
-                        Node::ip(val, rs.name())
-                    } else {
-                        Node::hostname(val)
-                    };
-                    builder.link_to(rs_idx, pivot_node, Edge::ResolvesTo);
+                    for r in rs.resource_records() {
+                        let target = match rs.r#type() {
+                            RrType::A | RrType::Aaaa => Node::ip(r.value(), zone),
+                            RrType::Cname => Node::hostname(r.value()),
+                            _ => continue,
+                        };
+                        builder.link_to(rs_idx, target, Edge::ResolvesTo);
+                    }
                 }
             }
         }
