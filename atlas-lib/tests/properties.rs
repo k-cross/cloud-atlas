@@ -115,6 +115,22 @@ proptest! {
                 attempt,
                 effective
             );
+
+            let reported = retention.unreadable(&report);
+            match reported.as_slice() {
+                [] => prop_assert!(unreadable.is_empty(), "an unreadable source went unreported"),
+                [aws] => {
+                    prop_assert_eq!(aws.source, CollectionSource::Aws);
+                    prop_assert_eq!(aws.scans, attempt);
+                    prop_assert_eq!(aws.budget, effective);
+                    prop_assert_eq!(
+                        aws.held(),
+                        held.contains(&CollectionSource::Aws),
+                        "what the status reports must be what the reconciler held"
+                    );
+                }
+                more => prop_assert!(false, "one source failed, {} reported", more.len()),
+            }
         }
 
         // Recovery resets the streak, so a source that fails again later is

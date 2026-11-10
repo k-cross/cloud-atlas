@@ -69,6 +69,52 @@ interface AtlasHandle {
 	atlas?: { graph?: { order: number } };
 }
 
+const ALB_KEY =
+	"AwsElbLoadBalancer#AWS::ELB::LoadBalancer(arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1)";
+const WEB_01_KEY = "AwsEc2Instance#AWS::Ec2Instance(i-globex-web-01)";
+const WEB_04_KEY = "AwsEc2Instance#AWS::Ec2Instance(i-globex-web-04)";
+
+function servesStatus(page: Page, target: string): Promise<string | null> {
+	return page.evaluate(
+		([source, target]) => {
+			const graph = (
+				globalThis as unknown as {
+					atlas: {
+						graph: {
+							hasEdge: (key: string) => boolean;
+							getEdgeAttribute: (key: string, name: string) => unknown;
+						};
+					};
+				}
+			).atlas.graph;
+			const key = `Serves|${source}->${target}`;
+			if (!graph.hasEdge(key)) return null;
+			return (graph.getEdgeAttribute(key, "flowStatus") as string | undefined) ?? "inferred";
+		},
+		[ALB_KEY, target],
+	);
+}
+
+function displayed(
+	page: Page,
+	key: string,
+): Promise<{ color?: string; highlighted?: boolean; label?: string } | null> {
+	return page.evaluate((key) => {
+		const data = (
+			globalThis as unknown as {
+				atlas: {
+					renderer: {
+						getNodeDisplayData: (
+							key: string,
+						) => { color?: string; highlighted?: boolean; label?: string } | undefined;
+					};
+				};
+			}
+		).atlas.renderer.getNodeDisplayData(key);
+		return data ? { color: data.color, highlighted: data.highlighted, label: data.label } : null;
+	}, key);
+}
+
 test.describe("render pipeline (static)", () => {
 	test("loads the snapshot and reports node/edge counts", async ({ page }) => {
 		const errors: string[] = [];
@@ -274,6 +320,136 @@ test.describe("render pipeline (static)", () => {
 	});
 });
 
+test.describe("search (static)", () => {
+	test("finds a node by name and flies to it, dimming everything unrelated", async ({ page }) => {
+		const errors: string[] = [];
+		page.on("pageerror", (e) => errors.push(e.message));
+
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
+
+		const input = page.getByRole("combobox", { name: "Search nodes" });
+		await input.fill("web-01");
+		const first = page.getByRole("option").first();
+		await expect(first).toContainText("i-globex-web-01");
+		await expect(page.locator(".results-count")).toContainText("match");
+
+		const before = await displayed(page, WEB_01_KEY);
+		await input.press("Enter");
+
+		await expect(page.locator(".focus-chip")).toContainText("i-globex-web-01");
+		await expect.poll(async () => (await displayed(page, WEB_01_KEY))?.highlighted).toBe(true);
+		expect(await displayed(page, WEB_01_KEY)).toMatchObject({ color: before?.color });
+		await expect
+			.poll(async () => (await displayed(page, "AwsEc2Vpc#AWS::EC2::VPC(vpc-globex-data)"))?.label)
+			.toBe("");
+
+		await input.press("Escape");
+		await expect(page.locator(".focus-chip")).toHaveCount(0);
+		await expect(input).toHaveValue("");
+		await expect.poll(async () => (await displayed(page, WEB_01_KEY))?.highlighted).toBeFalsy();
+		expect(errors).toEqual([]);
+	});
+
+	test("typing a new query lets go of the focused node", async ({ page }) => {
+		const vpc = "AwsEc2Vpc#AWS::EC2::VPC(vpc-globex-data)";
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("settled", { timeout: 30_000 });
+
+		const input = page.getByRole("combobox", { name: "Search nodes" });
+		await input.fill("web-01");
+		await expect(page.getByRole("option").first()).toContainText("i-globex-web-01");
+		await input.press("Enter");
+		await expect(page.locator(".focus-chip")).toContainText("i-globex-web-01");
+		await expect.poll(async () => (await displayed(page, vpc))?.label).toBe("");
+
+		await input.fill("vpc-globex-data");
+		await expect(page.locator(".focus-chip")).toHaveCount(0);
+		await expect.poll(async () => (await displayed(page, vpc))?.label).not.toBe("");
+		await expect.poll(async () => (await displayed(page, WEB_01_KEY))?.label).toBe("");
+		expect((await displayed(page, WEB_01_KEY))?.highlighted).toBeFalsy();
+	});
+
+	test("the slash key opens search from anywhere on the page", async ({ page }) => {
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("nodes ·", { timeout: 15_000 });
+
+		await page.locator("body").press("/");
+		await expect(page.getByRole("combobox", { name: "Search nodes" })).toBeFocused();
+	});
+
+	test("a query that matches nothing says so", async ({ page }) => {
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("nodes ·", { timeout: 15_000 });
+
+		await page.getByRole("combobox", { name: "Search nodes" }).fill("no-such-resource");
+		await expect(page.locator(".results-count")).toHaveText("no matches");
+		await expect(page.getByRole("option")).toHaveCount(0);
+	});
+
+	test("a static snapshot has no collection health to show", async ({ page }) => {
+		await page.goto(STATIC);
+		await expect(page.locator(STATUS)).toContainText("nodes ·", { timeout: 15_000 });
+		await expect(page.locator(".health")).toHaveCount(0);
+	});
+});
+
+test.describe("collection health (mocked backend)", () => {
+	const MOCK = "ws://mock.invalid/ws";
+
+	test("an unreadable source shows how long it has been held, then its recovery", async ({
+		page,
+	}) => {
+		const snapshot = fixture() as unknown as Record<string, unknown> & { version: number };
+		let server: WebSocketRoute | undefined;
+		const clean = {
+			type: "collection",
+			complete: true,
+			unreadable: [],
+			retention: [],
+			failures: [],
+			stream: { healthy: true, failures: [] },
+			flows: { healthy: true, failures: [], observed: 3 },
+		};
+		await page.routeWebSocket(MOCK, (ws) => {
+			server = ws;
+			ws.onMessage((message) => {
+				if (JSON.parse(String(message)).type === "subscribe") {
+					ws.send(JSON.stringify({ ...snapshot, type: "snapshot" }));
+					ws.send(JSON.stringify(clean));
+				}
+			});
+		});
+
+		await page.goto(`/?server=${MOCK}`);
+		await expect(page.locator(".health")).toContainText("all sources read", { timeout: 15_000 });
+
+		server?.send(
+			JSON.stringify({
+				...clean,
+				complete: false,
+				unreadable: ["Azure"],
+				retention: [{ source: "azure", kind: "unavailable", scans: 2, budget: 10, held: true }],
+				failures: [
+					{
+						source: "azure",
+						kind: "unavailable",
+						scope: "resource_graph",
+						message: "503 Service Unavailable",
+					},
+				],
+			}),
+		);
+		const azure = page.locator('.health-row[data-level="holding"]');
+		await expect(azure).toContainText("Azure");
+		await expect(azure).toContainText("holding 2/10 scans");
+		await expect(page.locator(".health .failure")).toContainText("resource_graph");
+
+		server?.send(JSON.stringify(clean));
+		await expect(page.locator(".health")).toContainText("all sources read");
+	});
+});
+
 test.describe("service view (mocked backend)", () => {
 	const MOCK = "ws://mock.invalid/ws";
 
@@ -369,6 +545,38 @@ test.describe("first layout (mocked backend)", () => {
 });
 
 test.describe("live backend (WebSocket)", () => {
+	test("the scripted outage is held, reported, and recovers", async ({ page }) => {
+		test.setTimeout(120_000);
+		await page.goto("/");
+		const held = page.locator('.health-row[data-level="holding"]');
+		await expect(held).toContainText("Azure", { timeout: 60_000 });
+		await expect(held).toContainText(/holding \d+\/\d+ scans/);
+		await expect(page.locator(".health")).toContainText("all sources read", { timeout: 30_000 });
+	});
+
+	test("a launched instance is wired, then used, and a quiet one falls back", async ({ page }) => {
+		test.setTimeout(120_000);
+		await page.goto("/");
+		await page.waitForFunction(
+			() => ((globalThis as AtlasHandle).atlas?.graph?.order ?? 0) > 0,
+			undefined,
+			{ timeout: 15_000 },
+		);
+
+		await expect
+			.poll(() => servesStatus(page, WEB_04_KEY), { timeout: 60_000, intervals: [100] })
+			.toBe("inferred");
+		await expect
+			.poll(() => servesStatus(page, WEB_04_KEY), { timeout: 30_000, intervals: [100] })
+			.toBe("confirmed");
+		await expect
+			.poll(() => servesStatus(page, WEB_01_KEY), { timeout: 30_000, intervals: [100] })
+			.toBe("inferred");
+		await expect
+			.poll(() => servesStatus(page, WEB_04_KEY), { timeout: 30_000, intervals: [100] })
+			.toBeNull();
+	});
+
 	test("connects to atlas-server and renders the pushed snapshot", async ({ page }) => {
 		const errors: string[] = [];
 		page.on("pageerror", (e) => errors.push(e.message));
@@ -390,6 +598,7 @@ test.describe("live backend (WebSocket)", () => {
 	});
 
 	test("patches pin existing nodes — the cloud does not move", async ({ page }) => {
+		test.setTimeout(60_000);
 		await page.goto("/");
 		await page.waitForFunction(
 			() => ((globalThis as AtlasHandle).atlas?.graph?.order ?? 0) > 0,
@@ -428,7 +637,7 @@ test.describe("live backend (WebSocket)", () => {
 								}
 								resolve(max);
 							}, 1500);
-						} else if (Date.now() - t0 > 12_000) resolve(Number.POSITIVE_INFINITY);
+						} else if (Date.now() - t0 > 20_000) resolve(Number.POSITIVE_INFINITY);
 						else setTimeout(wait, 100);
 					};
 					wait();

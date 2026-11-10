@@ -57,7 +57,7 @@ pub fn topology() -> GraphBuilder {
     topology_of(all())
 }
 
-fn topology_of(providers: impl IntoIterator<Item = Provider>) -> GraphBuilder {
+pub fn topology_of(providers: impl IntoIterator<Item = Provider>) -> GraphBuilder {
     let s = settings();
     let mut builder = GraphBuilder::new();
     for provider in providers {
@@ -287,6 +287,132 @@ pub fn burst_flow() -> FlowObservation {
         action: Some(FlowAction::Rejected),
         observed_at: now_millis(),
     }
+}
+
+pub const WEB_04: &str = "i-globex-web-04";
+const WEB_04_INTERFACE: &str = "eni-globex-web-04a";
+const WEB_04_ADDRESS: &str = "10.10.1.13";
+const WEB_SUBNET: &str = "subnet-public-1a";
+const WEB_TARGET_GROUP: &str =
+    "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/globex-web/1";
+
+pub fn with_web_04(provider: Provider) -> Provider {
+    use aws_sdk_ec2::types::{
+        GroupIdentifier, InstanceNetworkInterface, NetworkInterface, NetworkInterfaceAttachment,
+        NetworkInterfacePrivateIpAddress, NetworkInterfaceType, Placement,
+        builders::InstanceBuilder,
+    };
+    use aws_sdk_elasticloadbalancingv2::types::{TargetDescription, TargetHealthDescription};
+
+    let Provider::AWS(mut collections) = provider else {
+        return provider;
+    };
+    for (region, collection) in &mut collections {
+        if region != REGION {
+            continue;
+        }
+        match collection {
+            AmazonCollection::AmazonInstances(instances) => instances.push(
+                InstanceBuilder::default()
+                    .set_instance_id(Some(WEB_04.to_owned()))
+                    .set_vpc_id(Some(AWS_NETWORK.to_owned()))
+                    .set_subnet_id(Some(WEB_SUBNET.to_owned()))
+                    .set_private_ip_address(Some(WEB_04_ADDRESS.to_owned()))
+                    .set_placement(Some(
+                        Placement::builder().availability_zone("us-east-1a").build(),
+                    ))
+                    .set_security_groups(Some(vec![
+                        GroupIdentifier::builder()
+                            .group_id("sg-web")
+                            .group_name("globex-web")
+                            .build(),
+                    ]))
+                    .set_network_interfaces(Some(vec![
+                        InstanceNetworkInterface::builder()
+                            .network_interface_id(WEB_04_INTERFACE)
+                            .subnet_id(WEB_SUBNET)
+                            .vpc_id(AWS_NETWORK)
+                            .build(),
+                    ]))
+                    .build(),
+            ),
+            AmazonCollection::AmazonNetworkInterfaces(interfaces) => interfaces.push(
+                NetworkInterface::builder()
+                    .network_interface_id(WEB_04_INTERFACE)
+                    .subnet_id(WEB_SUBNET)
+                    .vpc_id(AWS_NETWORK)
+                    .groups(GroupIdentifier::builder().group_id("sg-web").build())
+                    .private_ip_addresses(
+                        NetworkInterfacePrivateIpAddress::builder()
+                            .private_ip_address(WEB_04_ADDRESS)
+                            .build(),
+                    )
+                    .interface_type(NetworkInterfaceType::Interface)
+                    .attachment(
+                        NetworkInterfaceAttachment::builder()
+                            .instance_id(WEB_04)
+                            .build(),
+                    )
+                    .build(),
+            ),
+            AmazonCollection::AmazonLoadBalancers(balancing) => balancing
+                .target_health
+                .entry(WEB_TARGET_GROUP.to_owned())
+                .or_default()
+                .push(
+                    TargetHealthDescription::builder()
+                        .target(TargetDescription::builder().id(WEB_04).build())
+                        .build(),
+                ),
+            _ => {}
+        }
+    }
+    Provider::AWS(collections)
+}
+
+pub fn web_04_flows() -> Vec<FlowObservation> {
+    let now = now_millis();
+    let flow = |(src, src_port): (&str, u16),
+                (dst, dst_port): (&str, u16),
+                resources: Vec<Node>,
+                packets: u64| FlowObservation {
+        source: CollectionSource::Aws,
+        scope: REGION.to_owned(),
+        src: Node::ip(src, AWS_NETWORK),
+        dst: Node::ip(dst, AWS_NETWORK),
+        src_port: Some(src_port),
+        dst_port: Some(dst_port),
+        resources,
+        packets,
+        bytes: packets.saturating_mul(AVERAGE_PACKET_BYTES),
+        action: Some(FlowAction::Accepted),
+        observed_at: now,
+    };
+
+    vec![
+        flow(
+            ("10.10.1.50", 43260),
+            (WEB_04_ADDRESS, 8080),
+            vec![Node::AwsEc2Eni("eni-globex-alb-1a".into())],
+            176_000,
+        ),
+        flow(
+            (WEB_04_ADDRESS, 8080),
+            ("10.10.1.50", 43260),
+            vec![
+                Node::AwsEc2Instance(WEB_04.into()),
+                Node::AwsEc2Eni(WEB_04_INTERFACE.into()),
+            ],
+            171_300,
+        ),
+    ]
+}
+
+pub fn web_01_addresses() -> [Node; 2] {
+    [
+        Node::ip("10.10.1.10", AWS_NETWORK),
+        Node::ip("10.10.2.20", AWS_NETWORK),
+    ]
 }
 
 fn now_millis() -> i64 {
@@ -1969,24 +2095,6 @@ pub fn azure() -> Provider {
         MicrosoftCollection::AzureDnsZones(vec![dns]),
         MicrosoftCollection::AzureCdnProfiles(vec![cdn]),
     ])
-}
-
-pub fn canary() -> Provider {
-    use crate::cloud::definition::ZoneId;
-
-    Provider::Cloudflare(Box::new(CloudflareCollection {
-        zones: vec![globex_zone()],
-        dns_records: HashMap::from([(
-            ZoneId("zone-globex".to_owned()),
-            vec![dns_record(
-                "rec-canary",
-                "canary.globex.io",
-                "A",
-                "198.51.100.42",
-            )],
-        )]),
-        ..Default::default()
-    }))
 }
 
 fn globex_zone() -> cloudflare::endpoints::zones::zone::Zone {

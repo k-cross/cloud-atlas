@@ -75,9 +75,9 @@ cargo run -p atlas-server -- --aws-event-queue <sqs-url> --aws-flow-log-queue <s
 
 ### Demo Mode (`atlas-server/src/demo.rs`)
 
-All credential-free behaviour (canary DNS parity toggle, 1-in-4 burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `canary`) lives in `atlas-lib/src/fixtures.rs`. Tracked in `docs/demo_design.md`.
+All credential-free behaviour (the scripted `Steady → Launched → Serving → Quiet → Outage` loop, once-a-cycle burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `with_web_04`, `web_04_flows`, `web_01_addresses`) lives in `atlas-lib/src/fixtures.rs`. Tracked in `docs/demo_design.md`.
 
-- **No demo leakage into production defaults:** `Source::default_poll` / `default_flow_ttl` return 60 s and `FlowIndex::DEFAULT_TTL` (15 min) for `Live`, and `demo::POLL` / `demo::flow_ttl(poll)` for `Demo`.
+- **No demo leakage into production defaults:** `Source::default_poll` / `default_flow_ttl` return 60 s and `FlowIndex::DEFAULT_TTL` (15 min) for `Live`, and `demo::POLL` / `demo::flow_ttl(poll)` for `Demo`. The script's stage lengths assume that TTL, so `--demo` ignores `--flow-ttl-secs` with a warning.
 - **Projector shapes only:** Demo mutations run through projectors (`the_live_change_is_a_shape_a_scan_produces`).
 - **Flows via `FlowIndex`:** `demo::graph` returns `fixtures::topology()`, and `Source::seed_flows` primes `FlowIndex` (`the_scan_graph_carries_no_traffic_of_its_own`).
 
@@ -102,8 +102,8 @@ All credential-free behaviour (canary DNS parity toggle, 1-in-4 burst flow, 5 s 
 
 ### Frontend Overlay & API
 
-- **Overlay rendering:** Flow edges use verdict colour and log-scaled `packets` width; active nodes show a pulsing halo; packets animate on `canvas.traffic-layer` (excluded from the settled-graph stability test, verified by its own animation test). `Edge::Serves` styles by `inferred`/`confirmed` status (`SERVES_STATUS_COLORS`, `servesColor`/`servesSize` in `style.ts`) and never animates beads (`FLOW_KIND` filter). `GraphController::setServiceView` hides all non-`Serves` edges and untouched nodes via Sigma reducers.
-- **Endpoints:** `GET /snapshot.json` (v3: `nodes`, `edges`, `observations`), `GET /collection.json` (`complete`, `unreadable`, `failures`, `stream`, `flows`), `GET /ws` (server pushes `snapshot`/`patch`; client sends `subscribe`, `get_snapshot`, `get_neighbors`). Frontend (`bun dev` on `:4680`) connects to `ws://<host>:4681/ws` (override with `?server=ws://…` or offline `?static`).
+- **Overlay rendering:** Flow edges use verdict colour and log-scaled `packets` width; active nodes show a pulsing halo; packets animate on `canvas.traffic-layer` (excluded from the settled-graph stability test, verified by its own animation test). `Edge::Serves` styles by `inferred`/`confirmed` status (`SERVES_STATUS_COLORS`, `servesColor`/`servesSize` in `style.ts`) and never animates beads (`FLOW_KIND` filter). `GraphController::setServiceView` hides all non-`Serves` edges and untouched nodes via Sigma reducers. Search (`search.ts`, `setQuery`) dims non-matches; `focus` lights a node and its neighbours and flies the camera there; `TrafficLayer` mutes dimmed nodes.
+- **Endpoints:** `GET /snapshot.json` (v3: `nodes`, `edges`, `observations`), `GET /collection.json` (`complete`, `unreadable`, `retention`, `failures`, `stream`, `flows`; built by `health::value`), `GET /ws` (server pushes `snapshot`/`patch`, and `collection` after the snapshot and on every change; client sends `subscribe`, `get_snapshot`, `get_neighbors`). Frontend (`bun dev` on `:4680`) connects to `ws://<host>:4681/ws` (override with `?server=ws://…` or offline `?static`).
 
 ## Rendering Workspace (`atlas-render/`)
 

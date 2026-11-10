@@ -209,6 +209,20 @@ pub fn carry_forward(
     });
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnreadableSource {
+    pub source: CollectionSource,
+    pub kind: FailureKind,
+    pub scans: u32,
+    pub budget: u32,
+}
+
+impl UnreadableSource {
+    pub fn held(&self) -> bool {
+        self.scans <= self.budget
+    }
+}
+
 pub struct Retention {
     budget: u32,
     auth_budget: u32,
@@ -235,6 +249,12 @@ impl Retention {
         }
     }
 
+    fn budget_of(&self, report: &CollectionReport, source: CollectionSource) -> u32 {
+        report
+            .unreadable_kind(source)
+            .map_or(self.budget, |kind| self.budget_for(kind))
+    }
+
     pub fn hold(&mut self, report: &CollectionReport) -> HashSet<CollectionSource> {
         let unreadable = report.unreadable_sources();
         self.consecutive_failures
@@ -243,14 +263,29 @@ impl Retention {
         unreadable
             .into_iter()
             .filter(|&source| {
-                let budget = report
-                    .unreadable_kind(source)
-                    .map_or(self.budget, |kind| self.budget_for(kind));
+                let budget = self.budget_of(report, source);
                 let streak = self.consecutive_failures.entry(source).or_default();
                 *streak += 1;
                 *streak <= budget
             })
             .collect()
+    }
+
+    pub fn unreadable(&self, report: &CollectionReport) -> Vec<UnreadableSource> {
+        let mut sources: Vec<UnreadableSource> = report
+            .unreadable_sources()
+            .into_iter()
+            .map(|source| UnreadableSource {
+                source,
+                kind: report
+                    .unreadable_kind(source)
+                    .unwrap_or(FailureKind::Unavailable),
+                scans: self.streak(source),
+                budget: self.budget_of(report, source),
+            })
+            .collect();
+        sources.sort_by_cached_key(|unreadable| unreadable.source.to_string());
+        sources
     }
 
     pub fn streak(&self, source: CollectionSource) -> u32 {

@@ -33,11 +33,21 @@ export class TrafficLayer {
 	private flows: ObservedFlow[] = [];
 	private live: LiveNode[] = [];
 	private onSummary: (summary: TrafficSummary) => void;
+	private isMuted: (key: string) => boolean;
+	private isFlowMuted: (source: string, target: string) => boolean;
 
-	constructor(renderer: Sigma, graph: Graph, onSummary: (summary: TrafficSummary) => void) {
+	constructor(
+		renderer: Sigma,
+		graph: Graph,
+		onSummary: (summary: TrafficSummary) => void,
+		isMuted: (key: string) => boolean = () => false,
+		isFlowMuted: (source: string, target: string) => boolean = () => false,
+	) {
 		this.renderer = renderer;
 		this.graph = graph;
 		this.onSummary = onSummary;
+		this.isMuted = isMuted;
+		this.isFlowMuted = isFlowMuted;
 
 		this.canvas = document.createElement("canvas");
 		this.canvas.className = TRAFFIC_CANVAS_CLASS;
@@ -99,7 +109,7 @@ export class TrafficLayer {
 
 	private viewport(key: string): Point | null {
 		const display = this.renderer.getNodeDisplayData(key);
-		if (!display || display.hidden) return null;
+		if (!display || display.hidden || this.isMuted(key)) return null;
 		return this.renderer.framedGraphToViewport({ x: display.x, y: display.y });
 	}
 
@@ -119,6 +129,7 @@ export class TrafficLayer {
 	}
 
 	private drawFlow(flow: ObservedFlow, now: number, wallClock: number) {
+		if (this.isFlowMuted(flow.source, flow.target)) return;
 		const from = this.viewport(flow.source);
 		const to = this.viewport(flow.target);
 		if (!from || !to) return;

@@ -1,5 +1,6 @@
 import Graph from "graphology";
 import Sigma from "sigma";
+import type { EdgeDisplayData, NodeDisplayData } from "sigma/types";
 import init, { LayoutEngine } from "../../static/pkg/atlas_layout_wasm.js";
 import {
 	applyPatch,
@@ -10,8 +11,16 @@ import {
 	type Snapshot,
 	snapshotFromGraph,
 } from "./graph";
+import type { CollectionHealth } from "./health";
+import { emptySearch, type SearchResult, searchNodes } from "./search";
 import { SERVES_KIND, type ServiceSummary, serviceEndpoints, serviceSummary } from "./service";
-import { PROVIDER_COLORS, type Provider, providerOf } from "./style";
+import {
+	DIMMED_EDGE_COLOR,
+	DIMMED_NODE_COLOR,
+	PROVIDER_COLORS,
+	type Provider,
+	providerOf,
+} from "./style";
 import { TrafficLayer } from "./TrafficLayer";
 import type { TrafficSummary } from "./traffic";
 
@@ -21,6 +30,9 @@ const SETTLE_MAX_ITERS = 3000;
 const SETTLED_SPEED = 0.01;
 const REVEAL_MS = 700;
 const BBOX_PADDING = 0.08;
+const FOCUS_RATIO = 0.3;
+const FOCUS_MS = 600;
+const FORCED_LABELS = 24;
 
 const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
 
@@ -62,6 +74,9 @@ export interface GraphControllerOptions {
 	onLegendChange: (legend: LegendCount[]) => void;
 	onTrafficChange: (traffic: TrafficSummary) => void;
 	onServiceChange: (service: ServiceSummary) => void;
+	onHealthChange: (health: CollectionHealth | null) => void;
+	onSearchChange: (search: SearchResult) => void;
+	onFocusChange: (key: string | null, label: string | null) => void;
 	onError: (error: string) => void;
 }
 
@@ -78,6 +93,9 @@ export class GraphController {
 	private socket: WebSocket | null = null;
 	private traffic: TrafficLayer | null = null;
 	private serviceOnly: Set<string> | null = null;
+	private searchResult: SearchResult = emptySearch();
+	private focused: string | null = null;
+	private focusSet: Set<string> | null = null;
 
 	constructor(options: GraphControllerOptions) {
 		this.options = options;
@@ -88,10 +106,9 @@ export class GraphController {
 			minCameraRatio: 0.05,
 			maxCameraRatio: 20,
 			allowInvalidContainer: true,
-			nodeReducer: (key, data) =>
-				this.hiddenInServiceView(key) ? { ...data, hidden: true } : data,
-			edgeReducer: (_key, data) =>
-				this.serviceOnly && data.kind !== SERVES_KIND ? { ...data, hidden: true } : data,
+			zIndex: true,
+			nodeReducer: (key, data) => this.reduceNode(key, data),
+			edgeReducer: (key, data) => this.reduceEdge(key, data),
 		});
 	}
 
@@ -102,7 +119,13 @@ export class GraphController {
 				whenSized(this.options.container),
 			]);
 
-			this.traffic = new TrafficLayer(this.renderer, this.graph, this.options.onTrafficChange);
+			this.traffic = new TrafficLayer(
+				this.renderer,
+				this.graph,
+				this.options.onTrafficChange,
+				(key) => this.dimmed(key),
+				(source, target) => this.edgeDimmed(source, target),
+			);
 			this.traffic.start();
 
 			(window as unknown as { atlas: unknown }).atlas = {
@@ -110,11 +133,16 @@ export class GraphController {
 				renderer: this.renderer,
 			};
 
+			this.renderer.on("clickNode", ({ node }) => {
+				this.focus(node);
+				this.requestNeighbors(node);
+			});
+			this.renderer.on("clickStage", () => this.focus(null));
+
 			if (new URLSearchParams(location.search).has("static")) {
 				await this.fetchStatic();
 			} else {
 				this.connectLive();
-				this.renderer.on("clickNode", ({ node }) => this.requestNeighbors(node));
 			}
 		} catch (e) {
 			this.options.onError(errorText(e));
@@ -133,11 +161,102 @@ export class GraphController {
 	// packet beads stop with the flow edges they belong to.
 	public setServiceView(on: boolean) {
 		this.serviceOnly = on ? serviceEndpoints(this.graph) : null;
-		this.renderer.refresh();
+		this.refreshSearch();
 	}
 
 	private hiddenInServiceView(key: string): boolean {
 		return this.serviceOnly !== null && !this.serviceOnly.has(key);
+	}
+
+	// Dimmed rather than hidden, so the matches keep their place in the shape of
+	// the estate.
+	private litNodes(): Set<string> | null {
+		if (this.focusSet !== null) return this.focusSet;
+		return this.searchResult.query.trim() ? this.searchResult.matches : null;
+	}
+
+	private dimmed(key: string): boolean {
+		const lit = this.litNodes();
+		return lit !== null && !lit.has(key);
+	}
+
+	private reduceNode(key: string, data: Partial<NodeDisplayData>): Partial<NodeDisplayData> {
+		if (this.hiddenInServiceView(key)) return { ...data, hidden: true };
+		const lit = this.litNodes();
+		if (lit === null) return data;
+		if (!lit.has(key)) return { ...data, color: DIMMED_NODE_COLOR, label: "", zIndex: 0 };
+		return {
+			...data,
+			zIndex: 1,
+			forceLabel: this.focusSet !== null && lit.size <= FORCED_LABELS,
+			highlighted: key === this.focused,
+		};
+	}
+
+	private edgeDimmed(source: string, target: string): boolean {
+		const lit = this.litNodes();
+		if (lit === null) return false;
+		if (this.focused !== null) return source !== this.focused && target !== this.focused;
+		return !lit.has(source) || !lit.has(target);
+	}
+
+	private reduceEdge(
+		key: string,
+		data: Partial<EdgeDisplayData> & { kind?: string },
+	): Partial<EdgeDisplayData> {
+		if (this.serviceOnly && data.kind !== SERVES_KIND) return { ...data, hidden: true };
+		if (this.litNodes() === null) return data;
+		const [source, target] = this.graph.extremities(key);
+		return this.edgeDimmed(source, target)
+			? { ...data, color: DIMMED_EDGE_COLOR, zIndex: 0 }
+			: { ...data, zIndex: 1 };
+	}
+
+	private neighbourhood(key: string): Set<string> {
+		return new Set([key, ...this.graph.neighbors(key)]);
+	}
+
+	public setQuery(query: string) {
+		this.searchResult = searchNodes(this.graph, query, (key) => !this.hiddenInServiceView(key));
+		this.renderer.refresh();
+		this.options.onSearchChange(this.searchResult);
+	}
+
+	public focus(key: string | null) {
+		const target =
+			key !== null && this.graph.hasNode(key) && !this.hiddenInServiceView(key) ? key : null;
+		this.focused = target;
+		this.focusSet = target === null ? null : this.neighbourhood(target);
+		this.renderer.refresh();
+		this.options.onFocusChange(
+			target,
+			target === null ? null : (this.graph.getNodeAttribute(target, "label") as string),
+		);
+		if (target === null) return;
+
+		const position = this.renderer.getNodeDisplayData(target);
+		const camera = this.renderer.getCamera();
+		if (position) {
+			camera.animate(
+				{ x: position.x, y: position.y, ratio: Math.min(camera.ratio, FOCUS_RATIO) },
+				{ duration: FOCUS_MS },
+			);
+		}
+	}
+
+	// A patch can remove the focused node, add matches, or change who a focused
+	// node's neighbours are, so both views are rebuilt from the graph as it now is.
+	private refreshSearch() {
+		if (this.focused !== null) {
+			if (this.graph.hasNode(this.focused) && !this.hiddenInServiceView(this.focused)) {
+				this.focusSet = this.neighbourhood(this.focused);
+			} else {
+				this.focused = null;
+				this.focusSet = null;
+				this.options.onFocusChange(null, null);
+			}
+		}
+		this.setQuery(this.searchResult.query);
 	}
 
 	private renderLegend() {
@@ -263,6 +382,7 @@ export class GraphController {
 			this.laidOut = false;
 			this.layoutAndReveal(false);
 			this.renderLegend();
+			this.refreshSearch();
 		} catch (e) {
 			this.options.onError(errorText(e));
 		}
@@ -274,6 +394,7 @@ export class GraphController {
 			applyPatch(this.graph, patch);
 			if (changesTopology(patch)) this.layoutAndReveal(this.laidOut);
 			this.renderLegend();
+			if (changesTopology(patch)) this.refreshSearch();
 		} catch (e) {
 			this.options.onError(errorText(e));
 		}
@@ -307,6 +428,9 @@ export class GraphController {
 				case "patch":
 					this.onPatch(msg as GraphPatch);
 					break;
+				case "collection":
+					this.options.onHealthChange(msg as CollectionHealth);
+					break;
 				case "neighbors":
 					console.info(`neighbors of ${msg.key}:`, msg.nodes, msg.edges);
 					break;
@@ -317,6 +441,7 @@ export class GraphController {
 		});
 
 		this.socket.addEventListener("close", () => {
+			this.options.onHealthChange(null);
 			this.connection = gotMessage ? "disconnected" : "offline";
 			this.updateStatus();
 			if (!gotMessage) this.fetchStatic();

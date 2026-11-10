@@ -1,4 +1,5 @@
 use crate::demo;
+use crate::health;
 use crate::state::AppState;
 use crate::stream;
 use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
@@ -26,7 +27,7 @@ impl Source {
                 let scan = engine.collect().await;
                 (scan.builder, scan.report)
             }
-            Source::Demo => (demo::graph(tick), CollectionReport::default()),
+            Source::Demo => demo::scan(tick),
         }
     }
 
@@ -220,6 +221,7 @@ async fn reconcile_tick(
         reconcile(&live.graph, &mut next, &held, &flows)
     };
 
+    *state.unreadable.write().await = retention.unreadable(&report);
     *state.report.write().await = report;
 
     let topology_changed = !patch.is_empty();
@@ -236,6 +238,7 @@ async fn reconcile_tick(
         *state.live.write().await = next;
     }
     publish(state, patch, "reconcile");
+    health::publish(state).await;
 }
 
 async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
@@ -250,6 +253,7 @@ async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
     *state.flow_report.write().await = batch.report;
 
     if batch.observations.is_empty() {
+        health::publish(state).await;
         return;
     }
 
@@ -267,6 +271,7 @@ async fn ingest_flows(state: &AppState, batch: stream::FlowBatch) {
         patch
     };
     publish(state, patch, "flow");
+    health::publish(state).await;
 }
 
 fn now_millis() -> i64 {
@@ -286,6 +291,7 @@ async fn ingest(state: &AppState, applier: &mut EventApplier, batch: stream::Bat
     }
 
     *state.stream_report.write().await = batch.report;
+    health::publish(state).await;
 
     if batch.events.is_empty() {
         return;
@@ -306,7 +312,7 @@ mod tests {
     use atlas_lib::atlas::event::ChangeOp;
     use atlas_lib::atlas::export::{edge_key, node_key};
     use atlas_lib::atlas::flow::FlowAction;
-    use atlas_lib::fixtures::AWS_NETWORK;
+    use atlas_lib::fixtures::{self, AWS_NETWORK};
 
     const T0: i64 = 1_788_436_800_000;
 
@@ -484,25 +490,29 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_still_applies_additions() {
-        let live = settled(demo::graph(2), &no_flows()).graph;
-        let mut next = without_kind(&demo::graph(3).graph, "AwsEc2Instance");
+        let live = settled(demo::graph(0), &no_flows()).graph;
+        let (mut next, report) = demo::scan(demo::first_tick(demo::Stage::Outage));
+        let held = Retention::default().hold(&report);
+        assert_eq!(held, HashSet::from([CollectionSource::Azure]));
 
-        let patch = reconcile(&live, &mut next, &holding_aws(), &no_flows());
+        let patch = reconcile(&live, &mut next, &held, &no_flows());
 
-        assert_eq!(
-            patch.added_nodes.len(),
-            3,
-            "the canary record from a source that did respond must land"
+        assert!(
+            patch
+                .added_nodes
+                .iter()
+                .any(|node| node.key == node_key(&Node::AwsEc2Instance(fixtures::WEB_04.into()))),
+            "the instance AWS reported while Azure could not be read must land"
         );
-        assert_eq!(patch.added_edges.len(), 3);
         assert!(patch.removed_nodes.is_empty() && patch.removed_edges.is_empty());
     }
 
     #[test]
     fn a_complete_scan_is_unaffected_by_carry_forward() {
-        let live = settled(demo::graph(2), &no_flows()).graph;
-        let mut next = demo::graph(3);
-        let same = settled(demo::graph(3), &no_flows());
+        let launched = demo::first_tick(demo::Stage::Launched);
+        let live = settled(demo::graph(0), &no_flows()).graph;
+        let mut next = demo::graph(launched);
+        let same = settled(demo::graph(launched), &no_flows());
 
         let with_policy = reconcile(&live, &mut next, &nothing_held(), &no_flows());
         let plain = diff(&live, &same.graph);

@@ -6,12 +6,14 @@ use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
 
-async fn replay_config(responses: &[(&'static str, &'static str)]) -> aws_config::SdkConfig {
+async fn replay_config<Body: Clone + Into<SdkBody>>(
+    responses: &[(&'static str, Body)],
+) -> aws_config::SdkConfig {
     replay(responses).await.0
 }
 
-async fn replay(
-    responses: &[(&'static str, &'static str)],
+async fn replay<Body: Clone + Into<SdkBody>>(
+    responses: &[(&'static str, Body)],
 ) -> (aws_config::SdkConfig, StaticReplayClient) {
     let events = responses
         .iter()
@@ -24,7 +26,7 @@ async fn replay(
                 http::Response::builder()
                     .status(200)
                     .header("content-type", *ct)
-                    .body(SdkBody::from(*body))
+                    .body(body.clone().into())
                     .unwrap(),
             )
         })
@@ -43,6 +45,7 @@ const XML: &str = "text/xml";
 const JSON: &str = "application/json";
 const JSON10: &str = "application/x-amz-json-1.0";
 const JSON11: &str = "application/x-amz-json-1.1";
+const CBOR: &str = "application/cbor";
 
 #[tokio::test]
 async fn lambda_functions() {
@@ -801,6 +804,21 @@ async fn network_interfaces_follow_pagination_past_the_first_page() {
     assert_eq!(ids, vec!["eni-1", "eni-2"]);
 }
 
+// Direct Connect speaks Smithy RPC v2 CBOR. Its bodies are written as JSON so
+// they still read like the API reference, and transcoded on the way in and out.
+fn cbor(json: &str) -> Vec<u8> {
+    let value: serde_json::Value = serde_json::from_str(json).unwrap();
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&value, &mut bytes).unwrap();
+    bytes
+}
+
+fn cbor_requests(http: &StaticReplayClient) -> Vec<serde_json::Value> {
+    http.actual_requests()
+        .map(|request| ciborium::from_reader(request.body().bytes().unwrap_or_default()).unwrap())
+        .collect()
+}
+
 #[tokio::test]
 async fn direct_connect_follows_every_page_of_connections_and_interfaces() {
     let connections_first = r#"{"connections":[{"connectionId":"dxcon-1","connectionState":"available","location":"EqDC2"}],"nextToken":"page-2"}"#;
@@ -813,9 +831,9 @@ async fn direct_connect_follows_every_page_of_connections_and_interfaces() {
         "bgpPeers":[{"amazonAddress":"169.254.1.1/30","customerAddress":"169.254.1.2/30","bgpPeerState":"available"}]
     }]}"#;
     let (cfg, http) = replay(&[
-        (JSON11, connections_first),
-        (JSON11, connections_second),
-        (JSON11, interfaces),
+        (CBOR, cbor(connections_first)),
+        (CBOR, cbor(connections_second)),
+        (CBOR, cbor(interfaces)),
     ])
     .await;
 
@@ -847,9 +865,9 @@ async fn direct_connect_follows_every_page_of_connections_and_interfaces() {
     assert_eq!(peer.customer_address(), Some("169.254.1.2/30"));
     assert!(peer.bgp_peer_state().is_some());
 
-    let requests = request_bodies(&http);
+    let requests = cbor_requests(&http);
     assert_eq!(requests.len(), 3);
-    assert!(requests[1].contains("page-2"), "{}", requests[1]);
+    assert_eq!(requests[1]["nextToken"], "page-2", "{}", requests[1]);
 }
 
 #[tokio::test]
@@ -862,10 +880,10 @@ async fn direct_connect_gateways_ask_each_gateway_for_its_associations() {
     let more_associations = r#"{"directConnectGatewayAssociations":[{"directConnectGatewayId":"dxgw-1","associationState":"updating","associatedGateway":{"id":"tgw-1","type":"transitGateway"}}]}"#;
     let no_associations = r#"{"directConnectGatewayAssociations":[]}"#;
     let (cfg, http) = replay(&[
-        (JSON11, gateways),
-        (JSON11, first_associations),
-        (JSON11, more_associations),
-        (JSON11, no_associations),
+        (CBOR, cbor(gateways)),
+        (CBOR, cbor(first_associations)),
+        (CBOR, cbor(more_associations)),
+        (CBOR, cbor(no_associations)),
     ])
     .await;
 
@@ -888,14 +906,28 @@ async fn direct_connect_gateways_ask_each_gateway_for_its_associations() {
     assert!(associations[0].association_state().is_some());
     assert_eq!(associations[0].direct_connect_gateway_id(), Some("dxgw-1"));
 
-    let requests = request_bodies(&http);
-    assert!(requests[1].contains("dxgw-1"), "{}", requests[1]);
-    assert!(
-        requests[2].contains("dxgw-1") && requests[2].contains("assoc-2"),
+    let requests = cbor_requests(&http);
+    assert_eq!(
+        requests[1]["directConnectGatewayId"], "dxgw-1",
+        "{}",
+        requests[1]
+    );
+    assert_eq!(
+        requests[2]["directConnectGatewayId"], "dxgw-1",
         "{}",
         requests[2]
     );
-    assert!(requests[3].contains("dxgw-2"), "{}", requests[3]);
+    assert_eq!(requests[2]["nextToken"], "assoc-2", "{}", requests[2]);
+    assert_eq!(
+        requests[3]["directConnectGatewayId"], "dxgw-2",
+        "{}",
+        requests[3]
+    );
+    assert!(
+        requests[3].get("nextToken").is_none(),
+        "one gateway's cursor must not leak into the next: {}",
+        requests[3]
+    );
 }
 
 fn request_bodies(http: &StaticReplayClient) -> Vec<String> {
@@ -909,7 +941,7 @@ fn request_bodies(http: &StaticReplayClient) -> Vec<String> {
 #[tokio::test]
 async fn direct_connect_refuses_a_page_token_that_repeats() {
     let page = r#"{"connections":[{"connectionId":"dxcon-1"}],"nextToken":"stuck"}"#;
-    let cfg = replay_config(&[(JSON11, page), (JSON11, page)]).await;
+    let cfg = replay_config(&[(CBOR, cbor(page)), (CBOR, cbor(page))]).await;
     let error = super::direct_connect::collector::runner(&cfg)
         .await
         .expect_err("a token that never advances must fail, not loop or truncate");
@@ -920,7 +952,12 @@ async fn direct_connect_refuses_a_page_token_that_repeats() {
 async fn direct_connect_refuses_a_page_token_that_comes_back() {
     let first = r#"{"connections":[{"connectionId":"dxcon-1"}],"nextToken":"a"}"#;
     let second = r#"{"connections":[{"connectionId":"dxcon-2"}],"nextToken":"b"}"#;
-    let cfg = replay_config(&[(JSON11, first), (JSON11, second), (JSON11, first)]).await;
+    let cfg = replay_config(&[
+        (CBOR, cbor(first)),
+        (CBOR, cbor(second)),
+        (CBOR, cbor(first)),
+    ])
+    .await;
     let error = super::direct_connect::collector::runner(&cfg)
         .await
         .expect_err("a cursor that cycles must fail, not loop");

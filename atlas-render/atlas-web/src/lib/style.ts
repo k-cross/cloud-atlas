@@ -1,3 +1,5 @@
+import type { HealthLevel } from "./health";
+
 export type Provider = "AWS" | "GCP" | "Azure" | "Cloudflare" | "External" | "Generic";
 
 export function providerOf(kind: string): Provider {
@@ -59,6 +61,17 @@ export const FLOW_STATUS_COLORS: Record<string, string> = {
 	mixed: "#e0a83f",
 	observed: "#7f8ea3",
 };
+
+export const HEALTH_COLORS: Record<HealthLevel, string> = {
+	ok: FLOW_STATUS_COLORS.accepted,
+	degraded: FLOW_STATUS_COLORS.observed,
+	holding: FLOW_STATUS_COLORS.mixed,
+	released: FLOW_STATUS_COLORS.rejected,
+};
+
+export const DIMMED_NODE_COLOR = "#262c35";
+
+export const DIMMED_EDGE_COLOR = "#1b2028";
 
 export const FLOW_PACKET_COLORS: Record<string, string> = {
 	accepted: "#d6ffee",

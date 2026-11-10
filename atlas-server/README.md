@@ -22,8 +22,8 @@ cargo run -p atlas-server -- \
 | `--retain-scans` | `10` | Consecutive incomplete scans a source's resources survive before release |
 | `--aws-event-queue` | off | SQS URL for Tier-1 control-plane events |
 | `--aws-flow-log-queue` | off | SQS URL for Tier-2 VPC Flow Log S3 notifications |
-| `--flow-ttl-secs` | per source | Flow observation TTL (live: 15 min; demo: scaled to poll) |
-| `--demo` | off | Serve Globex fixtures (`demo.rs`: canary DNS toggle + periodic burst flow) |
+| `--flow-ttl-secs` | per source | Flow observation TTL (live: 15 min; demo: three polls, flag ignored) |
+| `--demo` | off | Serve Globex fixtures (`demo.rs`: scripted launch, traffic, quiet, Azure outage and recovery loop + periodic burst flow) |
 | `--verbose` | off | Verbose collection logging |
 
 ## Architecture
@@ -37,10 +37,10 @@ cargo run -p atlas-server -- \
 ## HTTP & WebSocket API
 
 - `GET /snapshot.json` — Snapshot v3 (`nodes`, `edges`, `observations`).
-- `GET /collection.json` — `complete`, `unreadable`, `failures` (with `FailureKind`), `stream`, `flows`.
+- `GET /collection.json` — `complete`, `unreadable`, `retention` (per unreadable source: `kind`, `scans`, `budget`, `held`), `failures` (with `FailureKind`), `stream`, `flows`.
 - `GET /ws` — JSON frames tagged by `type`:
   - Client → Server: `subscribe`, `get_snapshot`, `get_neighbors` (`key`)
-  - Server → Client: `snapshot`, `patch` (`observations` + `expired` + node/edge diffs), `neighbors`, `error`
+  - Server → Client: `snapshot`, `patch` (`observations` + `expired` + node/edge diffs), `collection` (the `/collection.json` body, after the snapshot and whenever it changes), `neighbors`, `error`
 
 ## Tests
 

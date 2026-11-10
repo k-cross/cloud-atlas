@@ -39,13 +39,24 @@ where
     St: StreamExt<Item = Result<Message, E>> + Unpin,
 {
     let mut patches = state.patches.subscribe();
+    let mut health = state.health.subscribe();
 
     if send_snapshot(&mut sink, &state).await.is_err() {
+        return;
+    }
+    let initial = health.borrow_and_update().clone();
+    if send_health(&mut sink, initial).await.is_err() {
         return;
     }
 
     loop {
         tokio::select! {
+            changed = health.changed() => {
+                let latest = health.borrow_and_update().clone();
+                if changed.is_err() || send_health(&mut sink, latest).await.is_err() {
+                    break;
+                }
+            },
             incoming = stream.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
                     if handle_client_msg(&mut sink, &state, &text).await.is_err() {
@@ -110,6 +121,14 @@ async fn send_snapshot(
     send_value(sink, &value).await
 }
 
+async fn send_health(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    mut health: Value,
+) -> Result<(), ()> {
+    health["type"] = json!("collection");
+    send_value(sink, &health).await
+}
+
 async fn send_value(sink: &mut (impl SinkExt<Message> + Unpin), value: &Value) -> Result<(), ()> {
     sink.send(Message::Text(value.to_string()))
         .await
@@ -169,7 +188,7 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{AppState, Message, handle_client_msg, neighbors_value, pump, send_snapshot};
-    use atlas_lib::atlas::collection::CollectionReport;
+    use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
     use atlas_lib::atlas::definition::{Edge, Node};
     use atlas_lib::atlas::export::{SNAPSHOT_VERSION, node_key};
     use atlas_lib::atlas::flow::FlowIndex;
@@ -305,6 +324,7 @@ mod tests {
 
         let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
         out_rx.next().await.expect("initial snapshot");
+        out_rx.next().await.expect("initial collection health");
 
         assert!(state.patches.send(a_patch()).is_ok(), "a live subscriber");
 
@@ -314,6 +334,42 @@ mod tests {
         let value: Value = serde_json::from_str(&text).expect("JSON");
         assert_eq!(value["type"].as_str(), Some("patch"));
         assert_eq!(value["added_nodes"].as_array().map(Vec::len), Some(1));
+
+        drop(in_tx);
+        task.await.expect("clean teardown");
+    }
+
+    async fn next_value(out_rx: &mut mpsc::UnboundedReceiver<Message>) -> Value {
+        let Some(Message::Text(text)) = out_rx.next().await else {
+            panic!("expected a text frame");
+        };
+        serde_json::from_str(&text).expect("JSON")
+    }
+
+    #[tokio::test]
+    async fn collection_health_follows_the_snapshot_and_every_change() {
+        let (state, _) = state_with_a_pair();
+        let (out_tx, mut out_rx) = mpsc::unbounded::<Message>();
+        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
+
+        let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
+        assert_eq!(next_value(&mut out_rx).await["type"], "snapshot");
+        let initial = next_value(&mut out_rx).await;
+        assert_eq!(initial["type"], "collection");
+        assert_eq!(initial["complete"], true);
+
+        state.report.write().await.record(
+            CollectionSource::Azure,
+            FailureKind::Unavailable,
+            "resource_graph",
+            "503",
+        );
+        crate::health::publish(&state).await;
+
+        let changed = next_value(&mut out_rx).await;
+        assert_eq!(changed["type"], "collection");
+        assert_eq!(changed["complete"], false);
+        assert_eq!(changed["unreadable"][0], "Azure");
 
         drop(in_tx);
         task.await.expect("clean teardown");
@@ -369,8 +425,9 @@ mod tests {
         }
 
         assert_eq!(kinds[0], "snapshot", "connect pushes a snapshot first");
+        assert_eq!(kinds[1], "collection", "then the collection health");
         assert!(
-            kinds[1..kinds.len() - 1].iter().all(|k| k == "patch"),
+            kinds[2..kinds.len() - 1].iter().all(|k| k == "patch"),
             "only patches may precede the resync, got {kinds:?}"
         );
 

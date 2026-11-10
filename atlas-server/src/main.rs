@@ -1,4 +1,5 @@
 mod demo;
+mod health;
 mod http;
 mod poll;
 mod state;
@@ -7,7 +8,6 @@ mod ws;
 
 use crate::poll::Source;
 use crate::state::AppState;
-use atlas_lib::atlas::collection::CollectionReport;
 use atlas_lib::atlas::engine::AtlasEngine;
 use atlas_lib::atlas::flow::FlowIndex;
 use atlas_lib::atlas::patch::Retention;
@@ -36,8 +36,9 @@ pub struct Opt {
         long,
         help = "Serve the credential-free \"Globex\" fixtures instead of collecting from real clouds.",
         long_help = "Serve the credential-free \"Globex\" fixtures instead of collecting from real \
-                     clouds: a DNS record comes and goes every scan and a burst of rejected traffic \
-                     arrives every fourth. For local development and demos."
+                     clouds, playing a scripted loop: web-04 launches behind the balancer and \
+                     takes traffic, web-01 goes quiet, Azure is unreadable for three scans, then \
+                     everything recovers. For local development and demos."
     )]
     demo: bool,
 
@@ -93,7 +94,8 @@ pub struct Opt {
                      removed and the resources it touched stop reporting as live.\n\nUnset, the \
                      collection source answers: fifteen minutes for a real flow feed, generous on \
                      purpose relative to flow logs' own aggregation and delivery lag, which is \
-                     minutes."
+                     minutes.\n\nIgnored with --demo, whose scripted loop is timed in polls: \
+                     change --poll-secs instead."
     )]
     flow_ttl_secs: Option<u64>,
 }
@@ -112,7 +114,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut initial, initial_report, source) = if opt.demo {
         tracing::info!("demo mode: serving credential-free Globex fixtures");
-        (demo::graph(0), CollectionReport::default(), Source::Demo)
+        let (initial, report) = demo::scan(0);
+        (initial, report, Source::Demo)
     } else {
         let settings = atlas_lib::Settings {
             regions: opt.regions,
@@ -163,10 +166,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let poll_interval = opt
         .poll_secs
         .map_or_else(|| source.default_poll(), Duration::from_secs);
-    let flow_ttl = opt.flow_ttl_secs.map_or_else(
-        || source.default_flow_ttl(poll_interval),
-        Duration::from_secs,
-    );
+    let flow_ttl = match (opt.flow_ttl_secs, opt.demo) {
+        (Some(secs), false) => Duration::from_secs(secs),
+        (Some(_), true) => {
+            tracing::warn!(
+                "--flow-ttl-secs is ignored in --demo mode, whose script counts it in polls"
+            );
+            source.default_flow_ttl(poll_interval)
+        }
+        (None, _) => source.default_flow_ttl(poll_interval),
+    };
     tracing::info!(ttl = ?flow_ttl, "observed flows count as current for");
     let mut flow_index = FlowIndex::new(flow_ttl, FlowIndex::DEFAULT_CAPACITY);
     source.seed_flows(&mut flow_index);

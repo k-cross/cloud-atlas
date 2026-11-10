@@ -186,5 +186,9 @@ Topology patches that arrived before the first layout settled warm-started from 
 - Test: `a patch that lands before the first layout settles still spreads the graph` (`render.spec.ts`).
 
 ### The demo produces only projector-emitted shapes
-The demo's live change previously hand-linked `GenericHostname -ResolvesTo-> GenericIpAddress`—an ownerless-to-ownerless edge that no projector emits and `carry_forward` never expires. It now projects `fixtures::canary` through the Cloudflare projector.
-- Tests: `the_live_change_is_a_shape_a_scan_produces`, `the_canary_record_toggles_by_parity`.
+The demo's live change previously hand-linked `GenericHostname -ResolvesTo-> GenericIpAddress`—an ownerless-to-ownerless edge that no projector emits and `carry_forward` never expires. It then projected a canary DNS record through the Cloudflare projector on odd ticks; the scripted loop replaced that. web-04 is folded into the AWS scan's own collections (`fixtures::with_web_04`) and the outage drops Azure's collections and reports it, so every change is something a real scan produces.
+- Tests: `the_live_change_is_a_shape_a_scan_produces`, `an_outage_is_carried_without_changing_the_graph`.
+
+### A relaunch must not inherit the traffic of its previous life
+The first version of the loop relaunched web-04 two ticks after terminating it. Its last flows were still within the TTL, so on the second and later cycles web-04 came back `confirmed` instead of `inferred`. The cause is general: `confirmed` joins `FlowIndex` records to whatever holds an address now, and flows carry no notion of when that holder appeared. The demo's `Steady` stage now outlasts the TTL; the underlying gap is recorded in `service_topology_design.md` and the backlog.
+- Test: `a_launched_instance_is_wired_before_it_is_used` (checks every cycle, not only the first).
