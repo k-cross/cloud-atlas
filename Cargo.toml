@@ -2,23 +2,18 @@
 resolver = "2"
 
 members = [
-  "atlas-graph",
-  "atlas-provider",
-  "atlas-aws",
-  "atlas-azure",
-  "atlas-cloudflare",
-  "atlas-gcp",
-  "atlas-engine",
-  "atlas-cli",
-  "atlas-server",
+  "crates/atlas-graph",
+  "crates/atlas-provider",
+  "crates/atlas-aws",
+  "crates/atlas-azure",
+  "crates/atlas-cloudflare",
+  "crates/atlas-gcp",
+  "crates/atlas-engine",
+  "crates/atlas-cli",
+  "crates/atlas-server",
+  "crates/atlas-layout",
+  "crates/atlas-layout-wasm",
   "xtask",
-]
-
-# The rendering stack is its own workspace: it must never pull in the cloud
-# SDK dependency tree, and it builds for wasm32-unknown-unknown with its own
-# profile. The only link between the two is the render snapshot JSON.
-exclude = [
-  "atlas-render",
 ]
 
 [workspace.package]
@@ -30,13 +25,14 @@ repository = "https://github.com/k-cross/cloud-atlas"
 documentation = "https://github.com/k-cross/cloud-atlas"
 
 [workspace.dependencies]
-atlas-aws = { path = "atlas-aws" }
-atlas-azure = { path = "atlas-azure" }
-atlas-cloudflare = { path = "atlas-cloudflare" }
-atlas-engine = { path = "atlas-engine" }
-atlas-gcp = { path = "atlas-gcp" }
-atlas-graph = { path = "atlas-graph" }
-atlas-provider = { path = "atlas-provider" }
+atlas-aws = { path = "crates/atlas-aws" }
+atlas-azure = { path = "crates/atlas-azure" }
+atlas-cloudflare = { path = "crates/atlas-cloudflare" }
+atlas-engine = { path = "crates/atlas-engine" }
+atlas-gcp = { path = "crates/atlas-gcp" }
+atlas-graph = { path = "crates/atlas-graph" }
+atlas-layout = { path = "crates/atlas-layout" }
+atlas-provider = { path = "crates/atlas-provider" }
 
 aws-config = "1.0"
 aws-credential-types = "1"
@@ -67,6 +63,7 @@ cloudflare = "0.14.0"
 flate2 = "1"
 futures = "0.3"
 http = "1"
+js-sys = "0.3"
 percent-encoding = "2"
 petgraph = "0.7"
 proptest = "1"
@@ -79,5 +76,13 @@ tower-http = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
+wasm-bindgen = "0.2"
 wiremock = "0.6"
 yup-oauth2 = "11"
+
+# The wasm artifact ships to browsers; trade compile time for size and speed.
+[profile.wasm-release]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1

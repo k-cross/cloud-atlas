@@ -301,3 +301,108 @@ impl Default for Retention {
         Self::new(Self::DEFAULT_BUDGET)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{all_sources, public};
+
+    #[test]
+    fn carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot() {
+        let host = Node::GenericHostname("old.example.com".into());
+        let zone = Node::GcpDnsManagedZone("globex-zone".into());
+        let instance = Node::AwsEc2Instance("i-1".into());
+
+        let mut live = GraphBuilder::new();
+        let zone_idx = live.get_or_add_node(zone.clone());
+        live.link_to(zone_idx, host.clone(), Edge::ResolvesTo);
+        let instance_idx = live.get_or_add_node(instance.clone());
+        live.link_to(instance_idx, host.clone(), Edge::ConnectsTo);
+
+        let mut next = GraphBuilder::new();
+        next.get_or_add_node(zone.clone());
+
+        carry_forward(
+            &mut next,
+            &live.graph,
+            &std::collections::HashSet::from([CollectionSource::Aws]),
+        );
+
+        assert!(
+            next.has_edge(&instance, &host, &Edge::ConnectsTo),
+            "the unreadable source's edge must be retained"
+        );
+        assert!(
+            !next.has_edge(&zone, &host, &Edge::ResolvesTo),
+            "a healthy source's deleted edge must not be resurrected by the pivot it shares"
+        );
+    }
+
+    #[test]
+    fn carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records() {
+        let repointed = Node::CloudflareDnsRecord("rec-app".into());
+        let deleted = Node::CloudflareDnsRecord("rec-gone".into());
+        let (old_ip, new_ip) = (public("192.0.2.1"), public("192.0.2.2"));
+
+        let mut live = GraphBuilder::new();
+        for (record, name) in [
+            (&repointed, "app.example.com"),
+            (&deleted, "gone.example.com"),
+        ] {
+            let idx = live.get_or_add_node(record.clone());
+            live.link_from(idx, Node::hostname(name), Edge::ResolvesTo);
+            live.link_to(idx, old_ip.clone(), Edge::ResolvesTo);
+        }
+
+        let mut next = GraphBuilder::new();
+        let idx = next.get_or_add_node(repointed.clone());
+        next.link_from(idx, Node::hostname("app.example.com"), Edge::ResolvesTo);
+        next.link_to(idx, new_ip.clone(), Edge::ResolvesTo);
+
+        carry_forward(
+            &mut next,
+            &live.graph,
+            &std::collections::HashSet::from([CollectionSource::Aws]),
+        );
+
+        assert!(!next.has_edge(&repointed, &old_ip, &Edge::ResolvesTo));
+        assert!(!next.has_edge(
+            &Node::hostname("gone.example.com"),
+            &deleted,
+            &Edge::ResolvesTo
+        ));
+        assert!(
+            !next
+                .graph
+                .edge_references()
+                .any(|e| next.graph[e.target()] == old_ip),
+            "an unreadable AWS scan must not keep a healthy Cloudflare zone's old answer"
+        );
+    }
+
+    #[test]
+    fn carry_forward_drops_pivots_nothing_points_at_any_more() {
+        let anchored = Node::ip("10.0.0.1", "vpc-globex");
+        let orphan = Node::GenericIpAddress("203.0.113.7".into());
+        let traffic_only = Node::GenericIpAddress("203.0.113.8".into());
+
+        let mut live = GraphBuilder::new();
+
+        let instance = live.get_or_add_node(Node::AwsEc2Instance("i-1".into()));
+        live.link_to(instance, anchored.clone(), Edge::ConnectsTo);
+
+        live.get_or_add_node(orphan.clone());
+
+        live.link_to(instance, traffic_only.clone(), Edge::TrafficFlow);
+
+        let mut next = GraphBuilder::new();
+        carry_forward(&mut next, &live.graph, &all_sources());
+
+        assert!(
+            next.contains(&anchored),
+            "a referenced pivot is still needed"
+        );
+        assert!(!next.contains(&orphan));
+        assert!(!next.contains(&traffic_only));
+    }
+}

@@ -218,4 +218,26 @@ mod tests {
             &Edge::HasIp
         ));
     }
+
+    #[test]
+    fn identical_nodes_merge() {
+        let mut builder = GraphBuilder::new();
+        let a = builder.get_or_add_node(Node::ip("10.0.0.1", "vpc-globex"));
+        let b = builder.get_or_add_node(Node::ip("10.0.0.1", "vpc-globex"));
+        assert_eq!(a, b);
+        assert_eq!(builder.graph.node_count(), 1);
+    }
+
+    #[test]
+    fn identical_edges_dedupe() {
+        let mut builder = GraphBuilder::new();
+        let a = builder.get_or_add_node(Node::ip("10.0.0.1", "vpc-globex"));
+        let b = builder.get_or_add_node(Node::GenericHostname("db.example.com".into()));
+        builder.add_edge(a, b, Edge::ResolvesTo);
+        builder.add_edge(a, b, Edge::ResolvesTo);
+        assert_eq!(builder.graph.edge_count(), 1);
+
+        builder.add_edge(a, b, Edge::RoutesTo);
+        assert_eq!(builder.graph.edge_count(), 2);
+    }
 }

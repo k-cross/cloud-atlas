@@ -6,7 +6,7 @@ Cloud Atlas maintains a **continuous live property graph** of multi-cloud infras
 
 ## Architecture Rules
 
-1. **Strongly typed enums only.** The graph is `petgraph::Graph<Node, Edge>` (`atlas-graph/src/definition.rs`). Never represent resources with raw strings or hashmaps.
+1. **Strongly typed enums only.** The graph is `petgraph::Graph<Node, Edge>` (`crates/atlas-graph/src/definition.rs`). Never represent resources with raw strings or hashmaps.
 2. **ENI is the networking pivot:** `Instance -HasIp-> ENI -AttachedTo-> Subnet`. `Node::AwsEc2Eni` is keyed by its `eni-` ID (carried by `DescribeInstances`, Config items, and flow logs). The owning instance is the `HasIp` edge, never part of the key: ENIs reattach, instances are multi-homed, and managed ENIs (NAT, LB, RDS, VPC Lambda) have no instance. Instances with no interfaces get no ENI and no direct `Instance -> Subnet` edge.
 3. **`Display` on every type** in `Type::SubType(id)` form for `.dot` export.
 4. **Failure ≠ absence.** "Could not read" and "is gone" stay distinct through `CollectionReport`, `carry_forward`, and `Retention`. Never swallow collector errors with `.ok()` or `if let Ok(..)`.
@@ -22,28 +22,29 @@ Never call live cloud APIs in tests. Projectors test against the "Globex" estate
 
 - `cargo nextest run` enforces exhaustiveness guards: every `Node` and `Edge` kind must appear in the fixture graph.
 - `cargo run --example demo` projects fixtures + Tier-2 overlay (`fixtures::build_graph()`, combining `fixtures::topology()` and `fixtures::observed()`), writes `multi_cloud_demo.{dot,json}`, prints kind coverage, flows, and derived `Serves` edges, and exits non-zero if any kind is missing or the overlay is empty.
-- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also add its Config type to `TYPED_CONFIG_TYPES` (`atlas-aws/src/projector.rs`) with the item field an event names it by (or `None`): the Config catch-all never draws a listed type, and `every_aws_kind_config_records_has_one_source` fails until a new AWS kind is listed.
+- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also add its Config type to `TYPED_CONFIG_TYPES` (`crates/atlas-aws/src/projector.rs`) with the item field an event names it by (or `None`): the Config catch-all never draws a listed type, and `every_aws_kind_config_records_has_one_source` fails until a new AWS kind is listed.
 
 ### Collector Tests (HTTP → Struct)
 
 All model fields are `Option<T>` and serde ignores unknown fields, so a drifted schema parses as all-`None`. **Always assert that fields read by the projector are populated.**
 
-- **reqwest clients** (`GoogleApiClient`, `CloudflareApiClient`, `AzureApiClient`): `wiremock` + `with_base_url(token, url)` in `atlas-{gcp,cloudflare,azure}/tests/collectors.rs`. Pair a realistic contract test with pagination/error tests (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare `{success,result}`).
+- **reqwest clients** (`GoogleApiClient`, `CloudflareApiClient`, `AzureApiClient`): `wiremock` + `with_base_url(token, url)` in `crates/atlas-{gcp,cloudflare,azure}/tests/collectors.rs`. Pair a realistic contract test with pagination/error tests (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare `{success,result}`).
 - **`cloudflare` crate** (zone/dns/kv): `Environment::Custom(format!("{}/client/v4/", server.uri()))` via `serve_crate`/`crate_client`.
-- **AWS SDK:** `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig` in unit module `atlas-aws/src/collector_tests.rs` (`replay_config` feeds responses in order; unit test because `aws-config` is a normal dependency).
+- **AWS SDK:** `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig` in unit module `crates/atlas-aws/src/collector_tests.rs` (`replay_config` feeds responses in order; unit test because `aws-config` is a normal dependency).
 - **Azure mapping:** `atlas_azure::provider::map_resources` returns `(collections, CollectionReport)` without failing the batch; undeserializable ARG rows are skipped and reported as `Malformed` (capped at `MAX_REPORTED_ROWS` + tail count).
 
 ## Workspace Layout
 
-Shared package metadata and every third-party version live in the root `Cargo.toml` (`[workspace.package]`, `[workspace.dependencies]`). Members declare `dep.workspace = true` and add crate-specific features locally (`clap = { workspace = true, features = ["unicode"] }`); never pin a version in a member manifest.
+One Cargo workspace and one `Cargo.lock`: every crate lives under `crates/`, `xtask/` stays at the root (the `cargo xtask` convention), and the SvelteKit app is `atlas-web/`. Shared package metadata and every third-party version live in the root `Cargo.toml` (`[workspace.package]`, `[workspace.dependencies]`). Members declare `dep.workspace = true` and add crate-specific features locally (`clap = { workspace = true, features = ["unicode"] }`); never pin a version in a member manifest. Root-only settings (profiles) stay in the root manifest.
 
 - **`atlas-graph`:** Cloud-agnostic core: `definition` (`Node`/`Edge`, `nodes!`), `util`, `graph_builder`, `export` (`SNAPSHOT_VERSION`), `collection` (`CollectionSource`, `CollectionReport`, `FailureKind`), `patch`, `flow`, `event`, `derive` (`all`, `held_addresses`, `address_owners`, `CONFIRMED`/`INFERRED`). Depends only on `petgraph` and `serde`; never add a cloud SDK, HTTP client, or `atlas-engine` dependency. Its unit tests build graphs by hand. The `test-support` feature exposes `testing` (`assert_edge`, `assert_has_node`, `assert_resolves`, `public`, `link`, `serves`, `serves_any`); crates enable it only under `[dev-dependencies]`.
 - **`atlas-provider`:** What every provider crate shares: `Settings`, `ProviderScan<T>`, `collector::{run_all, NamedCollector}`, the projection helpers (`projector::{project_parallel, link_bgp_session}`, `project_leaf!`), and the estate-wide `fixtures`. Depends only on `atlas-graph`.
 - **`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`:** One crate per provider: collectors (GCP and Azure keep API models under `api/`), `definition` (`<Provider>Collection` and its payload structs), `projector` (`<provider>_projector`), `provider::build_<provider>`, and its Globex slice in `fixtures`. `atlas-aws` also owns the Tier 1/2 feeds (`events`, `flow_logs`) and the flow fixtures over its slice (`flows`, `observed`, `burst_flow`, `with_web_04`). Each depends only on `atlas-graph`, `atlas-provider`, and its own SDK/HTTP crates; a provider crate never depends on another provider or on `atlas-engine`.
 - **`atlas-engine`:** The aggregate over every provider: `projector::{Provider, build}`, `engine::AtlasEngine`, and `fixtures` (the composed estate). Re-exports `Settings` as the engine's input; consumers import graph and provider types from their own crates directly. Depends on no SDK crate itself.
 - **`atlas-cli`** (`atlas` binary), **`atlas-server`** (also depends on `atlas-aws` for the event and flow-log queues), **`xtask`**.
+- **`atlas-layout`, `atlas-layout-wasm`:** The render side (see Rendering below). They depend on no other atlas crate, so they never pull in the cloud SDK tree or stop building for `wasm32-unknown-unknown`.
 
-**Where a test lives:** with the code it exercises. A test that needs one provider's slice or projector lives in that provider crate and calls `<provider>_projector` directly (`atlas-<provider>/src/projector/tests.rs`). Only a test that needs the composed estate (several providers, cross-cloud seams, exhaustiveness guards) lives in `atlas-engine` against the public API (`atlas-engine/src/tests.rs`, `atlas-engine/tests/`).
+**Where a test lives:** with the code it exercises. A test that needs one provider's slice or projector lives in that provider crate and calls `<provider>_projector` directly (`crates/atlas-<provider>/src/projector/tests.rs`). Only a test that needs the composed estate (several providers, cross-cloud seams, exhaustiveness guards) lives in `atlas-engine` against the public API (`crates/atlas-engine/src/tests.rs`, `crates/atlas-engine/tests/`).
 
 ## Build, Run & Dev Orchestration
 
@@ -61,12 +62,12 @@ cargo xtask dev --demo      # wasm (if stale) → atlas-server :4681 → fronten
 cargo xtask dev             # real collection; forwards provider flags + --demo only
 cargo xtask wasm [--force]  # rebuild atlas-web/static/pkg/ (required after SNAPSHOT_VERSION bump)
 cargo xtask demo            # regenerate multi_cloud_demo.json and atlas-web/static/snapshot.json
-cargo xtask test [--e2e]    # nextest (root) → nextest (atlas-render) → biome → svelte-check → bun unit [→ playwright]
+cargo xtask test [--e2e]    # nextest (workspace) → biome → svelte-check → bun unit [→ atlas-server build → playwright]
 ```
 
 **Test runner:** `cargo nextest run --all-targets` (falls back to `cargo test --all-targets`; `--all-targets` compile-checks `examples/demo.rs` and `layout_demo.rs`; add `cargo test --doc` if doctests are introduced). Configured in `.config/nextest.toml` (`default`: fail-fast, 30 s slow warning; `-P ci`: full run, 1 retry).
 
-## Live Server (`atlas-server/`)
+## Live Server (`crates/atlas-server/`)
 
 `atlas-server` owns a persistent graph, reconciles on an interval (Tier 3 via `AtlasEngine::collect`), diffs (`patch::diff`), and broadcasts `GraphPatch`es over WebSocket without ever wiping the graph.
 
@@ -85,9 +86,9 @@ cargo run -p atlas-server -- --aws-event-queue <sqs-url> --aws-flow-log-queue <s
   - `Unauthorized` (bad/missing credentials, probed pre-fan-out in GCP `authenticate()`, Cloudflare `clients()`, `AzureApiClient::new()`, and per-region `atlas_aws::resolve_credentials`): `Retention::AUTH_BUDGET` (2), capped by `--retain-scans`. Applies only when *every* failure for that source was `Unauthorized` (`report.unreadable_kind`).
   - `Malformed` (drifted row in a readable response): **never enters `unreadable_sources()`** and holds nothing (`is_complete()` is false, but removals remain authoritative).
 
-### Demo Mode (`atlas-server/src/demo.rs`)
+### Demo Mode (`crates/atlas-server/src/demo.rs`)
 
-All credential-free behaviour (the scripted `Steady → Launched → Serving → Quiet → Outage` loop, once-a-cycle burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `with_web_04`, `web_04_flows`, `web_01_addresses`) lives in `atlas-aws/src/fixtures.rs`, read through `atlas_engine::fixtures`. Tracked in `docs/demo_design.md`.
+All credential-free behaviour (the scripted `Steady → Launched → Serving → Quiet → Outage` loop, once-a-cycle burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `with_web_04`, `web_04_flows`, `web_01_addresses`) lives in `crates/atlas-aws/src/fixtures.rs`, read through `atlas_engine::fixtures`. Tracked in `docs/demo_design.md`.
 
 - **No demo leakage into production defaults:** `Source::default_poll` / `default_flow_ttl` return 60 s and `FlowIndex::DEFAULT_TTL` (15 min) for `Live`, and `demo::POLL` / `demo::flow_ttl(poll)` for `Demo`. The script's stage lengths assume that TTL, so `--demo` ignores `--flow-ttl-secs` with a warning.
 - **Projector shapes only:** Demo mutations run through projectors (`the_live_change_is_a_shape_a_scan_produces`).
@@ -95,7 +96,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ### Tier 1: Live Event Feed (`--aws-event-queue`)
 
-`atlas_graph::event::ChangeEvent` + `EventApplier`; `atlas-aws/src/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
+`atlas_graph::event::ChangeEvent` + `EventApplier`; `crates/atlas-aws/src/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
 
 1. **Projector parity:** Adapters must emit only what the full-scan projector emits (`project_instance`/`InstanceFacts`, `project_interface`/`InterfaceFacts`, `use_aws_resource`/`use_global`). A Config item for a type in `TYPED_CONFIG_TYPES` becomes only its typed node, never also an `AwsConfigResource`. Types with no event key (keyed differently, like Route 53's `/hostedzone/` prefix and SQS URLs) and deferred `link_interface_owners` edges are omitted. Connectivity kinds go through the projector's `*Facts` helpers; an item whose recorded state the scan skips removes the node, and transit gateways (which record no state) only ever delete (`an_instance_event_produces_only_what_a_full_scan_would`, `an_interface_event_produces_only_what_a_full_scan_would`, `every_connectivity_event_produces_only_what_a_full_scan_would`).
 2. **Additive only:** Creates/modifies never remove unmentioned edges; deletes remove only the named node.
@@ -104,7 +105,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ### Tier 2: Liveness Overlay (`--aws-flow-log-queue`)
 
-`atlas_graph::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `atlas-aws/src/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
+`atlas_graph::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `crates/atlas-aws/src/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
 
 1. **Metrics beside the graph:** Flow edges carry `FlowStats` (`last_seen`, `packets`, `bytes`); nodes carry `Liveness` (`last_seen`, verdict, no volume to avoid multi-counting across up to 4 keys per record).
 2. **Ownerless pivots only:** Never invents typed nodes; creates only generic IP pivots.
@@ -117,14 +118,14 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 - **Overlay rendering:** Flow edges use verdict colour and log-scaled `packets` width; active nodes show a pulsing halo; packets animate on `canvas.traffic-layer` (excluded from the settled-graph stability test, verified by its own animation test). `Edge::Serves` styles by `inferred`/`confirmed` status (`SERVES_STATUS_COLORS`, `servesColor`/`servesSize` in `style.ts`) and never animates beads (`FLOW_KIND` filter). `GraphController::setServiceView` hides all non-`Serves` edges and untouched nodes via Sigma reducers. Search (`search.ts`, `setQuery`) dims non-matches; `focus` lights a node and its neighbours and flies the camera there; `TrafficLayer` mutes dimmed nodes.
 - **Endpoints:** `GET /snapshot.json` (v3: `nodes`, `edges`, `observations`), `GET /collection.json` (`complete`, `unreadable`, `retention`, `failures`, `stream`, `flows`; built by `health::value`), `GET /ws` (server pushes `snapshot`/`patch`, and `collection` after the snapshot and on every change; client sends `subscribe`, `get_snapshot`, `get_neighbors`). Frontend (`bun dev` on `:4680`) connects to `ws://<host>:4681/ws` (override with `?server=ws://…` or offline `?static`).
 
-## Rendering Workspace (`atlas-render/`)
+## Rendering (`crates/atlas-layout*`, `atlas-web/`)
 
-Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas-engine`. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `atlas-graph/src/export.rs`, `atlas-render/atlas-layout/src/graph.rs`, and `atlas-render/atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`).
+Workspace members that must never depend on another atlas crate. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `crates/atlas-graph/src/export.rs`, `crates/atlas-layout/src/graph.rs`, and `atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`). Details in [`docs/rendering.md`](docs/rendering.md).
 
 - `atlas-layout`: deterministic ForceAtlas2 (Barnes-Hut, flat `f32` buffer, optional `parallel` rayon feature).
-- `atlas-layout-wasm`: `wasm-bindgen` bridge.
+- `atlas-layout-wasm`: `wasm-bindgen` bridge, built by `bun run wasm` (`wasm-pack --profile wasm-release`). The browser artifact's LTO and single codegen unit live in the root `[profile.wasm-release]`, so `cargo build --release` of the CLI and server stays fast; never move them into `[profile.release]`.
 - `atlas-web`: SvelteKit + Sigma.js Bun app (`bun install && bun run wasm && bun dev`).
-- Test inside `atlas-render/` with `cargo nextest run`.
+- Tested by the root `cargo nextest run --workspace` like every other crate.
 
 ## Auth & Toolchain
 
@@ -133,11 +134,11 @@ Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas
 
 ## Established Helpers
 
-- **Fan-out (`atlas_provider::collector::run_all`):** Runs `Vec<NamedCollector<'_, T>>` concurrently, reporting `{scope}/{name}` failures. AWS and GCP use a local `collectors!` macro (`"name" => Collection::Variant, call(..)`); multi-field payloads use named structs (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `atlas-aws/src/definition.rs`).
+- **Fan-out (`atlas_provider::collector::run_all`):** Runs `Vec<NamedCollector<'_, T>>` concurrently, reporting `{scope}/{name}` failures. AWS and GCP use a local `collectors!` macro (`"name" => Collection::Variant, call(..)`); multi-field payloads use named structs (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `crates/atlas-aws/src/definition.rs`).
 - **Provider clients:**
-  - **AWS:** `atlas_aws::load_config(region)` once per region; register in `atlas-aws/src/provider.rs`. Account-wide APIs (Route 53, CloudFront, Direct Connect gateways) go in the `account_wide` list, which runs once per scan beside the regional scopes, on the first region's client, under scope `global`. Page with the SDK's `into_paginator().items()`; an operation without one (Route 53 record sets, EventBridge buses) loops by hand and fails on a cursor that does not advance.
-  - **GCP:** `GoogleApiClient::paginated_list` (`atlas-gcp/src/api/client.rs`); register in `atlas-gcp/src/provider.rs`. Every collector runs through `ProjectApis::unless_disabled`: a `SERVICE_DISABLED` error whose consumer is the scanned project's number (looked up once per project per scan) reads as empty; any other error, including one naming the caller's quota project, stays a failure.
-  - **Azure:** `AzureApiClient::query_graph` errors on missing/non-array `data` or `totalRecords > rows.len()`. `azure_types!` in `atlas-azure/src/provider.rs` drives the ARG filter and exhaustive `map_resources` dispatch (`leaf!` for `{id, name, location}`).
+  - **AWS:** `atlas_aws::load_config(region)` once per region; register in `crates/atlas-aws/src/provider.rs`. Account-wide APIs (Route 53, CloudFront, Direct Connect gateways) go in the `account_wide` list, which runs once per scan beside the regional scopes, on the first region's client, under scope `global`. Page with the SDK's `into_paginator().items()`; an operation without one (Route 53 record sets, EventBridge buses) loops by hand and fails on a cursor that does not advance.
+  - **GCP:** `GoogleApiClient::paginated_list` (`crates/atlas-gcp/src/api/client.rs`); register in `crates/atlas-gcp/src/provider.rs`. Every collector runs through `ProjectApis::unless_disabled`: a `SERVICE_DISABLED` error whose consumer is the scanned project's number (looked up once per project per scan) reads as empty; any other error, including one naming the caller's quota project, stays a failure.
+  - **Azure:** `AzureApiClient::query_graph` errors on missing/non-array `data` or `totalRecords > rows.len()`. `azure_types!` in `crates/atlas-azure/src/provider.rs` drives the ARG filter and exhaustive `map_resources` dispatch (`leaf!` for `{id, name, location}`).
   - **Cloudflare:** `CloudflareApiClient::get` / `get_paged` (cursor endpoints like R2) and `atlas_cloudflare::paginate(per_page, |page| ..)`. **Never stop paging on a short page.**
 - **Projectors:** `atlas_provider::projector::project_parallel` (per-scope rayon fan-out + ordered merge); `atlas_provider::project_leaf!` for leaf nodes; `GraphBuilder::link_to` / `link_from` (use `get_or_add_node`/`get_or_add_ref` only when reusing the index).
 - **Graph mutation:** `add_edge` deduplicates; `GraphBuilder::merge(&graph)` folds by node identity; `GraphBuilder::remove_node` repairs `node_map` after petgraph swap-remove (never call `graph.remove_node` directly); `patch::merge_additions` merges a subgraph and returns only newly added elements.

@@ -1,0 +1,16 @@
+[package]
+name = "atlas-layout-wasm"
+description = "wasm-bindgen bridge exposing the atlas-layout engine to JavaScript."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+atlas-layout.workspace = true
+js-sys.workspace = true
+wasm-bindgen.workspace = true

@@ -5,11 +5,9 @@ mod tests {
     use crate::fixtures;
     use crate::fixtures::{azure_id, azure_network, azure_networking_id, gcp_network};
     use crate::projector;
-    use atlas_graph::collection::CollectionSource;
     use atlas_graph::definition::{Edge, Node};
     use atlas_graph::graph_builder::GraphBuilder;
-    use atlas_graph::testing::{assert_edge, assert_resolves, link, public};
-    use atlas_graph::util::is_large_cidr;
+    use atlas_graph::testing::{all_sources, assert_edge, assert_resolves, link, public};
     use petgraph::visit::EdgeRef;
 
     fn record(zone: &str, name: &str, record_type: &str) -> Node {
@@ -205,32 +203,6 @@ mod tests {
 
     fn gcp_network_node() -> Node {
         Node::GcpComputeNetwork(gcp_network().into())
-    }
-
-    #[test]
-    fn a_link_address_is_scoped_to_the_subnet_both_ends_share() {
-        let link_scope = |address: &str| match link(address) {
-            Node::GenericPrivateIpAddress { network, address } => {
-                (network.to_string(), address.to_string())
-            }
-            other => panic!("{other:?} is not a private link address"),
-        };
-
-        assert_eq!(
-            link_scope("169.254.60.1/30"),
-            ("169.254.60.0/30".to_owned(), "169.254.60.1".to_owned())
-        );
-        assert_eq!(link_scope("169.254.60.2/30").0, "169.254.60.0/30");
-        assert_eq!(
-            link("203.0.113.1/31"),
-            public("203.0.113.1"),
-            "a public link address is the internet's own pivot"
-        );
-        assert_eq!(
-            Node::link_ip("169.254.60.1"),
-            None,
-            "without its prefix the link it sits on is unknown"
-        );
     }
 
     #[test]
@@ -637,39 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_nodes_merge() {
-        let mut builder = GraphBuilder::new();
-        let a = builder.get_or_add_node(Node::ip("10.0.0.1", fixtures::AWS_NETWORK));
-        let b = builder.get_or_add_node(Node::ip("10.0.0.1", fixtures::AWS_NETWORK));
-        assert_eq!(a, b);
-        assert_eq!(builder.graph.node_count(), 1);
-    }
-
-    #[test]
-    fn identical_edges_dedupe() {
-        let mut builder = GraphBuilder::new();
-        let a = builder.get_or_add_node(Node::ip("10.0.0.1", fixtures::AWS_NETWORK));
-        let b = builder.get_or_add_node(Node::GenericHostname("db.example.com".into()));
-        builder.add_edge(a, b, Edge::ResolvesTo);
-        builder.add_edge(a, b, Edge::ResolvesTo);
-        assert_eq!(builder.graph.edge_count(), 1);
-
-        builder.add_edge(a, b, Edge::RoutesTo);
-        assert_eq!(builder.graph.edge_count(), 2);
-    }
-
-    #[test]
-    fn large_cidrs_are_filtered() {
-        assert!(is_large_cidr("0.0.0.0/0"));
-        assert!(is_large_cidr("::/0"));
-        assert!(is_large_cidr("*"));
-        assert!(is_large_cidr("10.0.0.0/8"));
-        assert!(!is_large_cidr("10.20.0.5"));
-        assert!(!is_large_cidr("192.0.2.44/32"));
-        assert!(!is_large_cidr("10.0.0.0/16"));
-    }
-
-    #[test]
     fn render_snapshot_covers_whole_fixture_graph() {
         let builder = fixtures::build_graph();
         let snapshot = atlas_graph::export::render_snapshot(&builder.graph);
@@ -768,92 +707,6 @@ mod tests {
         assert!(!patch.removed_edges.is_empty());
     }
 
-    fn all_sources() -> std::collections::HashSet<CollectionSource> {
-        std::collections::HashSet::from([
-            CollectionSource::Aws,
-            CollectionSource::Gcp,
-            CollectionSource::Azure,
-            CollectionSource::Cloudflare,
-        ])
-    }
-
-    #[test]
-    fn carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot() {
-        use atlas_graph::patch::carry_forward;
-
-        let host = Node::GenericHostname("old.example.com".into());
-        let zone = Node::GcpDnsManagedZone("globex-zone".into());
-        let instance = Node::AwsEc2Instance("i-1".into());
-
-        let mut live = GraphBuilder::new();
-        let zone_idx = live.get_or_add_node(zone.clone());
-        live.link_to(zone_idx, host.clone(), Edge::ResolvesTo);
-        let instance_idx = live.get_or_add_node(instance.clone());
-        live.link_to(instance_idx, host.clone(), Edge::ConnectsTo);
-
-        let mut next = GraphBuilder::new();
-        next.get_or_add_node(zone.clone());
-
-        carry_forward(
-            &mut next,
-            &live.graph,
-            &std::collections::HashSet::from([CollectionSource::Aws]),
-        );
-
-        assert!(
-            next.has_edge(&instance, &host, &Edge::ConnectsTo),
-            "the unreadable source's edge must be retained"
-        );
-        assert!(
-            !next.has_edge(&zone, &host, &Edge::ResolvesTo),
-            "a healthy source's deleted edge must not be resurrected by the pivot it shares"
-        );
-    }
-
-    #[test]
-    fn carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records() {
-        use atlas_graph::patch::carry_forward;
-
-        let repointed = Node::CloudflareDnsRecord("rec-app".into());
-        let deleted = Node::CloudflareDnsRecord("rec-gone".into());
-        let (old_ip, new_ip) = (public("192.0.2.1"), public("192.0.2.2"));
-
-        let mut live = GraphBuilder::new();
-        for (record, name) in [
-            (&repointed, "app.example.com"),
-            (&deleted, "gone.example.com"),
-        ] {
-            let idx = live.get_or_add_node(record.clone());
-            live.link_from(idx, Node::hostname(name), Edge::ResolvesTo);
-            live.link_to(idx, old_ip.clone(), Edge::ResolvesTo);
-        }
-
-        let mut next = GraphBuilder::new();
-        let idx = next.get_or_add_node(repointed.clone());
-        next.link_from(idx, Node::hostname("app.example.com"), Edge::ResolvesTo);
-        next.link_to(idx, new_ip.clone(), Edge::ResolvesTo);
-
-        carry_forward(
-            &mut next,
-            &live.graph,
-            &std::collections::HashSet::from([CollectionSource::Aws]),
-        );
-
-        assert!(!next.has_edge(&repointed, &old_ip, &Edge::ResolvesTo));
-        assert!(!next.has_edge(
-            &Node::hostname("gone.example.com"),
-            &deleted,
-            &Edge::ResolvesTo
-        ));
-        assert!(
-            !next
-                .graph
-                .edge_references()
-                .any(|e| next.graph[e.target()] == old_ip),
-            "an unreadable AWS scan must not keep a healthy Cloudflare zone's old answer"
-        );
-    }
-
     #[test]
     fn carry_forward_restores_only_what_the_scan_is_missing() {
         use atlas_graph::export::{edge_key, node_key};
@@ -903,34 +756,6 @@ mod tests {
                 &Edge::Covers
             )));
         assert_eq!(patch.added_edges.len(), 2);
-    }
-
-    #[test]
-    fn carry_forward_drops_pivots_nothing_points_at_any_more() {
-        use atlas_graph::patch::carry_forward;
-
-        let anchored = Node::ip("10.0.0.1", fixtures::AWS_NETWORK);
-        let orphan = Node::GenericIpAddress("203.0.113.7".into());
-        let traffic_only = Node::GenericIpAddress("203.0.113.8".into());
-
-        let mut live = GraphBuilder::new();
-
-        let instance = live.get_or_add_node(Node::AwsEc2Instance("i-1".into()));
-        live.link_to(instance, anchored.clone(), Edge::ConnectsTo);
-
-        live.get_or_add_node(orphan.clone());
-
-        live.link_to(instance, traffic_only.clone(), Edge::TrafficFlow);
-
-        let mut next = GraphBuilder::new();
-        carry_forward(&mut next, &live.graph, &all_sources());
-
-        assert!(
-            next.contains(&anchored),
-            "a referenced pivot is still needed"
-        );
-        assert!(!next.contains(&orphan));
-        assert!(!next.contains(&traffic_only));
     }
 
     #[test]

@@ -79,7 +79,7 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
         Command::new("bun")
             .args(["run", "dev"])
             .env("PORT", opts.web_port.to_string())
-            .current_dir(root.join("atlas-render/atlas-web")),
+            .current_dir(root.join("atlas-web")),
         "web",
     );
     let web = match web {

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 export default function globalSetup() {
 	const here = dirname(fileURLToPath(import.meta.url));
 	const web = resolve(here, "..");
-	const repoRoot = resolve(here, "../../..");
+	const repoRoot = resolve(here, "../..");
 
 	execSync("cargo xtask wasm", { cwd: repoRoot, stdio: "inherit" });
 

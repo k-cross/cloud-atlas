@@ -282,3 +282,35 @@ kinds!(
     Covers,
     Serves,
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{link, public};
+
+    #[test]
+    fn a_link_address_is_scoped_to_the_subnet_both_ends_share() {
+        let link_scope = |address: &str| match link(address) {
+            Node::GenericPrivateIpAddress { network, address } => {
+                (network.to_string(), address.to_string())
+            }
+            other => panic!("{other:?} is not a private link address"),
+        };
+
+        assert_eq!(
+            link_scope("169.254.60.1/30"),
+            ("169.254.60.0/30".to_owned(), "169.254.60.1".to_owned())
+        );
+        assert_eq!(link_scope("169.254.60.2/30").0, "169.254.60.0/30");
+        assert_eq!(
+            link("203.0.113.1/31"),
+            public("203.0.113.1"),
+            "a public link address is the internet's own pivot"
+        );
+        assert_eq!(
+            Node::link_ip("169.254.60.1"),
+            None,
+            "without its prefix the link it sits on is unknown"
+        );
+    }
+}

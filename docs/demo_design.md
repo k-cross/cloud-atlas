@@ -7,7 +7,7 @@ The credential-free demo showcases Cloud Atlas without cloud accounts. **Keep th
 | Command | Role |
 |---|---|
 | `cargo run --example demo` | Fixture health check: projects `fixtures::build_graph()`, prints kind coverage, traffic overlay, and derived edges, writes `multi_cloud_demo.{dot,json}`, and exits non-zero if any kind is missing or the overlay is empty. |
-| `atlas-server --demo` | Serves the Globex fixtures live (`atlas-server/src/demo.rs`), polling every 5 s (`demo::POLL`) unless `--poll-secs` is set, and plays the scripted loop below. The second tick of each cycle (`demo::BURST_TICK`) injects a rejected SSH burst from `192.0.2.99` to `web-01` that expires three polls later. |
+| `atlas-server --demo` | Serves the Globex fixtures live (`crates/atlas-server/src/demo.rs`), polling every 5 s (`demo::POLL`) unless `--poll-secs` is set, and plays the scripted loop below. The second tick of each cycle (`demo::BURST_TICK`) injects a rejected SSH burst from `192.0.2.99` to `web-01` that expires three polls later. |
 | `cargo xtask dev --demo` | Runs Wasm build (if stale), `atlas-server --demo`, and the web UI. |
 | `cargo xtask demo` | Regenerates `multi_cloud_demo.json` and `atlas-web/static/snapshot.json` (used by `/?static` and offline mode; auto-run by `dev --demo` when older than any crate it is built from). |
 

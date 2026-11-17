@@ -4,7 +4,7 @@
 	"version": "0.0.1",
 	"type": "module",
 	"scripts": {
-		"wasm": "rm -rf ../atlas-web/static/pkg && wasm-pack build ../atlas-layout-wasm --target web --out-dir ../atlas-web/static/pkg",
+		"wasm": "rm -rf static/pkg && wasm-pack build ../crates/atlas-layout-wasm --target web --out-dir ../../atlas-web/static/pkg --profile wasm-release",
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",

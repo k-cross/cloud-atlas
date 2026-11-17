@@ -24,7 +24,7 @@ export default defineConfig({
 			stderr: "pipe",
 		},
 		{
-			command: `cargo run --manifest-path ../../Cargo.toml -p atlas-server -- --demo --poll-secs 2 --port ${SERVER_PORT}`,
+			command: `cargo run --manifest-path ../Cargo.toml -p atlas-server -- --demo --poll-secs 2 --port ${SERVER_PORT}`,
 			url: `http://localhost:${SERVER_PORT}/snapshot.json`,
 			reuseExistingServer: !process.env.CI,
 			timeout: 180_000,

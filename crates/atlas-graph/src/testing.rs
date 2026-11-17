@@ -1,6 +1,8 @@
+use crate::collection::CollectionSource;
 use crate::definition::{Edge, Node};
 use crate::graph_builder::GraphBuilder;
 use petgraph::visit::EdgeRef;
+use std::collections::HashSet;
 
 pub fn public(address: &str) -> Node {
     Node::public_ip(address).expect("a public address")
@@ -54,4 +56,13 @@ pub fn serves_any(builder: &GraphBuilder, pick: impl Fn(&Node, &Node) -> bool) -
         .edge_references()
         .filter(|e| e.weight() == &Edge::Serves)
         .any(|e| pick(&builder.graph[e.source()], &builder.graph[e.target()]))
+}
+
+pub fn all_sources() -> HashSet<CollectionSource> {
+    HashSet::from([
+        CollectionSource::Aws,
+        CollectionSource::Gcp,
+        CollectionSource::Azure,
+        CollectionSource::Cloudflare,
+    ])
 }

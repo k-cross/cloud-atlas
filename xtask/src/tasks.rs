@@ -67,11 +67,7 @@ pub fn cargo_test(dir: &Path, scope: &[&str]) -> Result<(), String> {
 }
 
 fn web_dir() -> PathBuf {
-    repo_root().join("atlas-render/atlas-web")
-}
-
-fn render_dir() -> PathBuf {
-    repo_root().join("atlas-render")
+    repo_root().join("atlas-web")
 }
 
 fn older_than_sources(artifact: &Path, sources: &[PathBuf]) -> bool {
@@ -97,18 +93,12 @@ fn newest_mtime(path: &Path) -> Option<SystemTime> {
 }
 
 pub fn ensure_wasm(force: bool) -> Result<(), String> {
-    let root = repo_root();
     let artifact = web_dir().join("static/pkg/atlas_layout_wasm_bg.wasm");
 
     let stale = force
         || older_than_sources(
             &artifact,
-            &[
-                root.join("atlas-render/atlas-layout/src"),
-                root.join("atlas-render/atlas-layout/Cargo.toml"),
-                root.join("atlas-render/atlas-layout-wasm/src"),
-                root.join("atlas-render/atlas-layout-wasm/Cargo.toml"),
-            ],
+            &crate_sources(&["atlas-layout", "atlas-layout-wasm"]),
         );
 
     if stale {
@@ -134,18 +124,25 @@ const DEMO_SOURCE_CRATES: &[&str] = &[
     "atlas-engine",
 ];
 
-pub fn ensure_demo_snapshot() -> Result<(), String> {
-    let root = repo_root();
-    let mut sources: Vec<PathBuf> = DEMO_SOURCE_CRATES
+fn crate_dir(name: &str) -> PathBuf {
+    repo_root().join("crates").join(name)
+}
+
+fn crate_sources(names: &[&str]) -> Vec<PathBuf> {
+    names
         .iter()
         .flat_map(|name| {
             [
-                root.join(name).join("src"),
-                root.join(name).join("Cargo.toml"),
+                crate_dir(name).join("src"),
+                crate_dir(name).join("Cargo.toml"),
             ]
         })
-        .collect();
-    sources.push(root.join("atlas-engine/examples"));
+        .collect()
+}
+
+pub fn ensure_demo_snapshot() -> Result<(), String> {
+    let mut sources = crate_sources(DEMO_SOURCE_CRATES);
+    sources.push(crate_dir("atlas-engine").join("examples"));
     if older_than_sources(&demo_json(), &sources) {
         println!("multi_cloud_demo.json is missing or older than its source crates — regenerating");
         demo_snapshot()
@@ -181,7 +178,6 @@ fn publish_demo_snapshot() -> Result<(), String> {
 pub fn test(e2e: bool) -> Result<(), String> {
     let root = repo_root();
     cargo_test(&root, &["--workspace"])?;
-    cargo_test(&render_dir(), &[])?;
 
     run(&web_dir(), "bun", &["run", "lint"])?;
     run(&web_dir(), "bun", &["run", "check"])?;
@@ -189,6 +185,7 @@ pub fn test(e2e: bool) -> Result<(), String> {
     if e2e {
         ensure_wasm(false)?;
         ensure_demo_snapshot()?;
+        run(&root, "cargo", &["build", "-p", "atlas-server"])?;
         run(&web_dir(), "bun", &["run", "test:e2e"])?;
     }
     println!(

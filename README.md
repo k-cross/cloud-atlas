@@ -6,10 +6,10 @@ Discovers cloud configuration and maintains a live, in-memory property graph of 
 
 - **Typed graph:** 99 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`. The model, patches, flow overlay, change events, and derived edges live in the SDK-free `atlas-graph` crate; each provider's collectors and projector in its own crate (`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`); the engine in `atlas-engine`.
 - **`AtlasEngine`:** Concurrent multi-cloud collection, structured failure reporting, and persistent graph state.
-- **Live backend (`atlas-server/`):** Reconciles against providers, diffs by stable resource key, and streams patches over WebSocket across three change tiers: control-plane event streams (Tier 1), flow-log liveness overlays (Tier 2), and full-scan polling (Tier 3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
+- **Live backend (`crates/atlas-server/`):** Reconciles against providers, diffs by stable resource key, and streams patches over WebSocket across three change tiers: control-plane event streams (Tier 1), flow-log liveness overlays (Tier 2), and full-scan polling (Tier 3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
 - **Liveness overlay:** Observed traffic lives beside the graph in a bounded, expiring `FlowIndex`. `Edge::TrafficFlow` asserts only that traffic occurred; counters and timestamps ride the snapshot's `observations` list.
 - **Service topology:** Derived `Edge::Serves` links collapse load balancer → interface → address → instance paths into direct resource edges, `inferred` from control-plane wiring and `confirmed` by traffic. See [`docs/service_topology_design.md`](docs/service_topology_design.md).
-- **Interactive rendering (`atlas-render/`):** Rust/WebAssembly ForceAtlas2 layout feeding a Sigma.js WebGL frontend. See [`atlas-render/README.md`](atlas-render/README.md).
+- **Interactive rendering (`crates/atlas-layout*`, `atlas-web/`):** Rust/WebAssembly ForceAtlas2 layout feeding a Sigma.js WebGL frontend. See [`docs/rendering.md`](docs/rendering.md).
 
 Shared pivots (`GenericHostname`, `GenericIpAddress`) stitch clouds together (e.g. Route 53 resolving to Azure App Service or GCP Cloud Run). Private addresses scope to their network (`GenericPrivateIpAddress`) and resolve across modelled peerings, transit gateways, Virtual WAN and NCC hubs, VPN tunnels and dedicated circuits, gated by each network's address space and by VPC and transit gateway route tables (`docs/network_connectivity_design.md`). DNS across all providers projects `name -ResolvesTo-> record -ResolvesTo-> target`.
 
@@ -51,7 +51,7 @@ cargo run --bin atlas -- --daemon --verbose                # re-scan every 60s
 
 In `--daemon` mode, unreadable sources are carried forward for a bounded number of scans rather than diffed as mass deletions.
 
-## Live Stack (`atlas-server` + `atlas-render`)
+## Live Stack (`atlas-server` + `atlas-web`)
 
 ```bash
 cargo xtask dev --demo    # credential-free: wasm → atlas-server :4681 → frontend :4680
@@ -67,4 +67,4 @@ cargo run -p atlas-server -- --regions us-east-1 \
   --aws-flow-log-queue https://sqs.us-east-1.amazonaws.com/111/atlas-flows
 ```
 
-See [`atlas-server/README.md`](atlas-server/README.md) and [`atlas-render/README.md`](atlas-render/README.md).
+See [`crates/atlas-server/README.md`](crates/atlas-server/README.md) and [`docs/rendering.md`](docs/rendering.md).

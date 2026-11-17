@@ -260,6 +260,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-layout"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "atlas-layout-wasm"
+version = "0.1.0"
+dependencies = [
+ "atlas-layout",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "atlas-provider"
 version = "0.1.0"
 dependencies = [

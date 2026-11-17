@@ -14,7 +14,7 @@ Control-plane APIs report what is *wired*; flow logs report what is *used*. Join
 
 ### AWS
 
-`atlas-aws/src/network_interface.rs` pages `DescribeNetworkInterfaces`. Every ENI projects its private, public, and IPv6 addresses, subnet, VPC, security groups, and instance attachment (`Instance -HasIp-> Eni -AttachedTo-> Subnet`), deduplicating with `project_instance` via `Node::ip`.
+`crates/atlas-aws/src/network_interface.rs` pages `DescribeNetworkInterfaces`. Every ENI projects its private, public, and IPv6 addresses, subnet, VPC, security groups, and instance attachment (`Instance -HasIp-> Eni -AttachedTo-> Subnet`), deduplicating with `project_instance` via `Node::ip`.
 
 Unambiguous interface descriptions link owners to their ENIs:
 
@@ -54,7 +54,7 @@ Cloudflare resources have no dedicated L3 addresses (Workers/DO use shared anyca
 
 ## 2. `Edge::Serves`
 
-Implemented in `atlas-graph/src/derive/service.rs`. Collapses paths like:
+Implemented in `crates/atlas-graph/src/derive/service.rs`. Collapses paths like:
 
 ```
 AwsElbLoadBalancer -HasIp-> AwsEc2Eni -ConnectsTo-> 10.10.1.50

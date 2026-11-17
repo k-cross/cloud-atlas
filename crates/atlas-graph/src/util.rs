@@ -111,3 +111,19 @@ pub fn canonical_hostname(value: &str) -> Option<String> {
     let trimmed = value.trim_end_matches('.');
     (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_cidrs_are_filtered() {
+        assert!(is_large_cidr("0.0.0.0/0"));
+        assert!(is_large_cidr("::/0"));
+        assert!(is_large_cidr("*"));
+        assert!(is_large_cidr("10.0.0.0/8"));
+        assert!(!is_large_cidr("10.20.0.5"));
+        assert!(!is_large_cidr("192.0.2.44/32"));
+        assert!(!is_large_cidr("10.0.0.0/16"));
+    }
+}

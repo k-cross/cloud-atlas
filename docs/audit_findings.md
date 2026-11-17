@@ -81,7 +81,7 @@ The Config collector called `ListDiscoveredResources` for every type the SDK kno
 - Tests: `records_sharing_a_name_stay_distinct_by_zone_and_type`, `a_private_answer_is_scoped_to_its_hosted_zone`, `a_record_naming_no_address_or_host_resolves_to_nothing`.
 
 ### Canonical GCP network keys
-GCP APIs return network references in three forms: full URLs on GCE instances, relative paths on Cloud SQL, and bare names (`default`) on GKE clusters. Keying `GcpComputeNetwork` by raw API strings split one VPC into multiple nodes. `atlas-gcp/src/projector.rs::canonical_network` normalises all references to `projects/P/global/networks/N`.
+GCP APIs return network references in three forms: full URLs on GCE instances, relative paths on Cloud SQL, and bare names (`default`) on GKE clusters. Keying `GcpComputeNetwork` by raw API strings split one VPC into multiple nodes. `crates/atlas-gcp/src/projector.rs::canonical_network` normalises all references to `projects/P/global/networks/N`.
 
 ### Transit gateway and peering connectors stay hubs
 Expanding a transit gateway with $k = 4{,}000$ attachments into $k^2$ pairwise network joins cost 4.7 s and 1.2 GB per derivation in release builds (running multiple times per reconcile). Keeping connectors as hubs in `derive/networks.rs` (`O(k)`) reduced derivation to 0.5 ms.
