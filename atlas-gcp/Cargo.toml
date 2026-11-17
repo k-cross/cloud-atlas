@@ -21,4 +21,5 @@ url.workspace = true
 yup-oauth2.workspace = true
 
 [dev-dependencies]
+atlas-graph = { workspace = true, features = ["test-support"] }
 wiremock.workspace = true

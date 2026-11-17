@@ -1,0 +1,29 @@
+[package]
+name = "atlas-engine"
+description = "Aggregates every provider: runs collection, projects and reconciles the graph, and assembles the Globex fixture estate."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords = ["AWS", "cloud", "graph", "infrastructure"]
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+atlas-aws.workspace = true
+atlas-azure.workspace = true
+atlas-cloudflare.workspace = true
+atlas-gcp.workspace = true
+atlas-graph.workspace = true
+atlas-provider.workspace = true
+petgraph.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+atlas-graph = { workspace = true, features = ["test-support"] }
+aws-sdk-ec2.workspace = true
+proptest.workspace = true
+serde_json.workspace = true

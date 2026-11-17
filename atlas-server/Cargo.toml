@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 atlas-graph.workspace = true
 atlas-aws.workspace = true
-atlas-lib.workspace = true
+atlas-engine.workspace = true
 axum = { workspace = true, features = ["ws"] }
 clap = { workspace = true, features = ["unicode"] }
 futures.workspace = true

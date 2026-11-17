@@ -13,4 +13,4 @@
 
 ## Testing
 
-No live cloud credentials exist locally. Projectors are tested against the "Globex" fixtures (`atlas-lib/src/fixtures.rs`); collectors are tested with canned HTTP/SDK responses (`wiremock` for reqwest, `StaticReplayClient` for AWS SDK). `cargo xtask test` runs all suites in order.
+No live cloud credentials exist locally. Projectors are tested against the "Globex" fixtures (each provider crate's `fixtures` slice, composed by `atlas_engine::fixtures`); collectors are tested with canned HTTP/SDK responses (`wiremock` for reqwest, `StaticReplayClient` for AWS SDK). `cargo xtask test` runs all suites in order.

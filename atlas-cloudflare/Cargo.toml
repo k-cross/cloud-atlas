@@ -21,4 +21,5 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+atlas-graph = { workspace = true, features = ["test-support"] }
 wiremock.workspace = true

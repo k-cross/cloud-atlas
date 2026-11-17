@@ -1,4 +1,5 @@
 pub mod collector;
+pub mod fixtures;
 pub mod projector;
 
 use atlas_graph::collection::CollectionReport;

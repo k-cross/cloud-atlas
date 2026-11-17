@@ -51,7 +51,7 @@ Tests in `demo.rs` replay the loop through `carry_forward`, `FlowIndex` and `der
 ## Invariants
 
 - **Projector-only shapes:** Demo mutations project fixture data (`fixtures::with_web_04` folds web-04 into the AWS scan; the outage omits Azure's collections and reports it, as `build_azure` does), never hand-built edges (`the_live_change_is_a_shape_a_scan_produces`).
-- **Fixture data in `atlas-lib`, cadence in `demo.rs`:** Poll interval and flow TTL come from `Source::default_poll` / `default_flow_ttl` so demo constants never leak into live defaults. Stage lengths are counted in TTLs of three polls, so `--demo` ignores `--flow-ttl-secs` with a warning; `--poll-secs` scales the whole loop.
+- **Fixture data in `atlas-aws` (read through `atlas_engine::fixtures`), cadence in `demo.rs`:** Poll interval and flow TTL come from `Source::default_poll` / `default_flow_ttl` so demo constants never leak into live defaults. Stage lengths are counted in TTLs of three polls, so `--demo` ignores `--flow-ttl-secs` with a warning; `--poll-secs` scales the whole loop.
 - **Traffic via `FlowIndex`:** `demo::graph` returns `fixtures::topology()`, never baking flows into the scan graph (`the_scan_graph_carries_no_traffic_of_its_own`).
 - **Continuous churn:** The graph changes at least every five ticks (`the_graph_changes_at_least_once_every_few_ticks`), which the Playwright tests `applies live patches as the demo graph churns` and `patches pin existing nodes` wait on.
 

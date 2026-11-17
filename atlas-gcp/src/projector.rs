@@ -542,3 +542,6 @@ fn interface_addresses(net: &NetworkInterface) -> Vec<&str> {
     }
     addresses
 }
+
+#[cfg(test)]
+mod tests;

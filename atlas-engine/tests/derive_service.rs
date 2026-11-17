@@ -1,3 +1,4 @@
+use atlas_engine::fixtures::{self, azure_networking_id};
 use atlas_graph::collection::CollectionSource;
 use atlas_graph::definition::{Edge, Node};
 use atlas_graph::derive::{
@@ -6,34 +7,13 @@ use atlas_graph::derive::{
 use atlas_graph::export::RenderObservation;
 use atlas_graph::flow::{FlowIndex, FlowObservation};
 use atlas_graph::graph_builder::GraphBuilder;
-use atlas_lib::atlas::projector;
-use atlas_lib::{Settings, fixtures};
+use atlas_graph::testing::{serves, serves_any};
 use petgraph::visit::EdgeRef;
-use std::collections::HashMap;
-
-fn serves(builder: &GraphBuilder, source: &Node, target: &Node) -> bool {
-    builder.has_edge(source, target, &Edge::Serves)
-}
 
 fn alb() -> Node {
     Node::AwsElbLoadBalancer(
         "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),
     )
-}
-
-// The projector folds a networking resource's id to one casing (Resource
-// Graph is not consistent about which casing it echoes an id back with),
-// so an expectation built from the fixture's own literal has to match.
-fn azure_networking_id(rest: &str) -> std::sync::Arc<str> {
-    fixtures::azure_id(rest).to_ascii_lowercase().into()
-}
-
-fn serves_any(builder: &GraphBuilder, pick: impl Fn(&Node, &Node) -> bool) -> bool {
-    builder
-        .graph
-        .edge_references()
-        .filter(|e| e.weight() == &Edge::Serves)
-        .any(|e| pick(&builder.graph[e.source()], &builder.graph[e.target()]))
 }
 
 // A flow log records the reply as its own record with the addresses swapped.
@@ -359,44 +339,6 @@ fn a_lapsed_flow_drops_a_wired_target_back_to_inferred() {
     );
 }
 
-// The chain is only as honest as the edges it walks. A stopped target keeps
-// its registration and its interface, and neither may bring it back.
-#[test]
-fn a_stopped_target_is_not_inferred() {
-    use atlas_aws::definition::AmazonCollection;
-    use atlas_lib::atlas::projector::Provider;
-
-    let stopped = Node::AwsEc2Instance("i-globex-web-03".into());
-    let Provider::AWS(collections) = fixtures::aws() else {
-        unreachable!("fixtures::aws is the AWS provider");
-    };
-    let without_web03 = collections
-        .into_iter()
-        .map(|(region, collection)| match collection {
-            AmazonCollection::AmazonInstances(instances) => (
-                region,
-                AmazonCollection::AmazonInstances(
-                    instances
-                        .into_iter()
-                        .filter(|i| i.instance_id() != Some("i-globex-web-03"))
-                        .collect(),
-                ),
-            ),
-            other => (region, other),
-        })
-        .collect();
-    let mut builder = GraphBuilder::new();
-    projector::build(
-        &mut builder,
-        &Provider::AWS(without_web03),
-        &Settings::default(),
-    );
-    derive::all(&mut builder, &FlowIndex::default());
-
-    assert!(builder.index_of(&stopped).is_none());
-    assert!(!serves_any(&builder, |_, target| target == &stopped));
-}
-
 #[test]
 fn a_private_address_resolves_across_a_vpn_tunnel() {
     let builder = fixtures::build_graph();
@@ -426,8 +368,8 @@ fn a_private_address_resolves_across_a_vpn_tunnel() {
 #[test]
 fn a_tunnel_whose_far_end_is_going_away_resolves_nothing() {
     use atlas_azure::definition::MicrosoftCollection;
+    use atlas_engine::projector::Provider;
     use atlas_gcp::definition::GoogleCollection;
-    use atlas_lib::atlas::projector::Provider;
 
     let azure_vm = Node::AzureVirtualMachine(azure_networking_id(
         "Microsoft.Compute/virtualMachines/vm-worker",
@@ -471,7 +413,7 @@ fn a_tunnel_whose_far_end_is_going_away_resolves_nothing() {
     );
 }
 
-fn estate_where(edit: impl FnMut(&mut atlas_lib::atlas::projector::Provider)) -> GraphBuilder {
+fn estate_where(edit: impl FnMut(&mut atlas_engine::projector::Provider)) -> GraphBuilder {
     let mut providers = fixtures::all();
     providers.iter_mut().for_each(edit);
     fixtures::build_graph_of(providers)
@@ -518,8 +460,8 @@ fn a_private_address_resolves_across_a_dedicated_circuit() {
 
 #[test]
 fn a_circuit_whose_far_end_is_going_away_resolves_nothing() {
+    use atlas_engine::projector::Provider;
     use atlas_gcp::definition::GoogleCollection;
-    use atlas_lib::atlas::projector::Provider;
 
     let attachments_defunct = estate_where(|provider| {
         if let Provider::GCP(collections) = provider {
@@ -550,196 +492,6 @@ fn a_circuit_whose_far_end_is_going_away_resolves_nothing() {
             &cloud_sql,
         ),
         "the VPN still reaches GCP"
-    );
-}
-
-fn overlapping_estate(target_running: bool) -> GraphBuilder {
-    let mut running = vec!["i-other"];
-    if target_running {
-        running.push("i-target");
-    }
-    ip_target_estate(
-        &[
-            ("eni-target", "vpc-a", "i-target"),
-            ("eni-other", "vpc-b", "i-other"),
-        ],
-        &running,
-        None,
-    )
-}
-
-fn peered_estate(target_running: bool) -> GraphBuilder {
-    let running: &[&str] = if target_running { &["i-target"] } else { &[] };
-    ip_target_estate(
-        &[("eni-target", "vpc-b", "i-target")],
-        running,
-        Some(("vpc-a", "vpc-b")),
-    )
-}
-
-fn ip_target_estate(
-    holders: &[(&str, &str, &str)],
-    running: &[&str],
-    peering: Option<(&str, &str)>,
-) -> GraphBuilder {
-    use atlas_aws::definition::{AWSConnectivity, AWSLoadBalancing, AmazonCollection};
-    use atlas_lib::atlas::projector::Provider;
-    use aws_sdk_ec2::types::{
-        Instance, NetworkInterface, NetworkInterfaceAttachment, NetworkInterfacePrivateIpAddress,
-        VpcPeeringConnection, VpcPeeringConnectionStateReason, VpcPeeringConnectionStateReasonCode,
-        VpcPeeringConnectionVpcInfo,
-    };
-    use aws_sdk_elasticloadbalancingv2::types::{
-        Action, Listener, LoadBalancer, TargetDescription, TargetGroup, TargetHealthDescription,
-        TargetTypeEnum,
-    };
-
-    let lb_arn = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/front/1";
-    let tg_arn = "arn:aws:elasticloadbalancing:us-east-1:123:targetgroup/back/1";
-    let interface = |id: &str, vpc: &str, instance: &str| {
-        NetworkInterface::builder()
-            .network_interface_id(id)
-            .vpc_id(vpc)
-            .subnet_id(format!("subnet-{vpc}"))
-            .private_ip_addresses(
-                NetworkInterfacePrivateIpAddress::builder()
-                    .private_ip_address("10.0.1.5")
-                    .build(),
-            )
-            .attachment(
-                NetworkInterfaceAttachment::builder()
-                    .instance_id(instance)
-                    .build(),
-            )
-            .build()
-    };
-    let running = running
-        .iter()
-        .map(|id| Instance::builder().instance_id(*id).build())
-        .collect();
-    let side = |vpc: &str| VpcPeeringConnectionVpcInfo::builder().vpc_id(vpc).build();
-    let peering_connections = peering
-        .map(|(requester, accepter)| {
-            VpcPeeringConnection::builder()
-                .vpc_peering_connection_id("pcx-ab")
-                .status(
-                    VpcPeeringConnectionStateReason::builder()
-                        .code(VpcPeeringConnectionStateReasonCode::Active)
-                        .build(),
-                )
-                .requester_vpc_info(side(requester))
-                .accepter_vpc_info(side(accepter))
-                .build()
-        })
-        .into_iter()
-        .collect();
-
-    let mut builder = GraphBuilder::new();
-    projector::build(
-        &mut builder,
-        &Provider::AWS(
-            [
-                AmazonCollection::AmazonNetworkInterfaces(
-                    holders
-                        .iter()
-                        .map(|(id, vpc, instance)| interface(id, vpc, instance))
-                        .collect(),
-                ),
-                AmazonCollection::AmazonInstances(running),
-                AmazonCollection::AmazonConnectivity(AWSConnectivity {
-                    peering_connections,
-                    ..Default::default()
-                }),
-                AmazonCollection::AmazonLoadBalancers(AWSLoadBalancing {
-                    load_balancers: vec![
-                        LoadBalancer::builder()
-                            .load_balancer_arn(lb_arn)
-                            .vpc_id("vpc-a")
-                            .build(),
-                    ],
-                    target_groups: vec![
-                        TargetGroup::builder()
-                            .target_group_arn(tg_arn)
-                            .target_type(TargetTypeEnum::Ip)
-                            .vpc_id("vpc-a")
-                            .build(),
-                    ],
-                    listeners: vec![
-                        Listener::builder()
-                            .load_balancer_arn(lb_arn)
-                            .default_actions(Action::builder().target_group_arn(tg_arn).build())
-                            .build(),
-                    ],
-                    target_health: HashMap::from([(
-                        tg_arn.to_owned(),
-                        vec![
-                            TargetHealthDescription::builder()
-                                .target(TargetDescription::builder().id("10.0.1.5").build())
-                                .build(),
-                        ],
-                    )]),
-                }),
-            ]
-            .into_iter()
-            .map(|collection| ("us-east-1".to_owned(), collection))
-            .collect(),
-        ),
-        &Settings::default(),
-    );
-    derive::all(&mut builder, &FlowIndex::default());
-    builder
-}
-
-fn front() -> Node {
-    Node::AwsElbLoadBalancer(
-        "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/net/front/1".into(),
-    )
-}
-
-#[test]
-fn an_ip_target_is_served_only_by_the_holder_in_its_own_network() {
-    let builder = overlapping_estate(true);
-
-    assert!(serves(
-        &builder,
-        &front(),
-        &Node::AwsEc2Instance("i-target".into())
-    ));
-    assert!(!serves(
-        &builder,
-        &front(),
-        &Node::AwsEc2Instance("i-other".into())
-    ));
-}
-
-#[test]
-fn a_stopped_ip_target_is_not_inferred() {
-    let builder = overlapping_estate(false);
-
-    assert!(
-        !serves_any(&builder, |source, _| source == &front()),
-        "the stopped instance's interface is not a service of its own"
-    );
-}
-
-#[test]
-fn an_ip_target_across_a_peering_is_served_by_its_running_holder() {
-    let builder = peered_estate(true);
-
-    assert!(serves(
-        &builder,
-        &front(),
-        &Node::AwsEc2Instance("i-target".into())
-    ));
-}
-
-#[test]
-fn a_stopped_ip_target_across_a_peering_is_not_inferred() {
-    let builder = peered_estate(false);
-
-    assert!(
-        !serves_any(&builder, |source, _| source == &front()),
-        "the join must not hand the stopped instance's interface the address"
     );
 }
 

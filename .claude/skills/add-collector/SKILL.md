@@ -12,5 +12,5 @@ Add a resource type to an existing provider. Ask for the provider and resource t
 4. **Projector (`src/projector.rs`):** Link via `link_to`/`link_from` or `atlas_provider::project_leaf!`. Pivot networking on ENIs (`Instance -HasIp-> ENI -AttachedTo-> Subnet`); build IP/hostname pivots via `Node::ip`/`Node::hostname` (`ConnectsTo` = holds IP, `ResolvesTo` = DNS, `RoutesTo` = traffic/rules); gate cross-collection AWS instance references on `scanned_instances`.
 5. **Tests & verification:**
    - Collector replay test (`atlas-{gcp,cloudflare,azure}/tests/collectors.rs` with `wiremock`, or `atlas-aws/src/collector_tests.rs` with `StaticReplayClient`), asserting projector-consumed fields.
-   - Add resource to `atlas-lib/src/fixtures.rs` (required by exhaustiveness guards) and assert projection in `atlas-lib/src/atlas/tests.rs`.
+   - Add the resource to the provider's Globex slice (`src/fixtures.rs`; required by exhaustiveness guards). A value another cloud also names, like a seam address, goes in `atlas-provider/src/fixtures.rs` so both slices read one constant. Assert its projection in `src/projector/tests.rs` (calling `<provider>_projector` directly); only a cross-cloud assertion goes in `atlas-engine/src/tests.rs`.
    - Run `cargo nextest run --all-targets`, `cargo run --example demo`, and `cargo clippy`.

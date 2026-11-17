@@ -919,7 +919,7 @@ proptest! {
         unreadable in prop::collection::hash_set(source(), 0..4),
         dropped in prop::collection::hash_set(source(), 0..4),
     ) {
-        let live = atlas_lib::fixtures::build_graph().graph;
+        let live = atlas_engine::fixtures::build_graph().graph;
 
         let mut trimmed = live.clone();
         trimmed.retain_nodes(|g, i| {

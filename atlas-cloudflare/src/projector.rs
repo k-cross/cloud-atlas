@@ -112,3 +112,6 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

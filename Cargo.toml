@@ -8,7 +8,7 @@ members = [
   "atlas-azure",
   "atlas-cloudflare",
   "atlas-gcp",
-  "atlas-lib",
+  "atlas-engine",
   "atlas-cli",
   "atlas-server",
   "xtask",
@@ -33,9 +33,9 @@ documentation = "https://github.com/k-cross/cloud-atlas"
 atlas-aws = { path = "atlas-aws" }
 atlas-azure = { path = "atlas-azure" }
 atlas-cloudflare = { path = "atlas-cloudflare" }
+atlas-engine = { path = "atlas-engine" }
 atlas-gcp = { path = "atlas-gcp" }
 atlas-graph = { path = "atlas-graph" }
-atlas-lib = { path = "atlas-lib" }
 atlas-provider = { path = "atlas-provider" }
 
 aws-config = "1.0"

@@ -22,5 +22,6 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+atlas-graph = { workspace = true, features = ["test-support"] }
 proptest.workspace = true
 wiremock.workspace = true

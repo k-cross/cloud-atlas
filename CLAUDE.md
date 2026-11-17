@@ -18,7 +18,7 @@ Cloud Atlas maintains a **continuous live property graph** of multi-cloud infras
 
 ## Testing Without Cloud Credentials
 
-Never call live cloud APIs in tests. Projectors test against the "Globex" estate (`atlas-lib/src/fixtures.rs`), which populates every provider collection and cross-cloud seam.
+Never call live cloud APIs in tests. Projectors test against the "Globex" estate, which populates every provider collection and cross-cloud seam. Each provider crate's `fixtures` module holds its slice (`collections()`; Cloudflare's `collection()`) and the identifiers only it names. `atlas_provider::fixtures` holds what the slices share: the estate's scan scopes (`REGION`, `GCP_PROJECT`, `AZURE_SUBSCRIPTION`, `settings()`) and every cross-cloud seam address (VPN, Direct Connect, and ExpressRoute ends, spoke and Cloud SQL ranges), so both sides of a seam read one constant. `atlas_engine::fixtures` composes the slices into `Provider`s (`all()`, `build_graph()`, `topology()`) and re-exports the slice items engine-level code reads; engine-level code imports fixture items only through it.
 
 - `cargo nextest run` enforces exhaustiveness guards: every `Node` and `Edge` kind must appear in the fixture graph.
 - `cargo run --example demo` projects fixtures + Tier-2 overlay (`fixtures::build_graph()`, combining `fixtures::topology()` and `fixtures::observed()`), writes `multi_cloud_demo.{dot,json}`, prints kind coverage, flows, and derived `Serves` edges, and exits non-zero if any kind is missing or the overlay is empty.
@@ -37,13 +37,13 @@ All model fields are `Option<T>` and serde ignores unknown fields, so a drifted 
 
 Shared package metadata and every third-party version live in the root `Cargo.toml` (`[workspace.package]`, `[workspace.dependencies]`). Members declare `dep.workspace = true` and add crate-specific features locally (`clap = { workspace = true, features = ["unicode"] }`); never pin a version in a member manifest.
 
-- **`atlas-graph`:** Cloud-agnostic core: `definition` (`Node`/`Edge`, `nodes!`), `util`, `graph_builder`, `export` (`SNAPSHOT_VERSION`), `collection` (`CollectionSource`, `CollectionReport`, `FailureKind`), `patch`, `flow`, `event`, `derive` (`all`, `held_addresses`, `address_owners`, `CONFIRMED`/`INFERRED`). Depends only on `petgraph` and `serde`; never add a cloud SDK, HTTP client, or `atlas-lib` dependency. Its unit tests build graphs by hand.
-- **`atlas-provider`:** What every provider crate shares: `Settings`, `ProviderScan<T>`, `collector::{run_all, NamedCollector}`, and the projection helpers (`projector::{project_parallel, link_bgp_session}`, `project_leaf!`). Depends only on `atlas-graph`.
-- **`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`:** One crate per provider: collectors (GCP and Azure keep API models under `api/`), `definition` (`<Provider>Collection` and its payload structs), `projector` (`<provider>_projector`), and `provider::build_<provider>`. `atlas-aws` also owns the Tier 1/2 feeds (`events`, `flow_logs`). Each depends only on `atlas-graph`, `atlas-provider`, and its own SDK/HTTP crates; a provider crate never depends on another provider or on `atlas-lib`.
-- **`atlas-lib`:** The aggregate over every provider: `Provider` and `build` (`atlas::projector`), `AtlasEngine`, and the Globex `fixtures`. Re-exports `Settings` as the engine's input; consumers import graph and provider types from their own crates directly.
+- **`atlas-graph`:** Cloud-agnostic core: `definition` (`Node`/`Edge`, `nodes!`), `util`, `graph_builder`, `export` (`SNAPSHOT_VERSION`), `collection` (`CollectionSource`, `CollectionReport`, `FailureKind`), `patch`, `flow`, `event`, `derive` (`all`, `held_addresses`, `address_owners`, `CONFIRMED`/`INFERRED`). Depends only on `petgraph` and `serde`; never add a cloud SDK, HTTP client, or `atlas-engine` dependency. Its unit tests build graphs by hand. The `test-support` feature exposes `testing` (`assert_edge`, `assert_has_node`, `assert_resolves`, `public`, `link`, `serves`, `serves_any`); crates enable it only under `[dev-dependencies]`.
+- **`atlas-provider`:** What every provider crate shares: `Settings`, `ProviderScan<T>`, `collector::{run_all, NamedCollector}`, the projection helpers (`projector::{project_parallel, link_bgp_session}`, `project_leaf!`), and the estate-wide `fixtures`. Depends only on `atlas-graph`.
+- **`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`:** One crate per provider: collectors (GCP and Azure keep API models under `api/`), `definition` (`<Provider>Collection` and its payload structs), `projector` (`<provider>_projector`), `provider::build_<provider>`, and its Globex slice in `fixtures`. `atlas-aws` also owns the Tier 1/2 feeds (`events`, `flow_logs`) and the flow fixtures over its slice (`flows`, `observed`, `burst_flow`, `with_web_04`). Each depends only on `atlas-graph`, `atlas-provider`, and its own SDK/HTTP crates; a provider crate never depends on another provider or on `atlas-engine`.
+- **`atlas-engine`:** The aggregate over every provider: `projector::{Provider, build}`, `engine::AtlasEngine`, and `fixtures` (the composed estate). Re-exports `Settings` as the engine's input; consumers import graph and provider types from their own crates directly. Depends on no SDK crate itself.
 - **`atlas-cli`** (`atlas` binary), **`atlas-server`** (also depends on `atlas-aws` for the event and flow-log queues), **`xtask`**.
 
-**Where a test lives:** with the code it exercises, unless it needs the Globex fixtures, which sit above every provider. Such a test goes in `atlas-lib` against the public API (`atlas-lib/tests/derive_service.rs`, `atlas-lib/tests/flow_logs.rs`, `atlas/tests.rs`). A test that only needs one provider's projector calls `<provider>_projector` directly instead of `atlas_lib::atlas::projector::build`.
+**Where a test lives:** with the code it exercises. A test that needs one provider's slice or projector lives in that provider crate and calls `<provider>_projector` directly (`atlas-<provider>/src/projector/tests.rs`). Only a test that needs the composed estate (several providers, cross-cloud seams, exhaustiveness guards) lives in `atlas-engine` against the public API (`atlas-engine/src/tests.rs`, `atlas-engine/tests/`).
 
 ## Build, Run & Dev Orchestration
 
@@ -87,7 +87,7 @@ cargo run -p atlas-server -- --aws-event-queue <sqs-url> --aws-flow-log-queue <s
 
 ### Demo Mode (`atlas-server/src/demo.rs`)
 
-All credential-free behaviour (the scripted `Steady → Launched → Serving → Quiet → Outage` loop, once-a-cycle burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `with_web_04`, `web_04_flows`, `web_01_addresses`) lives in `atlas-lib/src/fixtures.rs`. Tracked in `docs/demo_design.md`.
+All credential-free behaviour (the scripted `Steady → Launched → Serving → Quiet → Outage` loop, once-a-cycle burst flow, 5 s poll, flow TTL, seed graph) lives in `demo.rs`; fixture data (`flows`, `burst_flow`, `with_web_04`, `web_04_flows`, `web_01_addresses`) lives in `atlas-aws/src/fixtures.rs`, read through `atlas_engine::fixtures`. Tracked in `docs/demo_design.md`.
 
 - **No demo leakage into production defaults:** `Source::default_poll` / `default_flow_ttl` return 60 s and `FlowIndex::DEFAULT_TTL` (15 min) for `Live`, and `demo::POLL` / `demo::flow_ttl(poll)` for `Demo`. The script's stage lengths assume that TTL, so `--demo` ignores `--flow-ttl-secs` with a warning.
 - **Projector shapes only:** Demo mutations run through projectors (`the_live_change_is_a_shape_a_scan_produces`).
@@ -119,7 +119,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ## Rendering Workspace (`atlas-render/`)
 
-Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas-lib`. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `atlas-graph/src/export.rs`, `atlas-render/atlas-layout/src/graph.rs`, and `atlas-render/atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`).
+Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas-engine`. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `atlas-graph/src/export.rs`, `atlas-render/atlas-layout/src/graph.rs`, and `atlas-render/atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`).
 
 - `atlas-layout`: deterministic ForceAtlas2 (Barnes-Hut, flat `f32` buffer, optional `parallel` rayon feature).
 - `atlas-layout-wasm`: `wasm-bindgen` bridge.

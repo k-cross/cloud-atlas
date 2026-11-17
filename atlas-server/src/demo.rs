@@ -1,7 +1,7 @@
+use atlas_engine::fixtures;
 use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use atlas_graph::flow::FlowObservation;
 use atlas_graph::graph_builder::GraphBuilder;
-use atlas_lib::fixtures;
 use std::time::Duration;
 
 pub const POLL: Duration = Duration::from_secs(5);

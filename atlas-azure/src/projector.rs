@@ -593,3 +593,6 @@ fn link_rule_destinations(builder: &mut GraphBuilder, azure_data: &[MicrosoftCol
 fn is_service_tag(tag: &str) -> bool {
     !tag.contains('.') && !tag.contains(':') && tag != "*"
 }
+
+#[cfg(test)]
+mod tests;

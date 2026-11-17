@@ -303,18 +303,7 @@ fn holders(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn serves(builder: &GraphBuilder, source: &Node, target: &Node) -> bool {
-        builder.has_edge(source, target, &Edge::Serves)
-    }
-
-    fn serves_any(builder: &GraphBuilder, pick: impl Fn(&Node, &Node) -> bool) -> bool {
-        builder
-            .graph
-            .edge_references()
-            .filter(|e| e.weight() == &Edge::Serves)
-            .any(|e| pick(&builder.graph[e.source()], &builder.graph[e.target()]))
-    }
+    use crate::testing::{serves, serves_any};
 
     fn connect(builder: &mut GraphBuilder, connector: Node, networks: &[&str]) {
         let index = builder.get_or_add_node(connector);

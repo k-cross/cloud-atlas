@@ -12,7 +12,7 @@ keywords = ["AWS", "cloud", "graph", "infrastructure"]
 readme = "README.md"
 
 [dependencies]
-atlas-lib.workspace = true
+atlas-engine.workspace = true
 clap = { workspace = true, features = ["unicode"] }
 tokio.workspace = true
 tracing-subscriber.workspace = true

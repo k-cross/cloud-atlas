@@ -2,6 +2,7 @@ pub mod d1;
 pub mod definition;
 pub mod dns;
 pub mod durable_objects;
+pub mod fixtures;
 pub mod kv;
 pub mod projector;
 pub mod provider;

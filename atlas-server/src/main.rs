@@ -8,9 +8,9 @@ mod ws;
 
 use crate::poll::Source;
 use crate::state::AppState;
+use atlas_engine::engine::AtlasEngine;
 use atlas_graph::flow::FlowIndex;
 use atlas_graph::patch::Retention;
-use atlas_lib::atlas::engine::AtlasEngine;
 use clap::Parser;
 use std::time::Duration;
 
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (initial, report) = demo::scan(0);
         (initial, report, Source::Demo)
     } else {
-        let settings = atlas_lib::Settings {
+        let settings = atlas_engine::Settings {
             regions: opt.regions,
             gcp_projects: opt.gcp_projects,
             azure_subscriptions: opt.azure_subscriptions,

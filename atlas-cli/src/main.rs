@@ -1,4 +1,4 @@
-use atlas_lib::atlas::engine::AtlasEngine;
+use atlas_engine::engine::AtlasEngine;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing_subscriber::fmt::init();
     }
 
-    let settings = atlas_lib::Settings {
+    let settings = atlas_engine::Settings {
         regions: opts.regions,
         gcp_projects: opts.gcp_projects,
         azure_subscriptions: opts.azure_subscriptions,

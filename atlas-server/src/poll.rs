@@ -3,6 +3,7 @@ use crate::health;
 use crate::state::AppState;
 use crate::stream;
 use atlas_aws::flow_logs::InterfaceNetworks;
+use atlas_engine::engine::AtlasEngine;
 use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use atlas_graph::definition::{Edge, Node};
 use atlas_graph::derive::{self, DerivedObservations};
@@ -10,7 +11,6 @@ use atlas_graph::event::{ChangeEvent, EventApplier};
 use atlas_graph::flow::{FlowIndex, FlowObservation};
 use atlas_graph::graph_builder::GraphBuilder;
 use atlas_graph::patch::{GraphPatch, Retention, carry_forward, diff, merge_additions};
-use atlas_lib::atlas::engine::AtlasEngine;
 use petgraph::graph::Graph;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -308,11 +308,11 @@ async fn ingest(state: &AppState, applier: &mut EventApplier, batch: stream::Bat
 mod tests {
     use super::*;
 
+    use atlas_engine::fixtures::{self, AWS_NETWORK};
     use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
     use atlas_graph::event::ChangeOp;
     use atlas_graph::export::{edge_key, node_key};
     use atlas_graph::flow::FlowAction;
-    use atlas_lib::fixtures::{self, AWS_NETWORK};
 
     const T0: i64 = 1_788_436_800_000;
 
@@ -716,7 +716,7 @@ mod tests {
     fn a_lapsed_flow_leaves_the_wiring_behind() {
         use atlas_graph::derive;
 
-        let scan = atlas_lib::fixtures::topology;
+        let scan = atlas_engine::fixtures::topology;
         let served = edge_key(
             &node_key(&Node::AwsElbLoadBalancer(
                 "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1".into(),

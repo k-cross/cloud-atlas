@@ -4,7 +4,7 @@
 
 All four providers collect, all three change-detection tiers run for AWS, and the full stack runs credential-free in demo mode.
 
-- **Provider crates (`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`):** Collectors and projectors, aggregated by `atlas-lib`; 99 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
+- **Provider crates (`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`):** Collectors, projectors, and Globex fixture slices, aggregated by `atlas-engine`; 99 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
 - **Tier 1 (Events):** `atlas_graph::event` + `atlas-aws/src/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
 - **Tier 2 (Flows):** `atlas_graph::flow` + `atlas-aws/src/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
 - **Tier 3 (Reconciliation):** `patch::diff` over a persistent graph; `CollectionReport` + `carry_forward` + `Retention` distinguish collection failures from deletions.

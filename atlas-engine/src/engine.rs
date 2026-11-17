@@ -1,5 +1,5 @@
 use crate::Settings;
-use crate::atlas::projector::{self, Provider};
+use crate::projector::{self, Provider};
 use atlas_aws::provider::build_aws;
 use atlas_azure::provider::build_azure;
 use atlas_cloudflare::provider::build_cloudflare;

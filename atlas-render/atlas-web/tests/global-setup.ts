@@ -11,6 +11,6 @@ export default function globalSetup() {
 	execSync("cargo xtask wasm", { cwd: repoRoot, stdio: "inherit" });
 
 	const demo = resolve(repoRoot, "multi_cloud_demo.json");
-	execSync("cargo run -p atlas-lib --example demo", { cwd: repoRoot, stdio: "inherit" });
+	execSync("cargo run -p atlas-engine --example demo", { cwd: repoRoot, stdio: "inherit" });
 	copyFileSync(demo, resolve(web, "static/snapshot.json"));
 }

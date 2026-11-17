@@ -2,7 +2,7 @@
 
 Interactive rendering workspace: a Rust/WebAssembly ForceAtlas2 layout engine (`atlas-layout`, `atlas-layout-wasm`) and a SvelteKit + Sigma.js WebGL frontend (`atlas-web`).
 
-This is a **separate Cargo workspace** that never depends on `atlas-lib` (whose cloud SDK dependencies do not target `wasm32-unknown-unknown`). The sole contract is the versioned **render snapshot** and matching `GraphPatch`:
+This is a **separate Cargo workspace** that never depends on `atlas-engine` (whose cloud SDK dependencies do not target `wasm32-unknown-unknown`). The sole contract is the versioned **render snapshot** and matching `GraphPatch`:
 
 ```json
 {

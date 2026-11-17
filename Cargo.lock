@@ -194,7 +194,7 @@ dependencies = [
 name = "atlas-cli"
 version = "0.1.0"
 dependencies = [
- "atlas-lib",
+ "atlas-engine",
  "clap",
  "tokio",
  "tracing-subscriber",
@@ -214,6 +214,23 @@ dependencies = [
  "tokio",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "atlas-engine"
+version = "0.1.0"
+dependencies = [
+ "atlas-aws",
+ "atlas-azure",
+ "atlas-cloudflare",
+ "atlas-gcp",
+ "atlas-graph",
+ "atlas-provider",
+ "aws-sdk-ec2",
+ "petgraph",
+ "proptest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -243,42 +260,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atlas-lib"
-version = "0.1.0"
-dependencies = [
- "atlas-aws",
- "atlas-azure",
- "atlas-cloudflare",
- "atlas-gcp",
- "atlas-graph",
- "atlas-provider",
- "aws-config",
- "aws-credential-types",
- "aws-sdk-apigateway",
- "aws-sdk-cloudfront",
- "aws-sdk-config",
- "aws-sdk-directconnect",
- "aws-sdk-ec2",
- "aws-sdk-ecs",
- "aws-sdk-eks",
- "aws-sdk-elasticloadbalancingv2",
- "aws-sdk-eventbridge",
- "aws-sdk-lambda",
- "aws-sdk-rds",
- "aws-sdk-route53",
- "aws-sdk-sns",
- "aws-smithy-runtime",
- "aws-smithy-types",
- "cloudflare",
- "flate2",
- "http 1.5.0",
- "petgraph",
- "proptest",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "atlas-provider"
 version = "0.1.0"
 dependencies = [
@@ -293,8 +274,8 @@ name = "atlas-server"
 version = "0.1.0"
 dependencies = [
  "atlas-aws",
+ "atlas-engine",
  "atlas-graph",
- "atlas-lib",
  "axum",
  "clap",
  "futures",

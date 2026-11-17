@@ -1,7 +1,7 @@
+use atlas_engine::fixtures;
 use atlas_graph::definition::{Edge, Node};
 use atlas_graph::derive;
 use atlas_graph::export::{RenderObservation, render_snapshot_with};
-use atlas_lib::fixtures;
 use petgraph::dot::Dot;
 use std::collections::BTreeMap;
 use std::fs;

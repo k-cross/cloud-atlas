@@ -131,7 +131,7 @@ const DEMO_SOURCE_CRATES: &[&str] = &[
     "atlas-azure",
     "atlas-cloudflare",
     "atlas-gcp",
-    "atlas-lib",
+    "atlas-engine",
 ];
 
 pub fn ensure_demo_snapshot() -> Result<(), String> {
@@ -145,7 +145,7 @@ pub fn ensure_demo_snapshot() -> Result<(), String> {
             ]
         })
         .collect();
-    sources.push(root.join("atlas-lib/examples"));
+    sources.push(root.join("atlas-engine/examples"));
     if older_than_sources(&demo_json(), &sources) {
         println!("multi_cloud_demo.json is missing or older than its source crates — regenerating");
         demo_snapshot()
@@ -158,7 +158,7 @@ pub fn demo_snapshot() -> Result<(), String> {
     run(
         &repo_root(),
         "cargo",
-        &["run", "-p", "atlas-lib", "--example", "demo"],
+        &["run", "-p", "atlas-engine", "--example", "demo"],
     )?;
     publish_demo_snapshot()
 }

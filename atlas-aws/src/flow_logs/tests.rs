@@ -1,8 +1,11 @@
 use super::stream::{FlowLogQueue, decompress, objects};
 use super::*;
+use crate::projector::aws_projector;
 use atlas_graph::collection::CollectionReport;
 use atlas_graph::definition::Edge;
+use atlas_graph::flow::FlowIndex;
 use atlas_graph::graph_builder::GraphBuilder;
+use atlas_provider::Settings;
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
@@ -112,6 +115,24 @@ fn the_default_field_set_still_attributes_through_the_interface_alone() {
 }
 
 #[test]
+fn an_unknown_interface_earns_no_node() {
+    let Parsed { observations, .. } =
+        parsed(&default_record("10.10.1.10", "198.51.100.10", "ACCEPT"));
+    let mut index = FlowIndex::default();
+    index.observe(&observations[0]);
+
+    let mut graph = GraphBuilder::new();
+    aws_projector(
+        &mut graph,
+        &crate::fixtures::collections(),
+        &fixture_settings(),
+    );
+    index.overlay(&mut graph);
+
+    assert!(!graph.contains(&Node::AwsEc2Eni("eni-0abc".into())));
+}
+
+#[test]
 fn a_layout_that_cannot_place_a_flow_loses_the_whole_object_and_says_so() {
     let object = "\
 version srcport dstport protocol
@@ -170,6 +191,43 @@ fn a_truncated_line_is_dropped_and_counted() {
 
     assert_eq!(observations.len(), 1);
     assert_eq!(unusable, 1);
+}
+
+#[test]
+fn parsed_flows_become_traffic_edges_over_the_scanned_topology() {
+    let mut graph = fixture_topology();
+    let Parsed { observations, .. } = parse(
+        &record_at(
+            "eni-globex-web-01a",
+            "10.10.1.10",
+            "198.51.100.10",
+            "ACCEPT",
+        ),
+        SCOPE,
+        usize::MAX,
+        &InterfaceNetworks::read(&graph.graph),
+    );
+
+    let mut index = FlowIndex::default();
+    for observation in &observations {
+        index.observe(observation);
+    }
+    index.overlay(&mut graph);
+
+    let held = Node::ip("10.10.1.10", crate::fixtures::AWS_NETWORK);
+    assert!(graph.has_edge(
+        &Node::AwsEc2Eni("eni-globex-web-01a".into()),
+        &held,
+        &Edge::ConnectsTo
+    ));
+    assert!(
+        graph.has_edge(
+            &held,
+            &Node::public_ip("198.51.100.10").unwrap(),
+            &Edge::TrafficFlow
+        ),
+        "the record lands on the address its interface holds"
+    );
 }
 
 #[test]
@@ -355,6 +413,54 @@ fn a_parquet_object_says_what_is_wrong_with_it() {
 }
 
 #[tokio::test]
+async fn a_queued_object_reaches_the_graph_as_traffic_edges() {
+    let object = format!(
+        "{}\n{}",
+        record_at(
+            "eni-globex-web-01a",
+            "10.10.1.10",
+            "198.51.100.10",
+            "ACCEPT"
+        ),
+        record_at("eni-globex-web-02a", "10.10.1.11", "203.0.113.7", "REJECT"),
+    );
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (OK, gzip(&object)),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http).await;
+    let mut graph = fixture_topology();
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::read(&graph.graph))
+        .await;
+
+    assert!(
+        batch.report.is_complete(),
+        "clean drain: {}",
+        batch.report.summary()
+    );
+    assert_eq!(batch.observations.len(), 2);
+
+    let mut index = FlowIndex::default();
+    for observation in &batch.observations {
+        index.observe(observation);
+    }
+    index.overlay(&mut graph);
+
+    assert!(graph.has_edge(
+        &Node::ip("10.10.1.10", crate::fixtures::AWS_NETWORK),
+        &Node::public_ip("198.51.100.10").unwrap(),
+        &Edge::TrafficFlow
+    ));
+    assert!(
+        graph.contains(&Node::public_ip("203.0.113.7").unwrap()),
+        "an address no scan reported still earns the generic pivot node"
+    );
+}
+
+#[tokio::test]
 async fn a_record_with_no_network_is_reported_without_holding_the_feed_back() {
     let http = replay(vec![
         (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
@@ -487,6 +593,20 @@ async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
 }
 
 const OK: u16 = 200;
+
+fn fixture_settings() -> Settings {
+    atlas_provider::fixtures::settings()
+}
+
+fn fixture_topology() -> GraphBuilder {
+    let mut graph = GraphBuilder::new();
+    aws_projector(
+        &mut graph,
+        &crate::fixtures::collections(),
+        &fixture_settings(),
+    );
+    graph
+}
 
 fn gzip(text: &str) -> Vec<u8> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
