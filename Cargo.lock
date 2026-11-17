@@ -136,30 +136,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "atlas-cli"
-version = "0.1.0"
-dependencies = [
- "atlas-lib",
- "clap",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "atlas-graph"
-version = "0.1.0"
-dependencies = [
- "petgraph",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "atlas-lib"
+name = "atlas-aws"
 version = "0.1.0"
 dependencies = [
  "atlas-graph",
+ "atlas-provider",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-apigateway",
@@ -180,17 +161,68 @@ dependencies = [
  "aws-sdk-sqs",
  "aws-smithy-runtime",
  "aws-smithy-types",
- "azure_core",
- "azure_identity",
  "ciborium",
- "cloudflare",
  "flate2",
  "futures",
  "http 1.5.0",
  "percent-encoding",
  "petgraph",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "atlas-azure"
+version = "0.1.0"
+dependencies = [
+ "atlas-graph",
+ "atlas-provider",
+ "azure_core",
+ "azure_identity",
+ "futures",
+ "petgraph",
  "proptest",
- "rayon",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "atlas-cli"
+version = "0.1.0"
+dependencies = [
+ "atlas-lib",
+ "clap",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "atlas-cloudflare"
+version = "0.1.0"
+dependencies = [
+ "atlas-graph",
+ "atlas-provider",
+ "cloudflare",
+ "futures",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "atlas-gcp"
+version = "0.1.0"
+dependencies = [
+ "atlas-graph",
+ "atlas-provider",
+ "futures",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -201,9 +233,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-graph"
+version = "0.1.0"
+dependencies = [
+ "petgraph",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "atlas-lib"
+version = "0.1.0"
+dependencies = [
+ "atlas-aws",
+ "atlas-azure",
+ "atlas-cloudflare",
+ "atlas-gcp",
+ "atlas-graph",
+ "atlas-provider",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-apigateway",
+ "aws-sdk-cloudfront",
+ "aws-sdk-config",
+ "aws-sdk-directconnect",
+ "aws-sdk-ec2",
+ "aws-sdk-ecs",
+ "aws-sdk-eks",
+ "aws-sdk-elasticloadbalancingv2",
+ "aws-sdk-eventbridge",
+ "aws-sdk-lambda",
+ "aws-sdk-rds",
+ "aws-sdk-route53",
+ "aws-sdk-sns",
+ "aws-smithy-runtime",
+ "aws-smithy-types",
+ "cloudflare",
+ "flate2",
+ "http 1.5.0",
+ "petgraph",
+ "proptest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "atlas-provider"
+version = "0.1.0"
+dependencies = [
+ "atlas-graph",
+ "futures",
+ "petgraph",
+ "rayon",
+]
+
+[[package]]
 name = "atlas-server"
 version = "0.1.0"
 dependencies = [
+ "atlas-aws",
  "atlas-graph",
  "atlas-lib",
  "axum",

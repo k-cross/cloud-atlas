@@ -3,6 +3,11 @@ resolver = "2"
 
 members = [
   "atlas-graph",
+  "atlas-provider",
+  "atlas-aws",
+  "atlas-azure",
+  "atlas-cloudflare",
+  "atlas-gcp",
   "atlas-lib",
   "atlas-cli",
   "atlas-server",
@@ -25,8 +30,13 @@ repository = "https://github.com/k-cross/cloud-atlas"
 documentation = "https://github.com/k-cross/cloud-atlas"
 
 [workspace.dependencies]
+atlas-aws = { path = "atlas-aws" }
+atlas-azure = { path = "atlas-azure" }
+atlas-cloudflare = { path = "atlas-cloudflare" }
+atlas-gcp = { path = "atlas-gcp" }
 atlas-graph = { path = "atlas-graph" }
 atlas-lib = { path = "atlas-lib" }
+atlas-provider = { path = "atlas-provider" }
 
 aws-config = "1.0"
 aws-credential-types = "1"

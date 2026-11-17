@@ -124,19 +124,30 @@ fn demo_json() -> PathBuf {
     repo_root().join("multi_cloud_demo.json")
 }
 
+const DEMO_SOURCE_CRATES: &[&str] = &[
+    "atlas-graph",
+    "atlas-provider",
+    "atlas-aws",
+    "atlas-azure",
+    "atlas-cloudflare",
+    "atlas-gcp",
+    "atlas-lib",
+];
+
 pub fn ensure_demo_snapshot() -> Result<(), String> {
     let root = repo_root();
-    let sources = [
-        root.join("atlas-graph/src"),
-        root.join("atlas-graph/Cargo.toml"),
-        root.join("atlas-lib/src"),
-        root.join("atlas-lib/examples"),
-        root.join("atlas-lib/Cargo.toml"),
-    ];
+    let mut sources: Vec<PathBuf> = DEMO_SOURCE_CRATES
+        .iter()
+        .flat_map(|name| {
+            [
+                root.join(name).join("src"),
+                root.join(name).join("Cargo.toml"),
+            ]
+        })
+        .collect();
+    sources.push(root.join("atlas-lib/examples"));
     if older_than_sources(&demo_json(), &sources) {
-        println!(
-            "multi_cloud_demo.json is missing or older than atlas-graph/atlas-lib — regenerating"
-        );
+        println!("multi_cloud_demo.json is missing or older than its source crates — regenerating");
         demo_snapshot()
     } else {
         publish_demo_snapshot()

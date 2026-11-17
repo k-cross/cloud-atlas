@@ -740,7 +740,7 @@ mod tests {
 
     #[test]
     fn only_live_routes_and_attachments_join_networks() {
-        use crate::cloud::definition::{AWSConnectivity, AWSNetworking, AmazonCollection};
+        use atlas_aws::definition::{AWSConnectivity, AWSNetworking, AmazonCollection};
         use aws_sdk_ec2::types::{
             Route, RouteState, RouteTable, TransitGateway, TransitGatewayAttachment,
             TransitGatewayAttachmentResourceType, TransitGatewayAttachmentState,
@@ -903,7 +903,7 @@ mod tests {
 
     #[test]
     fn only_a_working_vpn_is_projected() {
-        use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
+        use atlas_aws::definition::{AWSConnectivity, AmazonCollection};
         use aws_sdk_ec2::types::{
             AttachmentStatus, CustomerGateway, VpcAttachment, VpnConnection, VpnGateway, VpnState,
         };
@@ -960,8 +960,9 @@ mod tests {
 
     #[test]
     fn an_unconnected_peering_does_not_ride_the_hub_gateway() {
-        use crate::api::azure::models::{VirtualNetwork, VirtualNetworkPeering};
-        use crate::cloud::definition::{MicrosoftCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_azure::api::models::{VirtualNetwork, VirtualNetworkPeering};
+        use atlas_azure::definition::MicrosoftCollection;
 
         let remote = azure_networking_id("Microsoft.Network/virtualNetworks/hub");
         let mut builder = GraphBuilder::new();
@@ -991,10 +992,11 @@ mod tests {
 
     #[test]
     fn an_azure_vpn_being_deleted_or_failed_is_not_projected() {
-        use crate::api::azure::models::{
+        use crate::atlas::projector::Provider;
+        use atlas_azure::api::models::{
             GatewayConnection, LocalNetworkGateway, VirtualNetworkGateway,
         };
-        use crate::cloud::definition::{MicrosoftCollection, Provider};
+        use atlas_azure::definition::MicrosoftCollection;
 
         let id = |rest: &str| Some(azure_networking_id(rest).to_string());
         let gateway = |name: &str, state: &str| VirtualNetworkGateway {
@@ -1079,8 +1081,9 @@ mod tests {
 
     #[test]
     fn a_gcp_tunnel_is_projected_unless_it_is_being_built_or_torn_down() {
-        use crate::api::google::vpn::VpnTunnel;
-        use crate::cloud::definition::{GoogleCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_gcp::api::vpn::VpnTunnel;
+        use atlas_gcp::definition::GoogleCollection;
 
         let link = |name: &str| format!("https://x/projects/p/regions/r/vpnTunnels/{name}");
         let tunnel = |name: &str, status: &str| VpnTunnel {
@@ -1263,9 +1266,7 @@ mod tests {
 
     #[test]
     fn only_a_direct_connect_circuit_that_reaches_a_network_is_projected() {
-        use crate::cloud::definition::{
-            AWSDirectConnect, AWSDirectConnectGateways, AmazonCollection,
-        };
+        use atlas_aws::definition::{AWSDirectConnect, AWSDirectConnectGateways, AmazonCollection};
         use aws_sdk_directconnect::types::{
             AssociatedGateway, BgpPeer, BgpPeerState, Connection, ConnectionState,
             DirectConnectGateway, DirectConnectGatewayAssociation,
@@ -1441,10 +1442,11 @@ mod tests {
 
     #[test]
     fn an_expressroute_circuit_holds_the_second_address_of_each_peering_and_names_the_first() {
-        use crate::api::azure::models::{
+        use crate::atlas::projector::Provider;
+        use atlas_azure::api::models::{
             ExpressRouteCircuit, ExpressRoutePeering, GatewayConnection, VirtualNetworkGateway,
         };
-        use crate::cloud::definition::{MicrosoftCollection, Provider};
+        use atlas_azure::definition::MicrosoftCollection;
 
         let id = |rest: &str| Some(azure_networking_id(rest).to_string());
         let peering = |kind: &str, state: &str, prefixes: &[&str]| ExpressRoutePeering {
@@ -1547,8 +1549,9 @@ mod tests {
 
     #[test]
     fn an_interconnect_attachment_is_projected_unless_it_is_being_built_or_torn_down() {
-        use crate::api::google::interconnect::{Interconnect, InterconnectAttachment, Router};
-        use crate::cloud::definition::{GoogleCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_gcp::api::interconnect::{Interconnect, InterconnectAttachment, Router};
+        use atlas_gcp::definition::GoogleCollection;
 
         let compute = "https://x/compute/v1/projects/p";
         let attachment = |name: &str, state: Option<&str>| InterconnectAttachment {
@@ -1671,7 +1674,7 @@ mod tests {
 
     #[test]
     fn a_gateway_being_modified_still_joins_its_networks() {
-        use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
+        use atlas_aws::definition::{AWSConnectivity, AmazonCollection};
         use aws_sdk_ec2::types::{
             TransitGateway, TransitGatewayAttachment, TransitGatewayAttachmentResourceType,
             TransitGatewayAttachmentState, TransitGatewayState,
@@ -1717,8 +1720,9 @@ mod tests {
 
     #[test]
     fn a_gke_network_named_bare_is_the_same_network_instances_name_by_url() {
-        use crate::api::google::gke::Cluster;
-        use crate::cloud::definition::{GoogleCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_gcp::api::gke::Cluster;
+        use atlas_gcp::definition::GoogleCollection;
 
         let mut builder = GraphBuilder::new();
         projector::build(
@@ -1807,9 +1811,9 @@ mod tests {
         let mut builder = GraphBuilder::new();
         projector::build(
             &mut builder,
-            &crate::cloud::definition::Provider::AWS(vec![(
+            &crate::atlas::projector::Provider::AWS(vec![(
                 "us-east-1".to_owned(),
-                crate::cloud::definition::AmazonCollection::AmazonInstances(vec![instance]),
+                atlas_aws::definition::AmazonCollection::AmazonInstances(vec![instance]),
             )]),
             &Settings::default(),
         );
@@ -1864,7 +1868,7 @@ mod tests {
     const PRIVATE_ZONE: &str = "/hostedzone/ZPRIVATE";
 
     fn split_horizon_zones() -> GraphBuilder {
-        use crate::cloud::definition::{AWSRoute53, AmazonCollection, HostedZoneId};
+        use atlas_aws::definition::{AWSRoute53, AmazonCollection, HostedZoneId};
         use aws_sdk_route53::types::{HostedZone, ResourceRecord, ResourceRecordSet, RrType};
 
         let zone = |id: &str| {
@@ -1996,7 +2000,7 @@ mod tests {
 
     #[test]
     fn every_network_projects_its_own_address_space() {
-        use crate::cloud::definition::{AWSConnectivity, AmazonCollection};
+        use atlas_aws::definition::{AWSConnectivity, AmazonCollection};
         use aws_sdk_ec2::types::{
             Vpc, VpcCidrBlockAssociation, VpcCidrBlockState, VpcCidrBlockStateCode,
             VpcIpv6CidrBlockAssociation,
@@ -2115,7 +2119,7 @@ mod tests {
 
     #[test]
     fn only_live_transit_gateway_routing_is_projected() {
-        use crate::cloud::definition::{
+        use atlas_aws::definition::{
             AWSConnectivity, AWSTransitGatewayRouteTable, AWSTransitGatewayRouting,
             AmazonCollection,
         };
@@ -2297,8 +2301,9 @@ mod tests {
 
     #[test]
     fn an_ncc_spoke_joins_its_hub_only_while_both_serve() {
-        use crate::api::google::network_connectivity::{Hub, LinkedVpcNetwork, Spoke};
-        use crate::cloud::definition::{GoogleCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_gcp::api::network_connectivity::{Hub, LinkedVpcNetwork, Spoke};
+        use atlas_gcp::definition::GoogleCollection;
 
         let hub = |name: &str, state: &str| Hub {
             name: Some(format!("projects/p/locations/global/hubs/{name}")),
@@ -2374,8 +2379,9 @@ mod tests {
 
     #[test]
     fn a_virtual_wan_draws_nothing_that_is_going_away() {
-        use crate::api::azure::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
-        use crate::cloud::definition::{MicrosoftCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_azure::api::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
+        use atlas_azure::definition::MicrosoftCollection;
 
         let id = |rest: &str| fixtures::azure_id(rest);
         let hub = |name: &str, state: &str| VirtualHub {
@@ -2448,8 +2454,9 @@ mod tests {
 
     #[test]
     fn only_a_standard_virtual_wan_carries_traffic_between_its_networks() {
-        use crate::api::azure::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
-        use crate::cloud::definition::{MicrosoftCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_azure::api::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
+        use atlas_azure::definition::MicrosoftCollection;
         use atlas_graph::derive::held_addresses;
 
         let vnet =
@@ -2519,11 +2526,11 @@ mod tests {
         }
     }
 
-    fn project_aws(collections: Vec<crate::cloud::definition::AmazonCollection>) -> GraphBuilder {
+    fn project_aws(collections: Vec<atlas_aws::definition::AmazonCollection>) -> GraphBuilder {
         let mut builder = GraphBuilder::new();
         projector::build(
             &mut builder,
-            &crate::cloud::definition::Provider::AWS(
+            &crate::atlas::projector::Provider::AWS(
                 collections
                     .into_iter()
                     .map(|c| ("us-east-1".to_owned(), c))
@@ -2554,7 +2561,7 @@ mod tests {
     // keeps its interfaces attached, so the attachment still names it.
     #[test]
     fn an_interface_attached_to_an_instance_the_scan_dropped_invents_no_instance() {
-        use crate::cloud::definition::AmazonCollection;
+        use atlas_aws::definition::AmazonCollection;
 
         let builder = project_aws(vec![
             AmazonCollection::AmazonNetworkInterfaces(vec![attached_interface(
@@ -2580,7 +2587,7 @@ mod tests {
 
     #[test]
     fn an_interface_owns_its_attachment_once_the_scan_confirms_the_instance() {
-        use crate::cloud::definition::AmazonCollection;
+        use atlas_aws::definition::AmazonCollection;
 
         let instance = aws_sdk_ec2::types::Instance::builder()
             .instance_id("i-running")
@@ -2622,7 +2629,7 @@ mod tests {
         running: Vec<&str>,
         interfaces: Vec<aws_sdk_ec2::types::NetworkInterface>,
     ) -> GraphBuilder {
-        use crate::cloud::definition::{AWSLoadBalancing, AmazonCollection};
+        use atlas_aws::definition::{AWSLoadBalancing, AmazonCollection};
         use aws_sdk_elasticloadbalancingv2::types::{
             TargetDescription, TargetGroup, TargetHealthDescription,
         };
@@ -2922,7 +2929,8 @@ mod tests {
 
     #[test]
     fn config_resources_respect_exclude_by_default() {
-        use crate::cloud::definition::{AmazonCollection, Provider};
+        use crate::atlas::projector::Provider;
+        use atlas_aws::definition::AmazonCollection;
         use std::collections::HashMap;
 
         let make_provider = || {
@@ -2963,100 +2971,6 @@ mod tests {
         assert!(
             !builder.node_map.contains_key(&widget),
             "unknown config resource should be excluded when exclude_by_default is set"
-        );
-    }
-
-    #[test]
-    fn every_aws_kind_config_records_has_one_source() {
-        use crate::atlas::projector::aws::{TYPED_CONFIG_TYPES, use_aws_resource};
-        use aws_sdk_config::types::ResourceType;
-
-        let config_records_nothing_like = [
-            "AwsRegion",
-            "AwsTag",
-            "AwsEc2AvailabilityZone",
-            "AwsRoute53RecordSet",
-            "AwsConfigResource",
-            "AwsDirectConnectConnection",
-            "AwsDirectConnectGateway",
-            "AwsDirectConnectVirtualInterface",
-            "AwsEc2Route",
-            "AwsEc2TransitGatewayRoute",
-            "AwsEc2TransitGatewayPeeringAttachment",
-        ];
-        let typed: Vec<&str> = TYPED_CONFIG_TYPES
-            .iter()
-            .map(|typed| (typed.node)("probe".into()).kind())
-            .collect();
-        for kind in Node::ALL_KINDS
-            .iter()
-            .filter(|kind| kind.starts_with("Aws"))
-        {
-            assert!(
-                typed.contains(kind) != config_records_nothing_like.contains(kind),
-                "{kind}: add its Config type to TYPED_CONFIG_TYPES, or list it as a kind Config \
-                 does not record"
-            );
-        }
-        for typed in TYPED_CONFIG_TYPES {
-            assert!(
-                ResourceType::values().contains(&typed.resource_type),
-                "{} is not a Config resource type",
-                typed.resource_type
-            );
-            assert!(
-                !use_aws_resource(typed.resource_type, false),
-                "{} has a typed node, so the catch-all must never draw it",
-                typed.resource_type
-            );
-        }
-    }
-
-    #[test]
-    fn a_config_listing_never_redraws_a_resource_its_own_collector_draws() {
-        use crate::atlas::projector::aws::TYPED_CONFIG_TYPES;
-        use crate::cloud::definition::{AmazonCollection, Provider};
-        use aws_sdk_config::types::ResourceIdentifier;
-        use std::collections::HashMap;
-
-        let listed = |id: &str| vec![ResourceIdentifier::builder().resource_id(id).build()];
-        let mut resources: HashMap<String, Vec<ResourceIdentifier>> = TYPED_CONFIG_TYPES
-            .iter()
-            .map(|typed| (typed.resource_type.to_owned(), listed("twin")))
-            .collect();
-        for drawn_as_an_edge in [
-            "AWS::EC2::TransitGatewayAttachment",
-            "AWS::ElasticLoadBalancingV2::Listener",
-        ] {
-            resources.insert(drawn_as_an_edge.to_owned(), listed("twin"));
-        }
-        resources.insert("AWS::S3::Bucket".to_owned(), listed("assets"));
-
-        let mut builder = GraphBuilder::new();
-        projector::build(
-            &mut builder,
-            &Provider::AWS(vec![(
-                fixtures::REGION.to_owned(),
-                AmazonCollection::AmazonResources(resources),
-            )]),
-            &Settings {
-                regions: vec![fixtures::REGION.to_owned()],
-                ..Default::default()
-            },
-        );
-
-        let generic: Vec<&Node> = builder
-            .graph
-            .node_weights()
-            .filter(|node| matches!(node, Node::AwsConfigResource { .. }))
-            .collect();
-        assert_eq!(
-            generic,
-            vec![&Node::AwsConfigResource {
-                resource_type: "AWS::S3::Bucket".into(),
-                id: "assets".into(),
-            }],
-            "Config is the source only for what no collector draws"
         );
     }
 

@@ -1,0 +1,24 @@
+[package]
+name = "atlas-gcp"
+description = "GCP REST collectors and the projector into the atlas graph."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords = ["GCP", "cloud", "graph", "infrastructure"]
+
+[dependencies]
+atlas-graph.workspace = true
+atlas-provider.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+yup-oauth2.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true

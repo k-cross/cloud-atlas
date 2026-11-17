@@ -1,0 +1,65 @@
+pub mod collector {
+    use crate::definition::AWSLoadBalancing;
+    use aws_sdk_elasticloadbalancingv2::Client;
+    use aws_sdk_elasticloadbalancingv2::types::{Listener, LoadBalancer, TargetGroup};
+    use std::collections::HashMap;
+
+    pub async fn runner(
+        config: &aws_config::SdkConfig,
+    ) -> Result<AWSLoadBalancing, Box<dyn std::error::Error>> {
+        let client = Client::new(config);
+
+        let load_balancers: Vec<LoadBalancer> = client
+            .describe_load_balancers()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
+
+        let mut listeners = Vec::new();
+        for lb in &load_balancers {
+            if let Some(arn) = lb.load_balancer_arn() {
+                let page: Vec<Listener> = client
+                    .describe_listeners()
+                    .load_balancer_arn(arn)
+                    .into_paginator()
+                    .items()
+                    .send()
+                    .try_collect()
+                    .await?;
+                listeners.extend(page);
+            }
+        }
+
+        let target_groups: Vec<TargetGroup> = client
+            .describe_target_groups()
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await?;
+
+        let mut target_health = HashMap::new();
+        for tg in &target_groups {
+            if let Some(arn) = tg.target_group_arn() {
+                let health_resp = client
+                    .describe_target_health()
+                    .target_group_arn(arn)
+                    .send()
+                    .await?;
+                target_health.insert(
+                    arn.to_owned(),
+                    health_resp.target_health_descriptions.unwrap_or_default(),
+                );
+            }
+        }
+
+        Ok(AWSLoadBalancing {
+            load_balancers,
+            target_groups,
+            listeners,
+            target_health,
+        })
+    }
+}

@@ -1,9 +1,9 @@
 use crate::Settings;
-use crate::atlas::projector;
-use crate::cloud::amazon::provider::build_aws;
-use crate::cloud::azure::provider::build_azure;
-use crate::cloud::cloudflare::provider::build_cloudflare;
-use crate::cloud::google::provider::build_gcp;
+use crate::atlas::projector::{self, Provider};
+use atlas_aws::provider::build_aws;
+use atlas_azure::provider::build_azure;
+use atlas_cloudflare::provider::build_cloudflare;
+use atlas_gcp::provider::build_gcp;
 use atlas_graph::collection::CollectionReport;
 use atlas_graph::derive;
 use atlas_graph::flow::FlowIndex;
@@ -38,7 +38,11 @@ impl AtlasEngine {
 
         let aws_future = async {
             if !self.settings.regions.is_empty() {
-                Some(build_aws(self.settings.verbose, &self.settings).await)
+                Some(
+                    build_aws(self.settings.verbose, &self.settings)
+                        .await
+                        .map(Provider::AWS),
+                )
             } else {
                 None
             }
@@ -48,7 +52,11 @@ impl AtlasEngine {
             if let Some(projects) = &self.settings.gcp_projects
                 && !projects.is_empty()
             {
-                return Some(build_gcp(self.settings.verbose, &self.settings).await);
+                return Some(
+                    build_gcp(self.settings.verbose, &self.settings)
+                        .await
+                        .map(Provider::GCP),
+                );
             }
             None
         };
@@ -57,14 +65,22 @@ impl AtlasEngine {
             if let Some(subs) = &self.settings.azure_subscriptions
                 && !subs.is_empty()
             {
-                return Some(build_azure(self.settings.verbose, &self.settings).await);
+                return Some(
+                    build_azure(self.settings.verbose, &self.settings)
+                        .await
+                        .map(Provider::Azure),
+                );
             }
             None
         };
 
         let cloudflare_future = async {
             if self.settings.cloudflare {
-                Some(build_cloudflare(self.settings.verbose, &self.settings).await)
+                Some(
+                    build_cloudflare(self.settings.verbose, &self.settings)
+                        .await
+                        .map(|collection| Provider::Cloudflare(Box::new(collection))),
+                )
             } else {
                 None
             }
@@ -77,7 +93,7 @@ impl AtlasEngine {
             .into_iter()
             .flatten()
         {
-            projector::build(&mut builder, &scan.provider, &self.settings);
+            projector::build(&mut builder, &scan.collections, &self.settings);
             report.merge(scan.report);
         }
 

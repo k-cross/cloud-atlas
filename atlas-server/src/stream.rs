@@ -1,9 +1,9 @@
+use atlas_aws::events::stream::EventQueue;
+use atlas_aws::flow_logs::InterfaceNetworks;
+use atlas_aws::flow_logs::stream::FlowLogQueue;
 use atlas_graph::collection::CollectionReport;
 use atlas_graph::event::ChangeEvent;
 use atlas_graph::flow::FlowObservation;
-use atlas_lib::cloud::amazon::events::stream::EventQueue;
-use atlas_lib::cloud::amazon::flow_logs::InterfaceNetworks;
-use atlas_lib::cloud::amazon::flow_logs::stream::FlowLogQueue;
 use std::time::Duration;
 
 pub struct Batch {
@@ -18,7 +18,7 @@ pub enum Source {
 
 impl Source {
     pub async fn aws(region: &str, queue_url: &str, exclude_by_default: bool) -> Self {
-        let config = atlas_lib::cloud::amazon::load_config(region).await;
+        let config = atlas_aws::load_config(region).await;
         Source::Aws(Box::new(EventQueue::new(
             &config,
             queue_url,
@@ -60,7 +60,7 @@ pub enum FlowSource {
 
 impl FlowSource {
     pub async fn aws(region: &str, queue_url: &str) -> Self {
-        let config = atlas_lib::cloud::amazon::load_config(region).await;
+        let config = atlas_aws::load_config(region).await;
         FlowSource::Aws(Box::new(FlowLogQueue::new(&config, queue_url, region)))
     }
 

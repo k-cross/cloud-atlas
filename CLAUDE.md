@@ -22,24 +22,28 @@ Never call live cloud APIs in tests. Projectors test against the "Globex" estate
 
 - `cargo nextest run` enforces exhaustiveness guards: every `Node` and `Edge` kind must appear in the fixture graph.
 - `cargo run --example demo` projects fixtures + Tier-2 overlay (`fixtures::build_graph()`, combining `fixtures::topology()` and `fixtures::observed()`), writes `multi_cloud_demo.{dot,json}`, prints kind coverage, flows, and derived `Serves` edges, and exits non-zero if any kind is missing or the overlay is empty.
-- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also add its Config type to `TYPED_CONFIG_TYPES` (`projector/aws.rs`) with the item field an event names it by (or `None`): the Config catch-all never draws a listed type, and `every_aws_kind_config_records_has_one_source` fails until a new AWS kind is listed.
+- Adding a resource type requires one `nodes!` line (`Variant(id) => "Provider::SubType({id})"`, or struct fields in the label—generating variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()` under the authoritative `CollectionSource`), projector mapping, and fixture data. For AWS, also add its Config type to `TYPED_CONFIG_TYPES` (`atlas-aws/src/projector.rs`) with the item field an event names it by (or `None`): the Config catch-all never draws a listed type, and `every_aws_kind_config_records_has_one_source` fails until a new AWS kind is listed.
 
 ### Collector Tests (HTTP → Struct)
 
 All model fields are `Option<T>` and serde ignores unknown fields, so a drifted schema parses as all-`None`. **Always assert that fields read by the projector are populated.**
 
-- **reqwest clients** (`GoogleApiClient`, `CloudflareApiClient`, `AzureApiClient`): `wiremock` + `with_base_url(token, url)` in `atlas-lib/tests/{gcp,cloudflare,azure}_collectors.rs`. Pair a realistic contract test with pagination/error tests (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare `{success,result}`).
+- **reqwest clients** (`GoogleApiClient`, `CloudflareApiClient`, `AzureApiClient`): `wiremock` + `with_base_url(token, url)` in `atlas-{gcp,cloudflare,azure}/tests/collectors.rs`. Pair a realistic contract test with pagination/error tests (GCP `nextPageToken`, Azure `$skipToken`, Cloudflare `{success,result}`).
 - **`cloudflare` crate** (zone/dns/kv): `Environment::Custom(format!("{}/client/v4/", server.uri()))` via `serve_crate`/`crate_client`.
-- **AWS SDK:** `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig` in unit module `cloud/amazon/collector_tests.rs` (`replay_config` feeds responses in order; unit test because `aws-config` is a normal dependency).
-- **Azure mapping:** `provider::map_resources` returns `(collections, CollectionReport)` without failing the batch; undeserializable ARG rows are skipped and reported as `Malformed` (capped at `MAX_REPORTED_ROWS` + tail count).
+- **AWS SDK:** `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig` in unit module `atlas-aws/src/collector_tests.rs` (`replay_config` feeds responses in order; unit test because `aws-config` is a normal dependency).
+- **Azure mapping:** `atlas_azure::provider::map_resources` returns `(collections, CollectionReport)` without failing the batch; undeserializable ARG rows are skipped and reported as `Malformed` (capped at `MAX_REPORTED_ROWS` + tail count).
 
 ## Workspace Layout
 
 Shared package metadata and every third-party version live in the root `Cargo.toml` (`[workspace.package]`, `[workspace.dependencies]`). Members declare `dep.workspace = true` and add crate-specific features locally (`clap = { workspace = true, features = ["unicode"] }`); never pin a version in a member manifest.
 
-- **`atlas-graph`:** Cloud-agnostic core: `definition` (`Node`/`Edge`, `nodes!`), `util`, `graph_builder`, `export` (`SNAPSHOT_VERSION`), `collection` (`CollectionSource`, `CollectionReport`, `FailureKind`), `patch`, `flow`, `event`, `derive` (`all`, `held_addresses`, `address_owners`, `CONFIRMED`/`INFERRED`). Depends only on `petgraph` and `serde`; never add a cloud SDK, HTTP client, or `atlas-lib` dependency. Its unit tests build graphs by hand; a test that needs the Globex fixtures, a projector, or SDK types goes in `atlas-lib` (e.g. `atlas-lib/tests/derive_service.rs`, `atlas/tests.rs`) against the public API.
-- **`atlas-lib`:** Provider models and collectors (`api`, `cloud`), projectors, `AtlasEngine`, and `fixtures`. `ProviderScan` lives in `cloud::definition` beside `Provider`. Consumers import graph types from `atlas_graph::*` directly; `atlas-lib` does not re-export them.
-- **`atlas-cli`** (`atlas` binary), **`atlas-server`**, **`xtask`**.
+- **`atlas-graph`:** Cloud-agnostic core: `definition` (`Node`/`Edge`, `nodes!`), `util`, `graph_builder`, `export` (`SNAPSHOT_VERSION`), `collection` (`CollectionSource`, `CollectionReport`, `FailureKind`), `patch`, `flow`, `event`, `derive` (`all`, `held_addresses`, `address_owners`, `CONFIRMED`/`INFERRED`). Depends only on `petgraph` and `serde`; never add a cloud SDK, HTTP client, or `atlas-lib` dependency. Its unit tests build graphs by hand.
+- **`atlas-provider`:** What every provider crate shares: `Settings`, `ProviderScan<T>`, `collector::{run_all, NamedCollector}`, and the projection helpers (`projector::{project_parallel, link_bgp_session}`, `project_leaf!`). Depends only on `atlas-graph`.
+- **`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`:** One crate per provider: collectors (GCP and Azure keep API models under `api/`), `definition` (`<Provider>Collection` and its payload structs), `projector` (`<provider>_projector`), and `provider::build_<provider>`. `atlas-aws` also owns the Tier 1/2 feeds (`events`, `flow_logs`). Each depends only on `atlas-graph`, `atlas-provider`, and its own SDK/HTTP crates; a provider crate never depends on another provider or on `atlas-lib`.
+- **`atlas-lib`:** The aggregate over every provider: `Provider` and `build` (`atlas::projector`), `AtlasEngine`, and the Globex `fixtures`. Re-exports `Settings` as the engine's input; consumers import graph and provider types from their own crates directly.
+- **`atlas-cli`** (`atlas` binary), **`atlas-server`** (also depends on `atlas-aws` for the event and flow-log queues), **`xtask`**.
+
+**Where a test lives:** with the code it exercises, unless it needs the Globex fixtures, which sit above every provider. Such a test goes in `atlas-lib` against the public API (`atlas-lib/tests/derive_service.rs`, `atlas-lib/tests/flow_logs.rs`, `atlas/tests.rs`). A test that only needs one provider's projector calls `<provider>_projector` directly instead of `atlas_lib::atlas::projector::build`.
 
 ## Build, Run & Dev Orchestration
 
@@ -74,11 +78,11 @@ cargo run -p atlas-server -- --aws-event-queue <sqs-url> --aws-flow-log-queue <s
 
 ### Collection Outcomes & Retention
 
-- **`AtlasEngine::collect`** returns `Scan { builder, report }`. `build_*` is infallible, returning `ProviderScan { provider, report }`.
+- **`AtlasEngine::collect`** returns `Scan { builder, report }`. `build_*` is infallible, returning `atlas_provider::ProviderScan<T> { collections, report }` over that provider's own collections; the engine wraps it into `Provider` with `ProviderScan::map`.
 - **Per-source carry-forward:** `poll::reconcile` (and CLI `AtlasEngine::install`) folds the prior graph forward for **unreadable sources only** (`patch::carry_forward` + `report.unreadable_sources()`) via `Node::owner()`, keeping healthy providers authoritative for deletions. Ownerless pivots (`Generic*`, `ExternalService`) are retained during any incomplete scan.
 - **Retention budget (`patch::Retention`):** Unreadable sources are held for `--retain-scans` consecutive scans (default 10) before release; recovery resets the streak. Classified once while errors are still typed (`collection::FailureKind`):
   - `Unavailable` (throttling, timeouts, 5xx, boxed errors in `run_all`): full `--retain-scans` budget.
-  - `Unauthorized` (bad/missing credentials, probed pre-fan-out in GCP `authenticate()`, Cloudflare `clients()`, `AzureApiClient::new()`, and per-region `amazon::resolve_credentials`): `Retention::AUTH_BUDGET` (2), capped by `--retain-scans`. Applies only when *every* failure for that source was `Unauthorized` (`report.unreadable_kind`).
+  - `Unauthorized` (bad/missing credentials, probed pre-fan-out in GCP `authenticate()`, Cloudflare `clients()`, `AzureApiClient::new()`, and per-region `atlas_aws::resolve_credentials`): `Retention::AUTH_BUDGET` (2), capped by `--retain-scans`. Applies only when *every* failure for that source was `Unauthorized` (`report.unreadable_kind`).
   - `Malformed` (drifted row in a readable response): **never enters `unreadable_sources()`** and holds nothing (`is_complete()` is false, but removals remain authoritative).
 
 ### Demo Mode (`atlas-server/src/demo.rs`)
@@ -91,7 +95,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ### Tier 1: Live Event Feed (`--aws-event-queue`)
 
-`atlas_graph::event::ChangeEvent` + `EventApplier`; `cloud/amazon/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
+`atlas_graph::event::ChangeEvent` + `EventApplier`; `atlas-aws/src/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
 
 1. **Projector parity:** Adapters must emit only what the full-scan projector emits (`project_instance`/`InstanceFacts`, `project_interface`/`InterfaceFacts`, `use_aws_resource`/`use_global`). A Config item for a type in `TYPED_CONFIG_TYPES` becomes only its typed node, never also an `AwsConfigResource`. Types with no event key (keyed differently, like Route 53's `/hostedzone/` prefix and SQS URLs) and deferred `link_interface_owners` edges are omitted. Connectivity kinds go through the projector's `*Facts` helpers; an item whose recorded state the scan skips removes the node, and transit gateways (which record no state) only ever delete (`an_instance_event_produces_only_what_a_full_scan_would`, `an_interface_event_produces_only_what_a_full_scan_would`, `every_connectivity_event_produces_only_what_a_full_scan_would`).
 2. **Additive only:** Creates/modifies never remove unmentioned edges; deletes remove only the named node.
@@ -100,7 +104,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ### Tier 2: Liveness Overlay (`--aws-flow-log-queue`)
 
-`atlas_graph::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `cloud/amazon/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
+`atlas_graph::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `atlas-aws/src/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
 
 1. **Metrics beside the graph:** Flow edges carry `FlowStats` (`last_seen`, `packets`, `bytes`); nodes carry `Liveness` (`last_seen`, verdict, no volume to avoid multi-counting across up to 4 keys per record).
 2. **Ownerless pivots only:** Never invents typed nodes; creates only generic IP pivots.
@@ -129,13 +133,13 @@ Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas
 
 ## Established Helpers
 
-- **Fan-out (`cloud::collector::run_all`):** Runs `Vec<NamedCollector<'_, T>>` concurrently, reporting `{scope}/{name}` failures. AWS and GCP use a local `collectors!` macro (`"name" => Collection::Variant, call(..)`); multi-field payloads use named structs (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `cloud/definition.rs`).
+- **Fan-out (`atlas_provider::collector::run_all`):** Runs `Vec<NamedCollector<'_, T>>` concurrently, reporting `{scope}/{name}` failures. AWS and GCP use a local `collectors!` macro (`"name" => Collection::Variant, call(..)`); multi-field payloads use named structs (`AWSLoadBalancing`, `AWSRoute53`, `AWSNetworking` in `atlas-aws/src/definition.rs`).
 - **Provider clients:**
-  - **AWS:** `cloud/amazon.rs::load_config(region)` once per region; register in `amazon/provider.rs`. Account-wide APIs (Route 53, CloudFront, Direct Connect gateways) go in the `account_wide` list, which runs once per scan beside the regional scopes, on the first region's client, under scope `global`. Page with the SDK's `into_paginator().items()`; an operation without one (Route 53 record sets, EventBridge buses) loops by hand and fails on a cursor that does not advance.
-  - **GCP:** `GoogleApiClient::paginated_list` (`api/google/client.rs`); register in `google/provider.rs`. Every collector runs through `ProjectApis::unless_disabled`: a `SERVICE_DISABLED` error whose consumer is the scanned project's number (looked up once per project per scan) reads as empty; any other error, including one naming the caller's quota project, stays a failure.
-  - **Azure:** `AzureApiClient::query_graph` errors on missing/non-array `data` or `totalRecords > rows.len()`. `azure_types!` in `azure/provider.rs` drives the ARG filter and exhaustive `map_resources` dispatch (`leaf!` for `{id, name, location}`).
-  - **Cloudflare:** `CloudflareApiClient::get` / `get_paged` (cursor endpoints like R2) and `cloudflare::paginate(per_page, |page| ..)`. **Never stop paging on a short page.**
-- **Projectors:** `projector::project_parallel` (per-scope rayon fan-out + ordered merge); `project_leaf!` for leaf nodes; `GraphBuilder::link_to` / `link_from` (use `get_or_add_node`/`get_or_add_ref` only when reusing the index).
+  - **AWS:** `atlas_aws::load_config(region)` once per region; register in `atlas-aws/src/provider.rs`. Account-wide APIs (Route 53, CloudFront, Direct Connect gateways) go in the `account_wide` list, which runs once per scan beside the regional scopes, on the first region's client, under scope `global`. Page with the SDK's `into_paginator().items()`; an operation without one (Route 53 record sets, EventBridge buses) loops by hand and fails on a cursor that does not advance.
+  - **GCP:** `GoogleApiClient::paginated_list` (`atlas-gcp/src/api/client.rs`); register in `atlas-gcp/src/provider.rs`. Every collector runs through `ProjectApis::unless_disabled`: a `SERVICE_DISABLED` error whose consumer is the scanned project's number (looked up once per project per scan) reads as empty; any other error, including one naming the caller's quota project, stays a failure.
+  - **Azure:** `AzureApiClient::query_graph` errors on missing/non-array `data` or `totalRecords > rows.len()`. `azure_types!` in `atlas-azure/src/provider.rs` drives the ARG filter and exhaustive `map_resources` dispatch (`leaf!` for `{id, name, location}`).
+  - **Cloudflare:** `CloudflareApiClient::get` / `get_paged` (cursor endpoints like R2) and `atlas_cloudflare::paginate(per_page, |page| ..)`. **Never stop paging on a short page.**
+- **Projectors:** `atlas_provider::projector::project_parallel` (per-scope rayon fan-out + ordered merge); `atlas_provider::project_leaf!` for leaf nodes; `GraphBuilder::link_to` / `link_from` (use `get_or_add_node`/`get_or_add_ref` only when reusing the index).
 - **Graph mutation:** `add_edge` deduplicates; `GraphBuilder::merge(&graph)` folds by node identity; `GraphBuilder::remove_node` repairs `node_map` after petgraph swap-remove (never call `graph.remove_node` directly); `patch::merge_additions` merges a subgraph and returns only newly added elements.
 - **Pivots (`Node::ip(value, network)`, `Node::public_ip(value)`, `Node::link_ip(cidr)`, `Node::hostname(value)`):** Canonicalise via `util::canonical_address` / `canonical_hostname`. `link_ip` takes a BGP address with its prefix (`169.254.60.1/30`) and scopes it to the link subnet both ends of a circuit or tunnel compute. `network` equals the owning network node's ID (`Node::network_scope()`): AWS VPC ID, lowercased Azure VNet ID (from subnet), or GCP `projects/P/global/networks/N` (`projector/gcp.rs::canonical_network`). Azure NSG rules use each attached subnet's VNet. When no network exists, the naming resource's ID stands in as `network`: the zone for DNS records, the resource itself for unattached NSGs and non-VPC resources.
 - **AWS interfaces & `scanned_instances` gate:** `DescribeNetworkInterfaces` projects all ENIs and their private IPs (`project_instance` falls back to `facts.private_ip` only when an instance has no ENIs) and links EIPs (`Eni -HasIp-> Eip` via `network_interface_id`). `DescribeInstances` filters to running/pending, so post-parallel passes (`link_interface_owners` and `link_targets`) gate instance references on `scanned_instances`. `link_targets` links `instance` targets via `ConnectsTo` and `ip` targets via `RoutesTo` a VPC pivot, consulting `derive::held_addresses` to skip IPs held (locally or across a join) by an ENI attached to an unscanned instance (`a_stopped_ip_target_is_not_inferred`, `a_stopped_ip_target_across_a_peering_is_not_inferred`).

@@ -1,0 +1,547 @@
+use super::stream::{FlowLogQueue, decompress, objects};
+use super::*;
+use atlas_graph::collection::CollectionReport;
+use atlas_graph::definition::Edge;
+use atlas_graph::graph_builder::GraphBuilder;
+use aws_credential_types::Credentials;
+use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
+use aws_smithy_types::body::SdkBody;
+use std::io::Write;
+
+const SCOPE: &str = "us-east-1";
+const NETWORK: &str = "vpc-flows";
+
+fn networks() -> InterfaceNetworks {
+    let mut builder = GraphBuilder::new();
+    let eni = builder.get_or_add_node(Node::AwsEc2Eni("eni-0abc".into()));
+    builder.link_to(eni, Node::ip("10.0.0.99", NETWORK), Edge::ConnectsTo);
+    InterfaceNetworks::read(&builder.graph)
+}
+
+fn parsed(text: &str) -> Parsed {
+    parse(text, SCOPE, usize::MAX, &networks())
+}
+const BUCKET: &str = "globex-flow-logs";
+const KEY: &str = "AWSLogs/111111111111/vpcflowlogs/us-east-1/2026/09/04/flows.log.gz";
+
+fn default_record(src: &str, dst: &str, action: &str) -> String {
+    record_at("eni-0abc", src, dst, action)
+}
+
+fn record_at(interface: &str, src: &str, dst: &str, action: &str) -> String {
+    format!(
+        "2 111111111111 {interface} {src} {dst} 51234 443 6 24 4800 1788436740 1788436800 {action} OK"
+    )
+}
+
+#[test]
+fn a_default_format_record_becomes_a_flow_between_its_endpoints() {
+    let Parsed {
+        observations,
+        unusable,
+        ..
+    } = parsed(&default_record("10.10.1.10", "198.51.100.10", "ACCEPT"));
+
+    assert_eq!(unusable, 0);
+    let [flow] = &observations[..] else {
+        panic!("expected one observation, got {}", observations.len());
+    };
+    assert_eq!(flow.src, Node::ip("10.10.1.10", NETWORK));
+    assert_eq!(flow.dst, Node::public_ip("198.51.100.10").unwrap());
+    assert_eq!(flow.packets, 24);
+    assert_eq!(flow.bytes, 4800);
+    assert_eq!(flow.action, Some(FlowAction::Accepted));
+    assert_eq!(
+        flow.observed_at, 1_788_436_800_000,
+        "the record's end second, in millis"
+    );
+}
+
+#[test]
+fn a_header_is_not_mistaken_for_a_record() {
+    let object = "\
+version srcaddr dstaddr end
+2 203.0.113.10 198.51.100.10 1788436800";
+
+    let Parsed { observations, .. } = parsed(object);
+
+    assert_eq!(observations.len(), 1, "the header line is not a flow");
+}
+
+#[test]
+fn a_format_without_a_verdict_still_yields_liveness() {
+    let object = "\
+version srcaddr dstaddr packets bytes end
+2 203.0.113.10 198.51.100.10 40 9000 1788436800";
+
+    let Parsed { observations, .. } = parsed(object);
+
+    assert_eq!(observations[0].action, None);
+    assert_eq!(observations[0].observed_at, 1_788_436_800_000);
+}
+
+#[test]
+fn records_with_no_data_are_neither_traffic_nor_failures() {
+    let object = format!(
+        "{}\n{}\n{}",
+        "2 111111111111 eni-0abc - - - - - - - 1788436740 1788436800 - NODATA",
+        "2 111111111111 eni-0abc - - - - - - - 1788436740 1788436800 - SKIPDATA",
+        default_record("10.10.1.10", "198.51.100.10", "ACCEPT"),
+    );
+
+    let Parsed {
+        observations,
+        unusable,
+        ..
+    } = parsed(&object);
+
+    assert_eq!(observations.len(), 1, "only the real flow");
+    assert_eq!(unusable, 0, "an empty window is not a failure");
+}
+
+#[test]
+fn the_default_field_set_still_attributes_through_the_interface_alone() {
+    let Parsed { observations, .. } =
+        parsed(&default_record("10.10.1.10", "198.51.100.10", "ACCEPT"));
+
+    assert_eq!(
+        observations[0].resources,
+        vec![Node::AwsEc2Eni("eni-0abc".into())],
+        "no instance-id column, but the interface is right there"
+    );
+}
+
+#[test]
+fn a_layout_that_cannot_place_a_flow_loses_the_whole_object_and_says_so() {
+    let object = "\
+version srcport dstport protocol
+2 51234 443 6";
+
+    let parsed = parsed(object);
+
+    assert!(parsed.observations.is_empty());
+    assert!(
+        parsed.unusable_layout,
+        "one cause and total loss, not a scattering of drifted lines"
+    );
+    assert_eq!(parsed.unusable, 0, "no individual record was at fault");
+}
+
+#[test]
+fn records_past_the_cap_are_counted_but_never_materialized() {
+    let object: String = (0..10)
+        .map(|i| default_record(&format!("10.0.0.{i}"), "198.51.100.10", "ACCEPT"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let parsed = parse(&object, SCOPE, 4, &networks());
+
+    assert_eq!(parsed.observations.len(), 4);
+    assert_eq!(parsed.dropped, 6);
+    assert_eq!(parsed.unusable, 0);
+}
+
+#[test]
+fn a_headerless_record_starting_with_an_account_id_is_not_read_as_a_header() {
+    let object = "111111111111 eni-0abc 10.10.1.10 198.51.100.10 1788436800";
+
+    assert!(!Layout::looks_like_header(object));
+}
+
+#[test]
+fn a_real_header_is_still_recognised() {
+    assert!(Layout::looks_like_header(
+        "version account-id interface-id srcaddr dstaddr end action log-status"
+    ));
+}
+
+#[test]
+fn a_truncated_line_is_dropped_and_counted() {
+    let object = format!(
+        "{}\n2 111111111111 eni-0abc 10.10.1.10",
+        default_record("10.10.1.10", "198.51.100.10", "ACCEPT")
+    );
+
+    let Parsed {
+        observations,
+        unusable,
+        ..
+    } = parsed(&object);
+
+    assert_eq!(observations.len(), 1);
+    assert_eq!(unusable, 1);
+}
+
+#[test]
+fn a_record_that_names_its_vpc_is_read_in_that_vpc() {
+    let object = "\
+version vpc-id interface-id srcaddr dstaddr end
+2 vpc-named eni-0abc 10.10.1.10 10.10.1.11 1788436800";
+
+    let Parsed { observations, .. } = parsed(object);
+
+    assert_eq!(observations[0].src, Node::ip("10.10.1.10", "vpc-named"));
+    assert_eq!(observations[0].dst, Node::ip("10.10.1.11", "vpc-named"));
+}
+
+#[test]
+fn a_private_address_seen_by_an_interface_the_scan_has_not_found_is_counted_not_guessed() {
+    let Parsed {
+        observations,
+        unplaced,
+        unusable,
+        ..
+    } = parsed(&record_at(
+        "eni-unscanned",
+        "10.10.1.10",
+        "198.51.100.10",
+        "ACCEPT",
+    ));
+
+    assert!(observations.is_empty());
+    assert_eq!(unplaced, 1);
+    assert_eq!(
+        unusable, 0,
+        "the record read fine; only its network is unknown"
+    );
+}
+
+#[test]
+fn a_flow_between_public_addresses_needs_no_network() {
+    let Parsed {
+        observations,
+        unplaced,
+        ..
+    } = parsed(&record_at(
+        "eni-unscanned",
+        "203.0.113.10",
+        "198.51.100.10",
+        "ACCEPT",
+    ));
+
+    assert_eq!(unplaced, 0);
+    assert_eq!(
+        observations[0].src,
+        Node::public_ip("203.0.113.10").unwrap()
+    );
+}
+
+fn notification(bucket: &str, key: &str) -> String {
+    serde_json::json!({
+        "Records": [{
+            "eventSource": "aws:s3",
+            "eventName": "ObjectCreated:Put",
+            "s3": {
+                "bucket": { "name": bucket },
+                "object": { "key": key }
+            }
+        }]
+    })
+    .to_string()
+}
+
+#[test]
+fn a_notification_names_the_object_it_points_at() {
+    let mut report = CollectionReport::default();
+
+    let found = objects(&notification(BUCKET, KEY), &mut report, SCOPE);
+
+    assert_eq!(found, vec![(BUCKET.to_owned(), KEY.to_owned())]);
+    assert!(report.is_complete());
+}
+
+#[test]
+fn an_encoded_object_key_is_decoded_before_it_is_fetched() {
+    let mut report = CollectionReport::default();
+
+    let found = objects(
+        &notification(BUCKET, "flow+logs/2026%3D09/flows.log.gz"),
+        &mut report,
+        SCOPE,
+    );
+
+    assert_eq!(found[0].1, "flow logs/2026=09/flows.log.gz");
+}
+
+#[test]
+fn an_sns_wrapped_notification_is_unwrapped() {
+    let wrapped = serde_json::json!({
+        "Type": "Notification",
+        "Message": notification(BUCKET, KEY),
+    })
+    .to_string();
+    let mut report = CollectionReport::default();
+
+    let found = objects(&wrapped, &mut report, SCOPE);
+
+    assert_eq!(found.len(), 1);
+    assert!(report.is_complete());
+}
+
+#[test]
+fn the_buckets_configuration_test_message_is_not_a_failure() {
+    let body = r#"{"Service":"Amazon S3","Event":"s3:TestEvent","Bucket":"globex-flow-logs"}"#;
+    let mut report = CollectionReport::default();
+
+    let found = objects(body, &mut report, SCOPE);
+
+    assert!(found.is_empty());
+    assert!(report.is_complete(), "{}", report.summary());
+}
+
+#[test]
+fn an_unreadable_message_is_reported_as_malformed() {
+    let mut report = CollectionReport::default();
+
+    objects("{{ not json", &mut report, SCOPE);
+
+    assert!(!report.is_complete());
+    assert!(
+        report.unreadable_sources().is_empty(),
+        "the queue was read fine; a bad message must not suspend AWS removals"
+    );
+}
+
+const ROOMY: u64 = 1 << 20;
+
+#[test]
+fn a_gzipped_object_is_decompressed() {
+    let text = default_record("10.10.1.10", "198.51.100.10", "ACCEPT");
+
+    let out = decompress(&gzip(&text), ROOMY).expect("decompresses");
+
+    assert_eq!(out.text, text);
+    assert!(!out.truncated);
+}
+
+#[test]
+fn a_cut_that_lands_inside_a_character_still_yields_the_part_before_it() {
+    let text = "é".repeat(100);
+    let limit = 51;
+
+    let out =
+        decompress(&gzip(&text), limit).expect("a mid-character cut must not lose the object");
+
+    assert!(out.truncated);
+    assert_eq!(out.text, "é".repeat(25));
+    assert!(text.starts_with(&out.text));
+}
+
+#[test]
+fn a_plain_text_object_is_read_as_is() {
+    let text = default_record("10.10.1.10", "198.51.100.10", "ACCEPT");
+
+    assert_eq!(
+        decompress(text.as_bytes(), ROOMY).expect("reads").text,
+        text
+    );
+}
+
+#[test]
+fn decompression_stops_at_the_limit_and_reports_the_cut() {
+    let text = "x".repeat(4096);
+
+    let out = decompress(&gzip(&text), 1024).expect("decompresses");
+
+    assert_eq!(out.text.len(), 1024);
+    assert!(out.truncated);
+}
+
+#[test]
+fn a_parquet_object_says_what_is_wrong_with_it() {
+    let error = decompress(b"PAR1\x00\x00", ROOMY).expect_err("not supported");
+
+    assert!(error.contains("Parquet"), "{error}");
+}
+
+#[tokio::test]
+async fn a_record_with_no_network_is_reported_without_holding_the_feed_back() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (
+            OK,
+            gzip(&record_at(
+                "eni-unscanned",
+                "10.10.1.10",
+                "198.51.100.10",
+                "ACCEPT",
+            )),
+        ),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
+
+    assert!(batch.observations.is_empty());
+    assert!(
+        !batch.report.is_complete(),
+        "the dropped record is reported"
+    );
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        None,
+        "an unplaced record is Malformed, never an unreadable source"
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "redelivering the object would not place the record either"
+    );
+}
+
+#[tokio::test]
+async fn an_object_that_could_not_be_read_leaves_its_notification_on_the_queue() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (403, br#"<Error><Code>AccessDenied</Code></Error>"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        Some(atlas_graph::collection::FailureKind::Unauthorized)
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        2,
+        "receive and get-object only — deleting here would lose the object for good"
+    );
+}
+
+#[tokio::test]
+async fn an_object_that_is_gone_releases_its_notification() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (404, br#"<Error><Code>NoSuchKey</Code></Error>"#.to_vec()),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        None,
+        "an object a lifecycle rule aged out is not an unreadable source"
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "redelivering a notification for an object that no longer exists never succeeds"
+    );
+}
+
+#[tokio::test]
+async fn an_object_that_was_read_but_makes_no_sense_is_deleted_anyway() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (OK, b"PAR1unsupported".to_vec()),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        None,
+        "a drifted object is Malformed, never an unreadable source"
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "redelivering an object that will not parse just replays the failure"
+    );
+}
+
+#[tokio::test]
+async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
+    let http = replay(vec![(403, br#"{"__type":"AccessDenied"}"#.to_vec())]);
+    let config = replay_config(http).await;
+
+    let batch = flow_queue(&config)
+        .receive(&InterfaceNetworks::default())
+        .await;
+
+    assert!(batch.observations.is_empty());
+    assert!(!batch.report.is_complete());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        Some(atlas_graph::collection::FailureKind::Unauthorized),
+        "a queue policy problem no amount of polling fixes"
+    );
+}
+
+const OK: u16 = 200;
+
+fn gzip(text: &str) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(text.as_bytes()).expect("gzip");
+    encoder.finish().expect("gzip")
+}
+
+fn replay(responses: Vec<(u16, Vec<u8>)>) -> StaticReplayClient {
+    let events = responses
+        .into_iter()
+        .map(|(status, body)| {
+            ReplayEvent::new(
+                http::Request::builder()
+                    .uri("https://example.amazonaws.com/")
+                    .body(SdkBody::empty())
+                    .unwrap(),
+                http::Response::builder()
+                    .status(status)
+                    .body(SdkBody::from(body))
+                    .unwrap(),
+            )
+        })
+        .collect();
+    StaticReplayClient::new(events)
+}
+
+async fn replay_config(http: StaticReplayClient) -> aws_config::SdkConfig {
+    aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::for_tests())
+        .http_client(http)
+        .load()
+        .await
+}
+
+fn flow_queue(config: &aws_config::SdkConfig) -> FlowLogQueue {
+    FlowLogQueue::new(
+        config,
+        "https://sqs.us-east-1.amazonaws.com/111111111111/atlas-flow-logs",
+        "us-east-1",
+    )
+    .with_wait_seconds(0)
+}
+
+fn received(bodies: &[String]) -> String {
+    let messages: Vec<_> = bodies
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            serde_json::json!({
+                "MessageId": format!("m{i}"),
+                "ReceiptHandle": format!("handle-{i}"),
+                "Body": body,
+            })
+        })
+        .collect();
+    serde_json::json!({ "Messages": messages }).to_string()
+}

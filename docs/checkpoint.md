@@ -4,9 +4,9 @@
 
 All four providers collect, all three change-detection tiers run for AWS, and the full stack runs credential-free in demo mode.
 
-- **`atlas-lib`:** Collectors and projectors for AWS, GCP, Azure, and Cloudflare; 99 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
-- **Tier 1 (Events):** `atlas_graph::event` + `cloud/amazon/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
-- **Tier 2 (Flows):** `atlas_graph::flow` + `cloud/amazon/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
+- **Provider crates (`atlas-aws`, `atlas-gcp`, `atlas-azure`, `atlas-cloudflare`):** Collectors and projectors, aggregated by `atlas-lib`; 99 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
+- **Tier 1 (Events):** `atlas_graph::event` + `atlas-aws/src/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
+- **Tier 2 (Flows):** `atlas_graph::flow` + `atlas-aws/src/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
 - **Tier 3 (Reconciliation):** `patch::diff` over a persistent graph; `CollectionReport` + `carry_forward` + `Retention` distinguish collection failures from deletions.
 - **Address & network coverage:** AWS `DescribeNetworkInterfaces` and RDS endpoint hostnames; GCP instance internal/NAT IPs, forwarding rules, and Cloud SQL; Azure NICs and load balancers. Private IPs scope to their network (`GenericPrivateIpAddress`) and resolve across AWS VPC peering, Transit Gateways and their peering, Azure VNet peering and Virtual WAN, GCP network peering and NCC hubs, site-to-site VPN tunnels, and dedicated circuits (Direct Connect, ExpressRoute and Cloud Interconnect, paired across clouds over Cross-Cloud Interconnect), with each network's address space keeping its own unheld addresses local and VPC and transit gateway route tables deciding which join traffic takes (`docs/network_connectivity_design.md`).
 - **Derived edges (`atlas_graph::derive::all`):** `Covers` (host IP in CIDR, per network) and `Serves` (`inferred`/`confirmed` service topology across instance and IP target groups, gated on `scanned_instances`).

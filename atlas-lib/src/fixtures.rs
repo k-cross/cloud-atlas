@@ -1,11 +1,14 @@
 use crate::Settings;
 use crate::atlas::projector;
-use crate::cloud::definition::{
+use crate::atlas::projector::Provider;
+use atlas_aws::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
     AWSRoute53, AWSTransitGatewayRouteTable, AWSTransitGatewayRouting, AmazonCollection,
-    CloudflareCollection, GoogleCollection, HostedZoneId, MicrosoftCollection, Provider, QueueUrl,
-    TableName,
+    HostedZoneId, QueueUrl, TableName,
 };
+use atlas_azure::definition::MicrosoftCollection;
+use atlas_cloudflare::definition::CloudflareCollection;
+use atlas_gcp::definition::GoogleCollection;
 use atlas_graph::collection::CollectionSource;
 use atlas_graph::definition::Node;
 use atlas_graph::derive;
@@ -1409,20 +1412,18 @@ pub fn aws() -> Provider {
 }
 
 pub fn gcp() -> Provider {
-    use crate::api::google::compute::{AccessConfig, Firewall, Instance, NetworkInterface};
-    use crate::api::google::compute_network::{
-        ForwardingRule, Network, NetworkPeering, Subnetwork,
-    };
-    use crate::api::google::dns::ManagedZone;
-    use crate::api::google::functions::CloudFunction;
-    use crate::api::google::gke::{Cluster, NetworkConfig};
-    use crate::api::google::interconnect::{Interconnect, InterconnectAttachment, Router};
-    use crate::api::google::network_connectivity::{Hub, LinkedVpcNetwork, Spoke};
-    use crate::api::google::pubsub::{Subscription, Topic};
-    use crate::api::google::run::Service;
-    use crate::api::google::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
-    use crate::api::google::storage::Bucket;
-    use crate::api::google::vpn::{ExternalVpnGateway, GatewayInterface, VpnGateway, VpnTunnel};
+    use atlas_gcp::api::compute::{AccessConfig, Firewall, Instance, NetworkInterface};
+    use atlas_gcp::api::compute_network::{ForwardingRule, Network, NetworkPeering, Subnetwork};
+    use atlas_gcp::api::dns::ManagedZone;
+    use atlas_gcp::api::functions::CloudFunction;
+    use atlas_gcp::api::gke::{Cluster, NetworkConfig};
+    use atlas_gcp::api::interconnect::{Interconnect, InterconnectAttachment, Router};
+    use atlas_gcp::api::network_connectivity::{Hub, LinkedVpcNetwork, Spoke};
+    use atlas_gcp::api::pubsub::{Subscription, Topic};
+    use atlas_gcp::api::run::Service;
+    use atlas_gcp::api::sql::{SqlInstance, SqlIpAddress, SqlIpConfiguration, SqlSettings};
+    use atlas_gcp::api::storage::Bucket;
+    use atlas_gcp::api::vpn::{ExternalVpnGateway, GatewayInterface, VpnGateway, VpnTunnel};
 
     let network_link = format!(
         "https://www.googleapis.com/compute/v1/projects/{}/global/networks/vpc-globex",
@@ -1728,7 +1729,7 @@ pub fn gcp() -> Provider {
 }
 
 pub fn azure() -> Provider {
-    use crate::api::azure::models::*;
+    use atlas_azure::api::models::*;
 
     let vm = VirtualMachine {
         id: Some(azure_id("Microsoft.Compute/virtualMachines/vm-worker")),
@@ -2157,10 +2158,10 @@ fn dns_record(
 }
 
 pub fn cloudflare() -> Provider {
-    use crate::cloud::cloudflare::d1::D1Database;
-    use crate::cloud::cloudflare::durable_objects::DurableObjectNamespace;
-    use crate::cloud::cloudflare::worker::WorkerBinding;
-    use crate::cloud::definition::{ScriptId, ZoneId};
+    use atlas_cloudflare::d1::D1Database;
+    use atlas_cloudflare::definition::{ScriptId, ZoneId};
+    use atlas_cloudflare::durable_objects::DurableObjectNamespace;
+    use atlas_cloudflare::worker::WorkerBinding;
     use serde_json::json;
 
     let records = vec![

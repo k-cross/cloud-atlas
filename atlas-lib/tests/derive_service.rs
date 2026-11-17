@@ -363,7 +363,8 @@ fn a_lapsed_flow_drops_a_wired_target_back_to_inferred() {
 // its registration and its interface, and neither may bring it back.
 #[test]
 fn a_stopped_target_is_not_inferred() {
-    use atlas_lib::cloud::definition::{AmazonCollection, Provider};
+    use atlas_aws::definition::AmazonCollection;
+    use atlas_lib::atlas::projector::Provider;
 
     let stopped = Node::AwsEc2Instance("i-globex-web-03".into());
     let Provider::AWS(collections) = fixtures::aws() else {
@@ -424,7 +425,9 @@ fn a_private_address_resolves_across_a_vpn_tunnel() {
 
 #[test]
 fn a_tunnel_whose_far_end_is_going_away_resolves_nothing() {
-    use atlas_lib::cloud::definition::{GoogleCollection, MicrosoftCollection, Provider};
+    use atlas_azure::definition::MicrosoftCollection;
+    use atlas_gcp::definition::GoogleCollection;
+    use atlas_lib::atlas::projector::Provider;
 
     let azure_vm = Node::AzureVirtualMachine(azure_networking_id(
         "Microsoft.Compute/virtualMachines/vm-worker",
@@ -468,7 +471,7 @@ fn a_tunnel_whose_far_end_is_going_away_resolves_nothing() {
     );
 }
 
-fn estate_where(edit: impl FnMut(&mut atlas_lib::cloud::definition::Provider)) -> GraphBuilder {
+fn estate_where(edit: impl FnMut(&mut atlas_lib::atlas::projector::Provider)) -> GraphBuilder {
     let mut providers = fixtures::all();
     providers.iter_mut().for_each(edit);
     fixtures::build_graph_of(providers)
@@ -515,7 +518,8 @@ fn a_private_address_resolves_across_a_dedicated_circuit() {
 
 #[test]
 fn a_circuit_whose_far_end_is_going_away_resolves_nothing() {
-    use atlas_lib::cloud::definition::{GoogleCollection, Provider};
+    use atlas_gcp::definition::GoogleCollection;
+    use atlas_lib::atlas::projector::Provider;
 
     let attachments_defunct = estate_where(|provider| {
         if let Provider::GCP(collections) = provider {
@@ -578,9 +582,8 @@ fn ip_target_estate(
     running: &[&str],
     peering: Option<(&str, &str)>,
 ) -> GraphBuilder {
-    use atlas_lib::cloud::definition::{
-        AWSConnectivity, AWSLoadBalancing, AmazonCollection, Provider,
-    };
+    use atlas_aws::definition::{AWSConnectivity, AWSLoadBalancing, AmazonCollection};
+    use atlas_lib::atlas::projector::Provider;
     use aws_sdk_ec2::types::{
         Instance, NetworkInterface, NetworkInterfaceAttachment, NetworkInterfacePrivateIpAddress,
         VpcPeeringConnection, VpcPeeringConnectionStateReason, VpcPeeringConnectionStateReasonCode,

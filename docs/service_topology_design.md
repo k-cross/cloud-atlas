@@ -14,7 +14,7 @@ Control-plane APIs report what is *wired*; flow logs report what is *used*. Join
 
 ### AWS
 
-`cloud/amazon/network_interface.rs` pages `DescribeNetworkInterfaces`. Every ENI projects its private, public, and IPv6 addresses, subnet, VPC, security groups, and instance attachment (`Instance -HasIp-> Eni -AttachedTo-> Subnet`), deduplicating with `project_instance` via `Node::ip`.
+`atlas-aws/src/network_interface.rs` pages `DescribeNetworkInterfaces`. Every ENI projects its private, public, and IPv6 addresses, subnet, VPC, security groups, and instance attachment (`Instance -HasIp-> Eni -AttachedTo-> Subnet`), deduplicating with `project_instance` via `Node::ip`.
 
 Unambiguous interface descriptions link owners to their ENIs:
 

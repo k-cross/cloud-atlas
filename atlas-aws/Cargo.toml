@@ -1,0 +1,46 @@
+[package]
+name = "atlas-aws"
+description = "AWS collectors, the live event and flow-log feeds, and the projector into the atlas graph."
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+keywords = ["AWS", "cloud", "graph", "infrastructure"]
+
+[dependencies]
+atlas-graph.workspace = true
+atlas-provider.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-apigateway.workspace = true
+aws-sdk-cloudfront.workspace = true
+aws-sdk-config.workspace = true
+aws-sdk-directconnect.workspace = true
+aws-sdk-dynamodb.workspace = true
+aws-sdk-ec2.workspace = true
+aws-sdk-ecs.workspace = true
+aws-sdk-eks.workspace = true
+aws-sdk-elasticloadbalancingv2.workspace = true
+aws-sdk-eventbridge.workspace = true
+aws-sdk-lambda.workspace = true
+aws-sdk-rds.workspace = true
+aws-sdk-route53.workspace = true
+aws-sdk-s3.workspace = true
+aws-sdk-sns.workspace = true
+aws-sdk-sqs.workspace = true
+aws-smithy-types.workspace = true
+flate2.workspace = true
+futures.workspace = true
+percent-encoding.workspace = true
+petgraph.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+aws-credential-types = { workspace = true, features = ["test-util"] }
+aws-smithy-runtime = { workspace = true, features = ["client", "test-util"] }
+ciborium.workspace = true
+http.workspace = true

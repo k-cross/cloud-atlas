@@ -1,3 +1,4 @@
+use atlas_aws::flow_logs;
 use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use atlas_graph::definition::{Edge, Node};
 use atlas_graph::derive;
@@ -9,7 +10,6 @@ use atlas_graph::patch::{GraphPatch, Retention, carry_forward, diff};
 use atlas_graph::util::{
     canonical_address, canonical_hostname, is_private, mask_to_prefix, parse_address,
 };
-use atlas_lib::cloud::amazon::flow_logs;
 use petgraph::graph::Graph;
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -1575,7 +1575,7 @@ proptest! {
         nsg_self in casing(), nsg_ref in casing(),
         pip_self in casing(),
     ) {
-        use atlas_lib::atlas::projector::azure::azure_projector;
+        use atlas_azure::projector::azure_projector;
 
         const VM: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1";
         const NIC: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/nic1";
@@ -1635,7 +1635,7 @@ proptest! {
         ];
         let _ = vnet_ref; // the vnet's own subnets list carries the ref; nothing else names the vnet by id.
 
-        let (collections, report) = atlas_lib::cloud::azure::provider::map_resources(raw);
+        let (collections, report) = atlas_azure::provider::map_resources(raw);
         prop_assert!(report.is_complete(), "every row here is well-formed");
 
         let mut builder = GraphBuilder::new();
