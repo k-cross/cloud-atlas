@@ -25,7 +25,7 @@ A provider without Tier 1 or Tier 2 runs on Tier 3 alone—always converging on 
 
 | Cloud | Source & Delivery | Status |
 |---|---|---|
-| **AWS** | EventBridge (CloudTrail management events, AWS Config items, EC2 state changes) → SQS (`--aws-event-queue`) | Built (`atlas::event`, `cloud/amazon/events.rs`) |
+| **AWS** | EventBridge (CloudTrail management events, AWS Config items, EC2 state changes) → SQS (`--aws-event-queue`) | Built (`atlas_graph::event`, `cloud/amazon/events.rs`) |
 | **GCP** | Cloud Asset Inventory feeds + Admin Activity audit logs (Log Router) → Pub/Sub | Planned |
 | **Azure** | Event Grid system topics, Activity Log, Resource Graph change history | Planned |
 | **Cloudflare** | Audit Logs API (no push feed; relies on fast polling) | Polling only |
@@ -36,7 +36,7 @@ Flow logs enrich topology with liveness ("this ENI talked in the last $N$ minute
 
 | Cloud | Source & Delivery | Status |
 |---|---|---|
-| **AWS** | VPC Flow Logs (ENI level) → S3 → SQS (`--aws-flow-log-queue`) | Built (`atlas::flow`, `cloud/amazon/flow_logs.rs`) |
+| **AWS** | VPC Flow Logs (ENI level) → S3 → SQS (`--aws-flow-log-queue`) | Built (`atlas_graph::flow`, `cloud/amazon/flow_logs.rs`) |
 | **GCP** | VPC Flow Logs → Cloud Logging → Log Router → Pub/Sub | Planned |
 | **Azure** | VNet flow logs → Storage → Event Grid | Planned |
 | **Cloudflare** | Logpush (L7 HTTP/firewall events, not L3) | Not applicable |

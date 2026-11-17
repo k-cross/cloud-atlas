@@ -2,14 +2,14 @@ use crate::demo;
 use crate::health;
 use crate::state::AppState;
 use crate::stream;
-use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-use atlas_lib::atlas::definition::{Edge, Node};
-use atlas_lib::atlas::derive::{self, DerivedObservations};
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::derive::{self, DerivedObservations};
+use atlas_graph::event::{ChangeEvent, EventApplier};
+use atlas_graph::flow::{FlowIndex, FlowObservation};
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::patch::{GraphPatch, Retention, carry_forward, diff, merge_additions};
 use atlas_lib::atlas::engine::AtlasEngine;
-use atlas_lib::atlas::event::{ChangeEvent, EventApplier};
-use atlas_lib::atlas::flow::{FlowIndex, FlowObservation};
-use atlas_lib::atlas::graph_builder::GraphBuilder;
-use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff, merge_additions};
 use atlas_lib::cloud::amazon::flow_logs::InterfaceNetworks;
 use petgraph::graph::Graph;
 use std::collections::HashSet;
@@ -308,10 +308,10 @@ async fn ingest(state: &AppState, applier: &mut EventApplier, batch: stream::Bat
 mod tests {
     use super::*;
 
-    use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-    use atlas_lib::atlas::event::ChangeOp;
-    use atlas_lib::atlas::export::{edge_key, node_key};
-    use atlas_lib::atlas::flow::FlowAction;
+    use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
+    use atlas_graph::event::ChangeOp;
+    use atlas_graph::export::{edge_key, node_key};
+    use atlas_graph::flow::FlowAction;
     use atlas_lib::fixtures::{self, AWS_NETWORK};
 
     const T0: i64 = 1_788_436_800_000;
@@ -714,7 +714,7 @@ mod tests {
     // The wiring outlives the traffic, so the edge survives a lapse that the
     // containment edge above does not: only its status may move.
     fn a_lapsed_flow_leaves_the_wiring_behind() {
-        use atlas_lib::atlas::derive;
+        use atlas_graph::derive;
 
         let scan = atlas_lib::fixtures::topology;
         let served = edge_key(
@@ -1031,7 +1031,7 @@ mod tests {
             patch
                 .added_nodes
                 .iter()
-                .any(|n| n.key == atlas_lib::atlas::export::node_key(&doomed)),
+                .any(|n| n.key == atlas_graph::export::node_key(&doomed)),
             "the scan re-adds what its snapshot still contained"
         );
     }

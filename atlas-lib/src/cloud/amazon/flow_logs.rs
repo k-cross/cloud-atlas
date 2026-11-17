@@ -1,6 +1,6 @@
-use crate::atlas::collection::CollectionSource;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::flow::{FlowAction, FlowObservation};
+use atlas_graph::collection::CollectionSource;
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::flow::{FlowAction, FlowObservation};
 use petgraph::graph::Graph;
 use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
@@ -290,9 +290,9 @@ fn value<'a>(columns: &[&'a str], at: usize) -> Option<&'a str> {
 
 pub mod stream {
     use super::{InterfaceNetworks, SOURCE, parse};
-    use crate::atlas::collection::{CollectionReport, FailureKind};
-    use crate::atlas::flow::FlowObservation;
     use crate::cloud::amazon::sqs::feed::{self, unwrap_sns};
+    use atlas_graph::collection::{CollectionReport, FailureKind};
+    use atlas_graph::flow::FlowObservation;
     use aws_sdk_s3::Client as S3Client;
     use aws_sdk_sqs::Client as SqsClient;
     use serde::Deserialize;

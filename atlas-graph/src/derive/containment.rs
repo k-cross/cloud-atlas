@@ -1,6 +1,6 @@
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::util::{mask_to_prefix, parse_address};
+use crate::definition::{Edge, Node};
+use crate::graph_builder::GraphBuilder;
+use crate::util::{mask_to_prefix, parse_address};
 use petgraph::Direction;
 use petgraph::graph::NodeIndex;
 use std::collections::{BTreeSet, HashMap};

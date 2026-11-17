@@ -6,8 +6,8 @@ disable-model-invocation: false
 
 Add a new cloud provider (`CollectionSource` unit for retention, carry-forward, and health reporting). Ask for the provider name and at least one initial resource type if not given. Follow all rules in `CLAUDE.md`.
 
-1. **Collection source (`atlas-lib/src/atlas/collection.rs`):** Add `CollectionSource::<Name>` and its `Display` arm.
-2. **Nodes (`atlas-lib/src/atlas/definition.rs`):** Add a `Some(CollectionSource::<Name>) => [..]` block in `nodes!` with `<Provider><Type>(id) => "Provider::SubType({id})"` (generates variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()`). Identity only—no counters, timestamps, or status. Reuse projected `Edge` kinds (`Contains`, `ConnectsTo`, `DependsOn`, `AttachedTo`, `HasIp`, `RoutesTo`, `ResolvesTo`); never emit `TrafficFlow`, `Covers`, or `Serves`.
+1. **Collection source (`atlas-graph/src/collection.rs`):** Add `CollectionSource::<Name>` and its `Display` arm.
+2. **Nodes (`atlas-graph/src/definition.rs`):** Add a `Some(CollectionSource::<Name>) => [..]` block in `nodes!` with `<Provider><Type>(id) => "Provider::SubType({id})"` (generates variant, `Display`, `kind()`, `ALL_KINDS`, and `owner()`). Identity only—no counters, timestamps, or status. Reuse projected `Edge` kinds (`Contains`, `ConnectsTo`, `DependsOn`, `AttachedTo`, `HasIp`, `RoutesTo`, `ResolvesTo`); never emit `TrafficFlow`, `Covers`, or `Serves`.
 3. **Collectors (`atlas-lib/src/cloud/<provider>/`):**
    - `mod.rs`: module exports and HTTP client with `with_base_url(token, url)` for wiremock.
    - `<resource>.rs`: returns `Result<T, Box<dyn std::error::Error>>`. Never stop paging on a short page; never swallow errors with `.ok()`.

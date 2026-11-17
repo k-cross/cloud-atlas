@@ -1,9 +1,9 @@
-use crate::atlas::collection::CollectionSource;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::export::{edge_key, node_key};
-use crate::atlas::flow::{eviction_cut, survives};
-use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::patch::{GraphPatch, merge_additions};
+use crate::collection::CollectionSource;
+use crate::definition::{Edge, Node};
+use crate::export::{edge_key, node_key};
+use crate::flow::{eviction_cut, survives};
+use crate::graph_builder::GraphBuilder;
+use crate::patch::{GraphPatch, merge_additions};
 use petgraph::graph::Graph;
 use std::collections::HashMap;
 use std::fmt;

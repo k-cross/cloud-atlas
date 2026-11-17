@@ -146,9 +146,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-graph"
+version = "0.1.0"
+dependencies = [
+ "petgraph",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "atlas-lib"
 version = "0.1.0"
 dependencies = [
+ "atlas-graph",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-apigateway",
@@ -193,6 +204,7 @@ dependencies = [
 name = "atlas-server"
 version = "0.1.0"
 dependencies = [
+ "atlas-graph",
  "atlas-lib",
  "axum",
  "clap",

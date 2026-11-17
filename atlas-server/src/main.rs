@@ -8,9 +8,9 @@ mod ws;
 
 use crate::poll::Source;
 use crate::state::AppState;
+use atlas_graph::flow::FlowIndex;
+use atlas_graph::patch::Retention;
 use atlas_lib::atlas::engine::AtlasEngine;
-use atlas_lib::atlas::flow::FlowIndex;
-use atlas_lib::atlas::patch::Retention;
 use clap::Parser;
 use std::time::Duration;
 

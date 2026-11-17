@@ -1,6 +1,6 @@
 use crate::state::AppState;
-use atlas_lib::atlas::collection::CollectionReport;
-use atlas_lib::atlas::patch::UnreadableSource;
+use atlas_graph::collection::CollectionReport;
+use atlas_graph::patch::UnreadableSource;
 use serde_json::{Value, json};
 
 pub fn value(
@@ -72,10 +72,10 @@ pub async fn publish(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_lib::atlas::collection::{CollectionSource, FailureKind};
-    use atlas_lib::atlas::flow::FlowIndex;
-    use atlas_lib::atlas::graph_builder::GraphBuilder;
-    use atlas_lib::atlas::patch::Retention;
+    use atlas_graph::collection::{CollectionSource, FailureKind};
+    use atlas_graph::flow::FlowIndex;
+    use atlas_graph::graph_builder::GraphBuilder;
+    use atlas_graph::patch::Retention;
 
     fn clean() -> CollectionReport {
         CollectionReport::default()

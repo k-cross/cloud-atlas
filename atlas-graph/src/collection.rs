@@ -1,4 +1,3 @@
-use crate::cloud::definition::Provider;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
@@ -137,10 +136,4 @@ impl CollectionReport {
             .collect::<Vec<_>>()
             .join("; ")
     }
-}
-
-#[derive(Debug)]
-pub struct ProviderScan {
-    pub provider: Provider,
-    pub report: CollectionReport,
 }

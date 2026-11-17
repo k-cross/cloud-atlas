@@ -3,13 +3,13 @@ mod networks;
 mod routing;
 mod service;
 
-pub(crate) use networks::HeldAddresses;
-pub(crate) use service::held_addresses;
+pub use networks::HeldAddresses;
+pub use service::{CONFIRMED, INFERRED, address_owners, held_addresses};
 
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::export::RenderObservation;
-use crate::atlas::flow::FlowIndex;
-use crate::atlas::graph_builder::GraphBuilder;
+use crate::definition::{Edge, Node};
+use crate::export::RenderObservation;
+use crate::flow::FlowIndex;
+use crate::graph_builder::GraphBuilder;
 use petgraph::graph::Graph;
 use std::collections::HashMap;
 

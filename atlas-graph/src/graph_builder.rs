@@ -1,4 +1,4 @@
-use crate::atlas::definition::{Edge, Node};
+use crate::definition::{Edge, Node};
 use petgraph::Direction;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;

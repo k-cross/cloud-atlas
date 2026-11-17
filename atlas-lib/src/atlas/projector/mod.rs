@@ -4,9 +4,9 @@ pub mod cloudflare;
 pub mod gcp;
 
 use crate::Settings;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::graph_builder::GraphBuilder;
 use crate::cloud::definition::Provider as CloudProvider;
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::graph_builder::GraphBuilder;
 use petgraph::graph::NodeIndex;
 use rayon::prelude::*;
 

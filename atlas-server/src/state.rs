@@ -1,8 +1,8 @@
 use crate::health;
-use atlas_lib::atlas::collection::CollectionReport;
-use atlas_lib::atlas::flow::FlowIndex;
-use atlas_lib::atlas::graph_builder::GraphBuilder;
-use atlas_lib::atlas::patch::{GraphPatch, UnreadableSource};
+use atlas_graph::collection::CollectionReport;
+use atlas_graph::flow::FlowIndex;
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::patch::{GraphPatch, UnreadableSource};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, watch};

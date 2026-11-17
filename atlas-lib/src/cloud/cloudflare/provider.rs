@@ -1,6 +1,6 @@
 use crate::Settings;
-use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
-use crate::cloud::definition::{CloudflareCollection, Provider, ScriptId, ZoneId};
+use crate::cloud::definition::{CloudflareCollection, Provider, ProviderScan, ScriptId, ZoneId};
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use cloudflare::framework::Environment;
 use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::client::async_api::Client;

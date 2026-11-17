@@ -1,12 +1,12 @@
 pub mod feed {
-    use crate::atlas::collection::{CollectionReport, FailureKind};
+    use atlas_graph::collection::{CollectionReport, FailureKind};
     use aws_sdk_sqs::Client;
     use aws_sdk_sqs::types::DeleteMessageBatchRequestEntry;
     use serde::Deserialize;
     use std::borrow::Cow;
 
-    const SOURCE: crate::atlas::collection::CollectionSource =
-        crate::atlas::collection::CollectionSource::Aws;
+    const SOURCE: atlas_graph::collection::CollectionSource =
+        atlas_graph::collection::CollectionSource::Aws;
 
     #[derive(Deserialize)]
     struct SnsEnvelope {

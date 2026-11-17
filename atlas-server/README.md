@@ -29,8 +29,8 @@ cargo run -p atlas-server -- \
 ## Architecture
 
 - **Single writer:** `poll::run` is the sole mutator of `Arc<RwLock<Graph>>`, `select!`ing over the reconciliation ticker and both live feeds; patches fan out over `tokio::sync::broadcast`.
-- **Tier 1 (`stream.rs`, `atlas::event`):** Normalises SQS messages into additive `ChangeEvent`s (explicit node deletes only), ordered per resource by cloud record time.
-- **Tier 2 (`atlas::flow`):** Stores flow records in the bounded, expiring `FlowIndex`. `reconcile` folds `FlowIndex::overlay` into each scan before diffing so expired flows are removed by `patch::diff`.
+- **Tier 1 (`stream.rs`, `atlas_graph::event`):** Normalises SQS messages into additive `ChangeEvent`s (explicit node deletes only), ordered per resource by cloud record time.
+- **Tier 2 (`atlas_graph::flow`):** Stores flow records in the bounded, expiring `FlowIndex`. `reconcile` folds `FlowIndex::overlay` into each scan before diffing so expired flows are removed by `patch::diff`.
 - **Tier 3 (`poll::reconcile`):** Collects, carries forward unreadable sources for `--retain-scans` ticks (fewer for `Unauthorized`), computes derived edges (`derive::all`), diffs on stable keys, and broadcasts non-empty patches.
 - **Isolated health reports:** Scan, stream, and flow health report independently on `/collection.json`; a degraded stream never blocks scan deletions.
 

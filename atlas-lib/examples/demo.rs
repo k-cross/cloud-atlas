@@ -1,6 +1,6 @@
-use atlas_lib::atlas::definition::{Edge, Node};
-use atlas_lib::atlas::derive;
-use atlas_lib::atlas::export::{RenderObservation, render_snapshot_with};
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::derive;
+use atlas_graph::export::{RenderObservation, render_snapshot_with};
 use atlas_lib::fixtures;
 use petgraph::dot::Dot;
 use std::collections::BTreeMap;

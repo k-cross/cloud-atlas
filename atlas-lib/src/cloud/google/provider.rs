@@ -3,9 +3,9 @@ use crate::api::google::client::{GoogleApiClient, ProjectApis};
 use crate::api::google::{
     compute, compute_network, dns, functions, gke, interconnect, network_connectivity, sql, vpn,
 };
-use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::collector::{NamedCollector, run_all};
-use crate::cloud::definition::{GoogleCollection, Provider};
+use crate::cloud::definition::{GoogleCollection, Provider, ProviderScan};
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use yup_oauth2::ApplicationSecret;
 
 const SOURCE: CollectionSource = CollectionSource::Gcp;

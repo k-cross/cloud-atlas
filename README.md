@@ -4,7 +4,7 @@ Discovers cloud configuration and maintains a live, in-memory property graph of 
 
 ## Architecture
 
-- **Typed graph:** 99 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`.
+- **Typed graph:** 99 `Node` kinds (`AwsEc2Instance`, `AzureVirtualNetwork`, …) over `Arc<str>` IDs and 10 semantic `Edge` kinds (`AttachedTo`, `HasIp`, `RoutesTo`, …), stored in memory with `petgraph`. The model, patches, flow overlay, change events, and derived edges live in the SDK-free `atlas-graph` crate; collectors, projectors, and the engine in `atlas-lib`.
 - **`AtlasEngine`:** Concurrent multi-cloud collection, structured failure reporting, and persistent graph state.
 - **Live backend (`atlas-server/`):** Reconciles against providers, diffs by stable resource key, and streams patches over WebSocket across three change tiers: control-plane event streams (Tier 1), flow-log liveness overlays (Tier 2), and full-scan polling (Tier 3). See [`docs/change_monitoring_design.md`](docs/change_monitoring_design.md).
 - **Liveness overlay:** Observed traffic lives beside the graph in a bounded, expiring `FlowIndex`. `Edge::TrafficFlow` asserts only that traffic occurred; counters and timestamps ride the snapshot's `observations` list.

@@ -1,6 +1,6 @@
-use crate::atlas::definition::{Edge, Node};
 use crate::atlas::projector::GraphBuilder;
 use crate::cloud::definition::{CloudflareCollection, ZoneId};
+use atlas_graph::definition::{Edge, Node};
 use cloudflare::endpoints::dns::dns::DnsContent;
 
 pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollection) {

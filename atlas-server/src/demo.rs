@@ -1,6 +1,6 @@
-use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-use atlas_lib::atlas::flow::FlowObservation;
-use atlas_lib::atlas::graph_builder::GraphBuilder;
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
+use atlas_graph::flow::FlowObservation;
+use atlas_graph::graph_builder::GraphBuilder;
 use atlas_lib::fixtures;
 use std::time::Duration;
 
@@ -130,11 +130,11 @@ pub fn flow_ttl(poll: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_lib::atlas::definition::{Edge, Node};
-    use atlas_lib::atlas::derive;
-    use atlas_lib::atlas::export::{RenderObservation, edge_key, node_key};
-    use atlas_lib::atlas::flow::FlowIndex;
-    use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff};
+    use atlas_graph::definition::{Edge, Node};
+    use atlas_graph::derive;
+    use atlas_graph::export::{RenderObservation, edge_key, node_key};
+    use atlas_graph::flow::FlowIndex;
+    use atlas_graph::patch::{GraphPatch, Retention, carry_forward, diff};
     use petgraph::visit::EdgeRef;
 
     const ALB: &str = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1";

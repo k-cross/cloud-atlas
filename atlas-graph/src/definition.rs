@@ -1,7 +1,5 @@
-use crate::atlas::collection::CollectionSource;
-use crate::atlas::util::{
-    canonical_hostname, format_address, is_private, mask_to_prefix, parse_address,
-};
+use crate::collection::CollectionSource;
+use crate::util::{canonical_hostname, format_address, is_private, mask_to_prefix, parse_address};
 use std::fmt;
 use std::sync::Arc;
 

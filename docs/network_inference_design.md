@@ -19,7 +19,7 @@ How separately scanned clouds join into one graph and how observed traffic overl
 
 ## 3. Flow Telemetry (Tier 2)
 
-Implemented in `atlas/flow.rs`:
+Implemented in `atlas-graph/src/flow.rs`:
 
 - `Edge::TrafficFlow` asserts only that traffic occurred. Verdict, packet/byte counters, and `last_seen` live beside the graph in the bounded, expiring `FlowIndex` keyed by `node_key`/`edge_key`.
 - Both endpoints are IP pivots, turning cross-cloud traffic into edges between estates. Private endpoints resolve in the record's `vpc-id` or its `interface-id`'s network in the live graph; records with a private IP and neither are dropped and reported as `Malformed`.
@@ -27,7 +27,7 @@ Implemented in `atlas/flow.rs`:
 
 ## 4. Containment (`Edge::Covers`)
 
-Implemented in `atlas/derive/containment.rs`. Security rules name CIDR blocks (`203.0.113.0/24`) while flow logs name host IPs (`203.0.113.77`). The containment pass links each host pivot to every CIDR pivot a rule names (an incoming `RoutesTo`) that covers it:
+Implemented in `atlas-graph/src/derive/containment.rs`. Security rules name CIDR blocks (`203.0.113.0/24`) while flow logs name host IPs (`203.0.113.77`). The containment pass links each host pivot to every CIDR pivot a rule names (an incoming `RoutesTo`) that covers it:
 
 ```
 AwsEc2SecurityGroup -RoutesTo-> 203.0.113.0/24 -Covers-> 203.0.113.77 <-TrafficFlow- 10.10.1.11

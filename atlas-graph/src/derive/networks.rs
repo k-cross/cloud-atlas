@@ -1,6 +1,6 @@
 use super::routing::Routing;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::util::parse_address;
+use crate::definition::{Edge, Node};
+use crate::util::parse_address;
 use petgraph::Direction;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;
@@ -498,7 +498,7 @@ impl<'g> Joins<'g> {
     }
 }
 
-pub(crate) struct HeldAddresses<'g> {
+pub struct HeldAddresses<'g> {
     joins: Joins<'g>,
     routing: Routing<'g>,
     held: HashMap<&'g str, Vec<(&'g str, NodeIndex)>>,
@@ -528,7 +528,7 @@ impl<'g> HeldAddresses<'g> {
         }
     }
 
-    pub(crate) fn holder(&self, network: &str, address: &str) -> Option<NodeIndex> {
+    pub fn holder(&self, network: &str, address: &str) -> Option<NodeIndex> {
         let holders = self.held.get(address)?;
         if let Some((_, local)) = holders.iter().find(|(held_in, _)| *held_in == network) {
             return Some(*local);
@@ -635,7 +635,7 @@ fn trails_back(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::graph_builder::GraphBuilder;
+    use crate::graph_builder::GraphBuilder;
 
     fn vpc(id: &str) -> Node {
         Node::AwsEc2Vpc(id.into())
@@ -1269,7 +1269,7 @@ mod tests {
     }
 
     fn resolved(builder: &GraphBuilder, network: &str, address: &str) -> Option<Node> {
-        crate::atlas::derive::held_addresses(&builder.graph)
+        crate::derive::held_addresses(&builder.graph)
             .holder(network, address)
             .map(|index| builder.graph[index].clone())
     }
@@ -1636,7 +1636,7 @@ mod tests {
                 0..6,
             ),
         ) {
-            use crate::atlas::util::{format_address, mask_to_prefix};
+            use crate::util::{format_address, mask_to_prefix};
             use std::net::{IpAddr, Ipv4Addr};
 
             let address = IpAddr::V4(Ipv4Addr::new(10, 40, 1, 1));

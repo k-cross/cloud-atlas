@@ -1,12 +1,12 @@
 use crate::Settings;
-use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
 use crate::cloud::amazon::{
     api_gateway, cloudfront, connectivity, container_service, direct_connect, dynamodb, eks,
     eventbridge, instance, lambda, load_balancer, network_interface, networking, rds, resource,
     route53, security_group, sns, sqs,
 };
 use crate::cloud::collector::{NamedCollector, run_all};
-use crate::cloud::definition::{AmazonCollection, Provider};
+use crate::cloud::definition::{AmazonCollection, Provider, ProviderScan};
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 
 const SOURCE: CollectionSource = CollectionSource::Aws;
 const GLOBAL: &str = "global";

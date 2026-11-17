@@ -6,7 +6,7 @@ Cloud Atlas maintains a **continuous live property graph** of multi-cloud infras
 
 ## Architecture Rules
 
-1. **Strongly typed enums only.** The graph is `petgraph::Graph<Node, Edge>` (`atlas-lib/src/atlas/definition.rs`). Never represent resources with raw strings or hashmaps.
+1. **Strongly typed enums only.** The graph is `petgraph::Graph<Node, Edge>` (`atlas-graph/src/definition.rs`). Never represent resources with raw strings or hashmaps.
 2. **ENI is the networking pivot:** `Instance -HasIp-> ENI -AttachedTo-> Subnet`. `Node::AwsEc2Eni` is keyed by its `eni-` ID (carried by `DescribeInstances`, Config items, and flow logs). The owning instance is the `HasIp` edge, never part of the key: ENIs reattach, instances are multi-homed, and managed ENIs (NAT, LB, RDS, VPC Lambda) have no instance. Instances with no interfaces get no ENI and no direct `Instance -> Subnet` edge.
 3. **`Display` on every type** in `Type::SubType(id)` form for `.dot` export.
 4. **Failure ≠ absence.** "Could not read" and "is gone" stay distinct through `CollectionReport`, `carry_forward`, and `Retention`. Never swallow collector errors with `.ok()` or `if let Ok(..)`.
@@ -14,7 +14,7 @@ Cloud Atlas maintains a **continuous live property graph** of multi-cloud infras
    - **Private addresses are network-scoped:** RFC 1918, RFC 6598, link-local, loopback, and ULA values (`util::is_private`) build `GenericPrivateIpAddress { network, address }`. Only public addresses stitch directly across networks; private addresses resolve across networks only through modelled joins at derive time (`docs/network_connectivity_design.md`).
    - **Edge kinds are load-bearing:** `RoutesTo` = traffic/rules, `ResolvesTo` = DNS, `ConnectsTo` = resource *holds* the address (used by `derive::service` for ownership). DNS always projects `GenericHostname(name) -ResolvesTo-> <record> -ResolvesTo-> target`.
    - **Every projected edge needs an owned endpoint:** `carry_forward` scopes edges by owner, so an edge between two ownerless pivots would survive any outage (`every_projected_edge_has_an_owned_endpoint`).
-6. **`Node` and `Edge` carry identity, never mutable state.** `Hash + Eq` is identity for `GraphBuilder` dedup, `patch::diff`, and `node_key`/`edge_key`. Changing fields (counters, `last_seen`, status) live beside the graph in `atlas::flow::FlowIndex` and derived observations, keeping `Edge::TrafficFlow` and `Edge::Serves` payload-free.
+6. **`Node` and `Edge` carry identity, never mutable state.** `Hash + Eq` is identity for `GraphBuilder` dedup, `patch::diff`, and `node_key`/`edge_key`. Changing fields (counters, `last_seen`, status) live beside the graph in `atlas_graph::flow::FlowIndex` and derived observations, keeping `Edge::TrafficFlow` and `Edge::Serves` payload-free.
 
 ## Testing Without Cloud Credentials
 
@@ -32,6 +32,14 @@ All model fields are `Option<T>` and serde ignores unknown fields, so a drifted 
 - **`cloudflare` crate** (zone/dns/kv): `Environment::Custom(format!("{}/client/v4/", server.uri()))` via `serve_crate`/`crate_client`.
 - **AWS SDK:** `StaticReplayClient` via `.http_client(...)` on a test `SdkConfig` in unit module `cloud/amazon/collector_tests.rs` (`replay_config` feeds responses in order; unit test because `aws-config` is a normal dependency).
 - **Azure mapping:** `provider::map_resources` returns `(collections, CollectionReport)` without failing the batch; undeserializable ARG rows are skipped and reported as `Malformed` (capped at `MAX_REPORTED_ROWS` + tail count).
+
+## Workspace Layout
+
+Shared package metadata and every third-party version live in the root `Cargo.toml` (`[workspace.package]`, `[workspace.dependencies]`). Members declare `dep.workspace = true` and add crate-specific features locally (`clap = { workspace = true, features = ["unicode"] }`); never pin a version in a member manifest.
+
+- **`atlas-graph`:** Cloud-agnostic core: `definition` (`Node`/`Edge`, `nodes!`), `util`, `graph_builder`, `export` (`SNAPSHOT_VERSION`), `collection` (`CollectionSource`, `CollectionReport`, `FailureKind`), `patch`, `flow`, `event`, `derive` (`all`, `held_addresses`, `address_owners`, `CONFIRMED`/`INFERRED`). Depends only on `petgraph` and `serde`; never add a cloud SDK, HTTP client, or `atlas-lib` dependency. Its unit tests build graphs by hand; a test that needs the Globex fixtures, a projector, or SDK types goes in `atlas-lib` (e.g. `atlas-lib/tests/derive_service.rs`, `atlas/tests.rs`) against the public API.
+- **`atlas-lib`:** Provider models and collectors (`api`, `cloud`), projectors, `AtlasEngine`, and `fixtures`. `ProviderScan` lives in `cloud::definition` beside `Provider`. Consumers import graph types from `atlas_graph::*` directly; `atlas-lib` does not re-export them.
+- **`atlas-cli`** (`atlas` binary), **`atlas-server`**, **`xtask`**.
 
 ## Build, Run & Dev Orchestration
 
@@ -83,7 +91,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ### Tier 1: Live Event Feed (`--aws-event-queue`)
 
-`atlas::event::ChangeEvent` + `EventApplier`; `cloud/amazon/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
+`atlas_graph::event::ChangeEvent` + `EventApplier`; `cloud/amazon/events.rs` drains EventBridge-fed SQS (Config items, EC2 state changes, CloudTrail). `poll::run` `select!`s over reconcile and both feeds under one writer.
 
 1. **Projector parity:** Adapters must emit only what the full-scan projector emits (`project_instance`/`InstanceFacts`, `project_interface`/`InterfaceFacts`, `use_aws_resource`/`use_global`). A Config item for a type in `TYPED_CONFIG_TYPES` becomes only its typed node, never also an `AwsConfigResource`. Types with no event key (keyed differently, like Route 53's `/hostedzone/` prefix and SQS URLs) and deferred `link_interface_owners` edges are omitted. Connectivity kinds go through the projector's `*Facts` helpers; an item whose recorded state the scan skips removes the node, and transit gateways (which record no state) only ever delete (`an_instance_event_produces_only_what_a_full_scan_would`, `an_interface_event_produces_only_what_a_full_scan_would`, `every_connectivity_event_produces_only_what_a_full_scan_would`).
 2. **Additive only:** Creates/modifies never remove unmentioned edges; deletes remove only the named node.
@@ -92,7 +100,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ### Tier 2: Liveness Overlay (`--aws-flow-log-queue`)
 
-`atlas::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `cloud/amazon/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
+`atlas_graph::flow::FlowObservation` + bounded, expiring `FlowIndex` (`AppState::flows`); `cloud/amazon/flow_logs.rs` drains S3 event notifications from SQS, gunzips, and parses flow logs.
 
 1. **Metrics beside the graph:** Flow edges carry `FlowStats` (`last_seen`, `packets`, `bytes`); nodes carry `Liveness` (`last_seen`, verdict, no volume to avoid multi-counting across up to 4 keys per record).
 2. **Ownerless pivots only:** Never invents typed nodes; creates only generic IP pivots.
@@ -107,7 +115,7 @@ All credential-free behaviour (the scripted `Steady → Launched → Serving →
 
 ## Rendering Workspace (`atlas-render/`)
 
-Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas-lib`. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `atlas-lib/src/atlas/export.rs`, `atlas-render/atlas-layout/src/graph.rs`, and `atlas-render/atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`).
+Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas-lib`. Contract is versioned JSON (`SNAPSHOT_VERSION = 3`, pinned in `atlas-graph/src/export.rs`, `atlas-render/atlas-layout/src/graph.rs`, and `atlas-render/atlas-web/src/lib/graph.ts`—bump all three and run `cargo xtask wasm`).
 
 - `atlas-layout`: deterministic ForceAtlas2 (Barnes-Hut, flat `f32` buffer, optional `parallel` rayon feature).
 - `atlas-layout-wasm`: `wasm-bindgen` bridge.
@@ -131,7 +139,7 @@ Separate Cargo workspace (`exclude`d from root) that must never depend on `atlas
 - **Graph mutation:** `add_edge` deduplicates; `GraphBuilder::merge(&graph)` folds by node identity; `GraphBuilder::remove_node` repairs `node_map` after petgraph swap-remove (never call `graph.remove_node` directly); `patch::merge_additions` merges a subgraph and returns only newly added elements.
 - **Pivots (`Node::ip(value, network)`, `Node::public_ip(value)`, `Node::link_ip(cidr)`, `Node::hostname(value)`):** Canonicalise via `util::canonical_address` / `canonical_hostname`. `link_ip` takes a BGP address with its prefix (`169.254.60.1/30`) and scopes it to the link subnet both ends of a circuit or tunnel compute. `network` equals the owning network node's ID (`Node::network_scope()`): AWS VPC ID, lowercased Azure VNet ID (from subnet), or GCP `projects/P/global/networks/N` (`projector/gcp.rs::canonical_network`). Azure NSG rules use each attached subnet's VNet. When no network exists, the naming resource's ID stands in as `network`: the zone for DNS records, the resource itself for unattached NSGs and non-VPC resources.
 - **AWS interfaces & `scanned_instances` gate:** `DescribeNetworkInterfaces` projects all ENIs and their private IPs (`project_instance` falls back to `facts.private_ip` only when an instance has no ENIs) and links EIPs (`Eni -HasIp-> Eip` via `network_interface_id`). `DescribeInstances` filters to running/pending, so post-parallel passes (`link_interface_owners` and `link_targets`) gate instance references on `scanned_instances`. `link_targets` links `instance` targets via `ConnectsTo` and `ip` targets via `RoutesTo` a VPC pivot, consulting `derive::held_addresses` to skip IPs held (locally or across a join) by an ENI attached to an unscanned instance (`a_stopped_ip_target_is_not_inferred`, `a_stopped_ip_target_across_a_peering_is_not_inferred`).
-- **Derived edges (`atlas::derive::all(&mut builder, &flows)`):** Single entry point called after `carry_forward` and `FlowIndex::overlay`. Stateless, idempotent, and excluded from `Edge::is_projected()` (`TrafficFlow`, `Covers`, `Serves`).
+- **Derived edges (`atlas_graph::derive::all(&mut builder, &flows)`):** Single entry point called after `carry_forward` and `FlowIndex::overlay`. Stateless, idempotent, and excluded from `Edge::is_projected()` (`TrafficFlow`, `Covers`, `Serves`).
   - `derive::containment`: links host IPs into covering CIDR pivots (`Edge::Covers`) within the same network.
   - `derive::service`: emits `Edge::Serves` in traffic direction (`inferred` from `CHAINS` over projected edges, `confirmed` from active `FlowIndex` records, oriented by `flow::orientation` port heuristics and `FlowStats` majority). `address_owners` walks `ConnectsTo` + transitive `HasIp` and resolves unheld private pivots across single unambiguous network joins (`JOINS` in `derive/networks.rs`: `Hub` paths (peering, TGW, Standard Virtual WAN, NCC with star edges), `HubPeering` (TGW peering, one hop), `Direct` VNet/GCP peerings, and `Link` ends (VPN: AWS connections, Azure/GCP gateways; circuits: Direct Connect VIFs, ExpressRoute circuits, VLAN attachments) that join two networks only when each end names an address the other holds; non-transitive except along those declared paths). `derive/routing.rs` gates each crossing: an address inside the reading network's own address space (`network -ConnectsTo-> range`) stays local, a VPC's route tables (`AwsEc2Route` nodes, longest prefix; a prefix-list route, whose entries are unread, always counts) must send it toward the join, and a transit gateway's associated table (static `AwsEc2TransitGatewayRoute` nodes plus propagations) must carry it to the far attachment. Snapshots emit `derive::observations`; patches emit `derive::DerivedObservations::changed`.
 

@@ -19,7 +19,7 @@ This is a **separate Cargo workspace** that never depends on `atlas-lib` (whose 
 
 - **`key`:** Stable identity derived from the typed resource, enabling incremental add/remove patches.
 - **`observations`:** Keyed by `key` (ignored by the layout engine). Patches send updated `observations` and `expired` keys without re-announcing topology. `packets`/`bytes` appear only on `TrafficFlow` edges to avoid multi-counting across incident nodes; `Serves` carries `inferred`/`confirmed` status and `last_seen`.
-- **`SNAPSHOT_VERSION` (3):** Pinned in `atlas-lib/src/atlas/export.rs`, `atlas-layout/src/graph.rs`, and `atlas-web/src/lib/graph.ts`. Bump all three together and run `cargo xtask wasm`.
+- **`SNAPSHOT_VERSION` (3):** Pinned in `atlas-graph/src/export.rs`, `atlas-layout/src/graph.rs`, and `atlas-web/src/lib/graph.ts`. Bump all three together and run `cargo xtask wasm`.
 
 ## Crates
 

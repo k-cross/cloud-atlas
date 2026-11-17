@@ -1,12 +1,12 @@
-use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-use atlas_lib::atlas::definition::{Edge, Node};
-use atlas_lib::atlas::derive;
-use atlas_lib::atlas::event::{ChangeEvent, ChangeOp, EventApplier};
-use atlas_lib::atlas::export::node_key;
-use atlas_lib::atlas::flow::{FlowAction, FlowIndex, FlowObservation, Orientation, orientation};
-use atlas_lib::atlas::graph_builder::GraphBuilder;
-use atlas_lib::atlas::patch::{GraphPatch, Retention, carry_forward, diff};
-use atlas_lib::atlas::util::{
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::derive;
+use atlas_graph::event::{ChangeEvent, ChangeOp, EventApplier};
+use atlas_graph::export::node_key;
+use atlas_graph::flow::{FlowAction, FlowIndex, FlowObservation, Orientation, orientation};
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::patch::{GraphPatch, Retention, carry_forward, diff};
+use atlas_graph::util::{
     canonical_address, canonical_hostname, is_private, mask_to_prefix, parse_address,
 };
 use atlas_lib::cloud::amazon::flow_logs;

@@ -1,7 +1,3 @@
-use crate::atlas::collection::CollectionSource;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::event::{ChangeEvent, ChangeOp};
-use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector::aws::{
     ConfigKey, CustomerGatewayFacts, EniFacts, InstanceFacts, InterfaceFacts, PeeringFacts,
     RouteFacts, RouteTableFacts, VpcFacts, VpnConnectionFacts, VpnGatewayFacts,
@@ -10,6 +6,10 @@ use crate::atlas::projector::aws::{
     typed_config_type, use_aws_resource, use_global,
 };
 use crate::cloud::amazon::sqs::feed::unwrap_sns;
+use atlas_graph::collection::CollectionSource;
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::event::{ChangeEvent, ChangeOp};
+use atlas_graph::graph_builder::GraphBuilder;
 use aws_smithy_types::date_time::{DateTime, Format};
 use petgraph::graph::Graph;
 use serde::Deserialize;
@@ -1181,9 +1181,9 @@ fn linked(source: Node, target: Node, edge: Edge) -> Graph<Node, Edge> {
 
 pub mod stream {
     use super::{MalformedEvent, SOURCE, parse};
-    use crate::atlas::collection::{CollectionReport, FailureKind};
-    use crate::atlas::event::ChangeEvent;
     use crate::cloud::amazon::sqs::feed;
+    use atlas_graph::collection::{CollectionReport, FailureKind};
+    use atlas_graph::event::ChangeEvent;
     use aws_sdk_sqs::Client;
 
     pub struct EventBatch {

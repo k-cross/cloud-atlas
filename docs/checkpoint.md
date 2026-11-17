@@ -5,11 +5,11 @@
 All four providers collect, all three change-detection tiers run for AWS, and the full stack runs credential-free in demo mode.
 
 - **`atlas-lib`:** Collectors and projectors for AWS, GCP, Azure, and Cloudflare; 99 `Node` kinds and 10 `Edge` kinds enforced by exhaustiveness guards.
-- **Tier 1 (Events):** `atlas::event` + `cloud/amazon/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
-- **Tier 2 (Flows):** `atlas::flow` + `cloud/amazon/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
+- **Tier 1 (Events):** `atlas_graph::event` + `cloud/amazon/events.rs` (AWS Config items including ENIs, EC2 state changes, and CloudTrail over SQS).
+- **Tier 2 (Flows):** `atlas_graph::flow` + `cloud/amazon/flow_logs.rs` (VPC Flow Logs → S3 → SQS into `FlowIndex`).
 - **Tier 3 (Reconciliation):** `patch::diff` over a persistent graph; `CollectionReport` + `carry_forward` + `Retention` distinguish collection failures from deletions.
 - **Address & network coverage:** AWS `DescribeNetworkInterfaces` and RDS endpoint hostnames; GCP instance internal/NAT IPs, forwarding rules, and Cloud SQL; Azure NICs and load balancers. Private IPs scope to their network (`GenericPrivateIpAddress`) and resolve across AWS VPC peering, Transit Gateways and their peering, Azure VNet peering and Virtual WAN, GCP network peering and NCC hubs, site-to-site VPN tunnels, and dedicated circuits (Direct Connect, ExpressRoute and Cloud Interconnect, paired across clouds over Cross-Cloud Interconnect), with each network's address space keeping its own unheld addresses local and VPC and transit gateway route tables deciding which join traffic takes (`docs/network_connectivity_design.md`).
-- **Derived edges (`atlas::derive::all`):** `Covers` (host IP in CIDR, per network) and `Serves` (`inferred`/`confirmed` service topology across instance and IP target groups, gated on `scanned_instances`).
+- **Derived edges (`atlas_graph::derive::all`):** `Covers` (host IP in CIDR, per network) and `Serves` (`inferred`/`confirmed` service topology across instance and IP target groups, gated on `scanned_instances`).
 - **`atlas-server` & `atlas-web`:** `/snapshot.json` (v3), `/collection.json` (with per-source retention), `/ws` (pushes `collection` health beside snapshots and patches); Wasm ForceAtlas2 layout + Sigma.js WebGL with traffic overlay, `Serves` status styling, service view, node search with fly-to focus, and a Collection health panel.
 - **Demo:** A scripted 16-tick loop (`atlas-server/src/demo.rs`) launches web-04 behind the balancer, confirms it with traffic, quiets web-01, holds Azure through a three-scan outage, then recovers (`docs/demo_design.md`).
 - **`cargo xtask`:** `dev [--demo]`, `wasm`, `demo`, `test [--e2e]`.

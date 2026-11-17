@@ -1,11 +1,11 @@
 use super::stream::EventQueue;
 use super::*;
 use crate::Settings;
-use crate::atlas::collection::{CollectionReport, FailureKind};
-use crate::atlas::event::EventApplier;
-use crate::atlas::export::{edge_key, node_key};
 use crate::atlas::projector;
 use crate::cloud::definition::{AmazonCollection, Provider};
+use atlas_graph::collection::{CollectionReport, FailureKind};
+use atlas_graph::event::EventApplier;
+use atlas_graph::export::{edge_key, node_key};
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
@@ -773,7 +773,7 @@ async fn a_queued_event_reaches_the_graph_as_a_patch() {
 
     let mut live = GraphBuilder::new();
     let mut applier = EventApplier::new();
-    let mut patch = crate::atlas::patch::GraphPatch::empty();
+    let mut patch = atlas_graph::patch::GraphPatch::empty();
     for event in &batch.events {
         patch.extend(applier.apply(&mut live, event));
     }

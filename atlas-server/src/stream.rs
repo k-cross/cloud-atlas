@@ -1,6 +1,6 @@
-use atlas_lib::atlas::collection::CollectionReport;
-use atlas_lib::atlas::event::ChangeEvent;
-use atlas_lib::atlas::flow::FlowObservation;
+use atlas_graph::collection::CollectionReport;
+use atlas_graph::event::ChangeEvent;
+use atlas_graph::flow::FlowObservation;
 use atlas_lib::cloud::amazon::events::stream::EventQueue;
 use atlas_lib::cloud::amazon::flow_logs::InterfaceNetworks;
 use atlas_lib::cloud::amazon::flow_logs::stream::FlowLogQueue;

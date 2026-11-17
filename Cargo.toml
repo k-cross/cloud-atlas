@@ -2,6 +2,7 @@
 resolver = "2"
 
 members = [
+  "atlas-graph",
   "atlas-lib",
   "atlas-cli",
   "atlas-server",
@@ -14,3 +15,59 @@ members = [
 exclude = [
   "atlas-render",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["KMC <kenny.kor.seo@gmail.com>"]
+license = "MPL-2.0"
+repository = "https://github.com/k-cross/cloud-atlas"
+documentation = "https://github.com/k-cross/cloud-atlas"
+
+[workspace.dependencies]
+atlas-graph = { path = "atlas-graph" }
+atlas-lib = { path = "atlas-lib" }
+
+aws-config = "1.0"
+aws-credential-types = "1"
+aws-sdk-apigateway = "1.0"
+aws-sdk-cloudfront = "1.0"
+aws-sdk-config = "1.0"
+aws-sdk-directconnect = "1.0"
+aws-sdk-dynamodb = "1.0"
+aws-sdk-ec2 = "1.0"
+aws-sdk-ecs = "1.0"
+aws-sdk-eks = "1.0"
+aws-sdk-elasticloadbalancingv2 = "1.0"
+aws-sdk-eventbridge = "1.0"
+aws-sdk-lambda = "1.0"
+aws-sdk-rds = "1.0"
+aws-sdk-route53 = "1.0"
+aws-sdk-s3 = "1"
+aws-sdk-sns = "1.0"
+aws-sdk-sqs = "1.0"
+aws-smithy-runtime = "1"
+aws-smithy-types = "1.0"
+axum = "0.7"
+azure_core = "1.0.0"
+azure_identity = "1.0.0"
+ciborium = "0.2"
+clap = { version = "4.0", features = ["derive"] }
+cloudflare = "0.14.0"
+flate2 = "1"
+futures = "0.3"
+http = "1"
+percent-encoding = "2"
+petgraph = "0.7"
+proptest = "1"
+rayon = "1.12.0"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.21", features = ["full"] }
+tower-http = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5.8"
+wiremock = "0.6"
+yup-oauth2 = "11"

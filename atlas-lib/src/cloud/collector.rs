@@ -1,4 +1,4 @@
-use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use std::future::Future;
 use std::pin::Pin;
 

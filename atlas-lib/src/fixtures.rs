@@ -1,9 +1,4 @@
 use crate::Settings;
-use crate::atlas::collection::CollectionSource;
-use crate::atlas::definition::Node;
-use crate::atlas::derive;
-use crate::atlas::flow::{FlowAction, FlowIndex, FlowObservation};
-use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
@@ -11,6 +6,11 @@ use crate::cloud::definition::{
     CloudflareCollection, GoogleCollection, HostedZoneId, MicrosoftCollection, Provider, QueueUrl,
     TableName,
 };
+use atlas_graph::collection::CollectionSource;
+use atlas_graph::definition::Node;
+use atlas_graph::derive;
+use atlas_graph::flow::{FlowAction, FlowIndex, FlowObservation};
+use atlas_graph::graph_builder::GraphBuilder;
 use std::collections::HashMap;
 
 pub const REGION: &str = "us-east-1";

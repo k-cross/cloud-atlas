@@ -127,12 +127,16 @@ fn demo_json() -> PathBuf {
 pub fn ensure_demo_snapshot() -> Result<(), String> {
     let root = repo_root();
     let sources = [
+        root.join("atlas-graph/src"),
+        root.join("atlas-graph/Cargo.toml"),
         root.join("atlas-lib/src"),
         root.join("atlas-lib/examples"),
         root.join("atlas-lib/Cargo.toml"),
     ];
     if older_than_sources(&demo_json(), &sources) {
-        println!("multi_cloud_demo.json is missing or older than atlas-lib — regenerating");
+        println!(
+            "multi_cloud_demo.json is missing or older than atlas-graph/atlas-lib — regenerating"
+        );
         demo_snapshot()
     } else {
         publish_demo_snapshot()

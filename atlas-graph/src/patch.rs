@@ -1,9 +1,9 @@
-use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::export::{
+use crate::collection::{CollectionReport, CollectionSource, FailureKind};
+use crate::definition::{Edge, Node};
+use crate::export::{
     RenderEdge, RenderNode, RenderObservation, SNAPSHOT_VERSION, edge_key, node_key,
 };
-use crate::atlas::graph_builder::GraphBuilder;
+use crate::graph_builder::GraphBuilder;
 use petgraph::graph::Graph;
 use petgraph::visit::EdgeRef;
 use serde::Serialize;

@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use crate::ws;
-use atlas_lib::atlas::derive;
-use atlas_lib::atlas::export::render_snapshot_with;
+use atlas_graph::derive;
+use atlas_graph::export::render_snapshot_with;
 use axum::Router;
 use axum::extract::State;
 use axum::response::{IntoResponse, Json};

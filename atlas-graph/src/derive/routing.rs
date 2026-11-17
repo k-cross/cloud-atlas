@@ -1,6 +1,6 @@
 use super::networks::Crossing;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::util::{mask_to_prefix, parse_address};
+use crate::definition::{Edge, Node};
+use crate::util::{mask_to_prefix, parse_address};
 use petgraph::Direction;
 use petgraph::graph::{Graph, NodeIndex};
 use petgraph::visit::EdgeRef;

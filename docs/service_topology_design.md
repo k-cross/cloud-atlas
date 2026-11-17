@@ -54,7 +54,7 @@ Cloudflare resources have no dedicated L3 addresses (Workers/DO use shared anyca
 
 ## 2. `Edge::Serves`
 
-Implemented in `atlas/derive/service.rs`. Collapses paths like:
+Implemented in `atlas-graph/src/derive/service.rs`. Collapses paths like:
 
 ```
 AwsElbLoadBalancer -HasIp-> AwsEc2Eni -ConnectsTo-> 10.10.1.50

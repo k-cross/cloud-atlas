@@ -1,7 +1,7 @@
-use crate::atlas::collection::CollectionSource;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::export::{RenderObservation, edge_key, node_key};
-use crate::atlas::graph_builder::GraphBuilder;
+use crate::collection::CollectionSource;
+use crate::definition::{Edge, Node};
+use crate::export::{RenderObservation, edge_key, node_key};
+use crate::graph_builder::GraphBuilder;
 use petgraph::graph::Graph;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -399,7 +399,7 @@ fn flow_key(pair: &(Node, Node)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::patch::diff;
+    use crate::patch::diff;
 
     const T0: i64 = 1_788_436_800_000;
     const MINUTE: i64 = 60 * 1_000;

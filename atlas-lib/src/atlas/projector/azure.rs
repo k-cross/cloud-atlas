@@ -2,12 +2,12 @@ use super::{link_bgp_session, project_leaf, project_parallel};
 use crate::api::azure::models::{
     ExpressRouteCircuit, ExpressRoutePeering, IpConfiguration, in_service,
 };
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::util::{
+use crate::cloud::definition::MicrosoftCollection;
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::util::{
     format_address, is_large_cidr, mask_to_prefix, offset_address, parse_address,
 };
-use crate::cloud::definition::MicrosoftCollection;
 use petgraph::graph::NodeIndex;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -1,13 +1,13 @@
 #[allow(clippy::module_inception)]
 #[cfg(test)]
 mod tests {
-    use crate::atlas::collection::CollectionSource;
-    use crate::atlas::definition::{Edge, Node};
-    use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector;
-    use crate::atlas::util::is_large_cidr;
     use crate::fixtures;
     use crate::{Settings, fixtures::azure_id};
+    use atlas_graph::collection::CollectionSource;
+    use atlas_graph::definition::{Edge, Node};
+    use atlas_graph::graph_builder::GraphBuilder;
+    use atlas_graph::util::is_large_cidr;
     use petgraph::visit::EdgeRef;
 
     // The projector folds a networking resource's id to one casing (Resource
@@ -2449,8 +2449,8 @@ mod tests {
     #[test]
     fn only_a_standard_virtual_wan_carries_traffic_between_its_networks() {
         use crate::api::azure::models::{HubVirtualNetworkConnection, VirtualHub, VirtualWan};
-        use crate::atlas::derive::held_addresses;
         use crate::cloud::definition::{MicrosoftCollection, Provider};
+        use atlas_graph::derive::held_addresses;
 
         let vnet =
             |name: &str| azure_networking_id(&format!("Microsoft.Network/virtualNetworks/{name}"));
@@ -3063,9 +3063,9 @@ mod tests {
     #[test]
     fn render_snapshot_covers_whole_fixture_graph() {
         let builder = fixtures::build_graph();
-        let snapshot = crate::atlas::export::render_snapshot(&builder.graph);
+        let snapshot = atlas_graph::export::render_snapshot(&builder.graph);
 
-        assert_eq!(snapshot.version, crate::atlas::export::SNAPSHOT_VERSION);
+        assert_eq!(snapshot.version, atlas_graph::export::SNAPSHOT_VERSION);
         assert_eq!(snapshot.nodes.len(), builder.graph.node_count());
         assert_eq!(snapshot.edges.len(), builder.graph.edge_count());
 
@@ -3075,7 +3075,7 @@ mod tests {
             assert!(ids.contains(&edge.source) && ids.contains(&edge.target));
         }
 
-        let json = crate::atlas::export::snapshot_json(&builder.graph).unwrap();
+        let json = atlas_graph::export::snapshot_json(&builder.graph).unwrap();
         assert!(json.contains("\"kind\":\"AwsEc2Eni\""));
         assert!(json.contains("\"version\":3"));
 
@@ -3086,7 +3086,7 @@ mod tests {
 
     #[test]
     fn node_key_is_unique_across_fixture_graph() {
-        use crate::atlas::export::node_key;
+        use atlas_graph::export::node_key;
         let builder = fixtures::build_graph();
         let keys: std::collections::HashSet<String> =
             builder.graph.node_weights().map(node_key).collect();
@@ -3100,7 +3100,7 @@ mod tests {
     #[test]
     fn diff_of_identical_graphs_is_empty() {
         let builder = fixtures::build_graph();
-        let patch = crate::atlas::patch::diff(&builder.graph, &builder.graph);
+        let patch = atlas_graph::patch::diff(&builder.graph, &builder.graph);
         assert!(
             patch.is_empty(),
             "diffing a graph against itself is a no-op"
@@ -3109,8 +3109,8 @@ mod tests {
 
     #[test]
     fn diff_detects_added_and_removed_nodes_and_edges() {
-        use crate::atlas::definition::{Edge, Node};
-        use crate::atlas::export::{edge_key, node_key};
+        use atlas_graph::definition::{Edge, Node};
+        use atlas_graph::export::{edge_key, node_key};
 
         let old = fixtures::build_graph();
 
@@ -3145,7 +3145,7 @@ mod tests {
         let ib = new.get_or_add_node(extra_dst);
         new.add_edge(ia, ib, Edge::ResolvesTo);
 
-        let patch = crate::atlas::patch::diff(&old.graph, &new.graph);
+        let patch = atlas_graph::patch::diff(&old.graph, &new.graph);
 
         assert!(patch.removed_nodes.contains(&removed_key));
         assert!(
@@ -3170,7 +3170,7 @@ mod tests {
 
     #[test]
     fn carry_forward_lets_a_healthy_source_delete_its_edge_to_a_shared_pivot() {
-        use crate::atlas::patch::carry_forward;
+        use atlas_graph::patch::carry_forward;
 
         let host = Node::GenericHostname("old.example.com".into());
         let zone = Node::GcpDnsManagedZone("globex-zone".into());
@@ -3203,7 +3203,7 @@ mod tests {
 
     #[test]
     fn carry_forward_lets_a_healthy_dns_provider_repoint_and_delete_records() {
-        use crate::atlas::patch::carry_forward;
+        use atlas_graph::patch::carry_forward;
 
         let repointed = Node::CloudflareDnsRecord("rec-app".into());
         let deleted = Node::CloudflareDnsRecord("rec-gone".into());
@@ -3247,8 +3247,8 @@ mod tests {
 
     #[test]
     fn carry_forward_restores_only_what_the_scan_is_missing() {
-        use crate::atlas::export::{edge_key, node_key};
-        use crate::atlas::patch::{carry_forward, diff};
+        use atlas_graph::export::{edge_key, node_key};
+        use atlas_graph::patch::{carry_forward, diff};
 
         let live = fixtures::build_graph().graph;
 
@@ -3269,7 +3269,7 @@ mod tests {
         carry_forward(&mut partial, &live, &all_sources());
         // Derived edges are not a scan's evidence, so carry_forward refuses to
         // hold them; the pipeline recomputes them on the carried graph instead.
-        crate::atlas::derive::all(&mut partial, &fixtures::observed());
+        atlas_graph::derive::all(&mut partial, &fixtures::observed());
 
         assert_eq!(partial.graph.node_count(), live.node_count() + 2);
 
@@ -3298,7 +3298,7 @@ mod tests {
 
     #[test]
     fn carry_forward_drops_pivots_nothing_points_at_any_more() {
-        use crate::atlas::patch::carry_forward;
+        use atlas_graph::patch::carry_forward;
 
         let anchored = Node::ip("10.0.0.1", fixtures::AWS_NETWORK);
         let orphan = Node::GenericIpAddress("203.0.113.7".into());
@@ -3326,7 +3326,7 @@ mod tests {
 
     #[test]
     fn carry_forward_is_a_no_op_when_the_scan_is_a_superset() {
-        use crate::atlas::patch::{carry_forward, diff};
+        use atlas_graph::patch::{carry_forward, diff};
 
         let mut next = fixtures::build_graph();
         let live = next.graph.clone();

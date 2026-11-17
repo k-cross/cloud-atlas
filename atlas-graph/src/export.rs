@@ -1,4 +1,4 @@
-use crate::atlas::definition::{Edge, Node};
+use crate::definition::{Edge, Node};
 use petgraph::graph::Graph;
 use petgraph::visit::EdgeRef;
 use serde::Serialize;

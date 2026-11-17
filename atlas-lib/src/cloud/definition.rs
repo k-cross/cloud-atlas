@@ -1,3 +1,4 @@
+use atlas_graph::collection::CollectionReport;
 use aws_sdk_config::types::ResourceIdentifier as AWSResource;
 use aws_sdk_ec2::types::Instance as AWSInstance;
 use aws_sdk_ecs::types::Cluster as AWSCluster;
@@ -21,6 +22,12 @@ pub enum Provider {
     GCP(Vec<(String, GoogleCollection)>),
     Azure(Vec<MicrosoftCollection>),
     Cloudflare(Box<CloudflareCollection>),
+}
+
+#[derive(Debug)]
+pub struct ProviderScan {
+    pub provider: Provider,
+    pub report: CollectionReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

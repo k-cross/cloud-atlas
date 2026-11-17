@@ -1,9 +1,9 @@
 use super::{link_bgp_session, project_leaf, project_parallel};
 use crate::api::google::compute::NetworkInterface;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::util::is_large_cidr;
 use crate::cloud::definition::GoogleCollection;
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::util::is_large_cidr;
 use std::collections::HashSet;
 use std::sync::Arc;
 

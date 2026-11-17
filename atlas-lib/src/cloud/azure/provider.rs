@@ -1,8 +1,8 @@
 use crate::Settings;
 use crate::api::azure::client::AzureApiClient;
 use crate::api::azure::models::*;
-use crate::atlas::collection::{CollectionReport, CollectionSource, FailureKind, ProviderScan};
-use crate::cloud::definition::{MicrosoftCollection, Provider};
+use crate::cloud::definition::{MicrosoftCollection, Provider, ProviderScan};
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use serde::Deserialize;
 
 const SOURCE: CollectionSource = CollectionSource::Azure;
@@ -549,8 +549,8 @@ fn properties_of<T: serde::de::DeserializeOwned>(props: &serde_json::Value) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::graph_builder::GraphBuilder;
     use crate::atlas::projector::azure::azure_projector;
+    use atlas_graph::graph_builder::GraphBuilder;
 
     #[test]
     fn every_queried_type_reaches_the_graph() {

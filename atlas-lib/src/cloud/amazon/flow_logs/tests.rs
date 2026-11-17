@@ -1,11 +1,11 @@
 use super::stream::{FlowLogQueue, decompress, objects};
 use super::*;
 use crate::Settings;
-use crate::atlas::collection::CollectionReport;
-use crate::atlas::definition::Edge;
-use crate::atlas::flow::FlowIndex;
-use crate::atlas::graph_builder::GraphBuilder;
 use crate::atlas::projector;
+use atlas_graph::collection::CollectionReport;
+use atlas_graph::definition::Edge;
+use atlas_graph::flow::FlowIndex;
+use atlas_graph::graph_builder::GraphBuilder;
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
@@ -509,7 +509,7 @@ async fn an_object_that_could_not_be_read_leaves_its_notification_on_the_queue()
     assert!(batch.observations.is_empty());
     assert_eq!(
         batch.report.unreadable_kind(SOURCE),
-        Some(crate::atlas::collection::FailureKind::Unauthorized)
+        Some(atlas_graph::collection::FailureKind::Unauthorized)
     );
     assert_eq!(
         http.actual_requests().count(),
@@ -583,7 +583,7 @@ async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
     assert!(!batch.report.is_complete());
     assert_eq!(
         batch.report.unreadable_kind(SOURCE),
-        Some(crate::atlas::collection::FailureKind::Unauthorized),
+        Some(atlas_graph::collection::FailureKind::Unauthorized),
         "a queue policy problem no amount of polling fixes"
     );
 }

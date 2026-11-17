@@ -1,58 +1,60 @@
 [package]
 name = "atlas-lib"
-version = "0.1.0"
-edition = "2024"
-repository = "https://github.com/k-cross/cloud-atlas"
-documentation = "https://github.com/k-cross/cloud-atlas"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
 keywords = ["AWS", "cloud", "graph", "infrastructure"]
-license = "MPL2"
 readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aws-config = "1.0"
-aws-credential-types = "1"
-aws-sdk-apigateway = "1.0"
-aws-sdk-cloudfront = "1.0"
-aws-sdk-config = "1.0"
-aws-sdk-directconnect = "1.0"
-aws-sdk-dynamodb = "1.0"
-aws-sdk-ec2 = "1.0"
-aws-sdk-ecs = "1.0"
-aws-sdk-eks = "1.0"
-aws-sdk-elasticloadbalancingv2 = "1.0"
-aws-sdk-eventbridge = "1.0"
-aws-sdk-lambda = "1.0"
-aws-sdk-rds = "1.0"
-aws-sdk-route53 = "1.0"
-aws-sdk-sns = "1.0"
-aws-sdk-sqs = "1.0"
-azure_core = "1.0.0"
-azure_identity = "1.0.0"
-cloudflare = "0.14.0"
-futures = "0.3"
-petgraph = "0.7"
-rayon = "1.12.0"
-reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.21", features = ["full"] }
-url = "2.5.8"
-yup-oauth2 = "11"
-aws-smithy-types = "1.0"
-aws-sdk-s3 = "1"
-flate2 = "1"
-percent-encoding = "2"
+atlas-graph.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-apigateway.workspace = true
+aws-sdk-cloudfront.workspace = true
+aws-sdk-config.workspace = true
+aws-sdk-directconnect.workspace = true
+aws-sdk-dynamodb.workspace = true
+aws-sdk-ec2.workspace = true
+aws-sdk-ecs.workspace = true
+aws-sdk-eks.workspace = true
+aws-sdk-elasticloadbalancingv2.workspace = true
+aws-sdk-eventbridge.workspace = true
+aws-sdk-lambda.workspace = true
+aws-sdk-rds.workspace = true
+aws-sdk-route53.workspace = true
+aws-sdk-sns.workspace = true
+aws-sdk-sqs.workspace = true
+azure_core.workspace = true
+azure_identity.workspace = true
+cloudflare.workspace = true
+futures.workspace = true
+petgraph.workspace = true
+rayon.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+url.workspace = true
+yup-oauth2.workspace = true
+aws-smithy-types.workspace = true
+aws-sdk-s3.workspace = true
+flate2.workspace = true
+percent-encoding.workspace = true
 
 [dev-dependencies]
 # Collector tests replay canned cloud API responses without credentials or
 # network: wiremock for the reqwest-based clients (GCP/Cloudflare/Azure),
 # smithy's replay client for the AWS SDK. See tests/{gcp,aws}_collector.rs.
-wiremock = "0.6"
-serde_json = "1.0"
-aws-smithy-runtime = { version = "1", features = ["client", "test-util"] }
-ciborium = "0.2"
-aws-credential-types = { version = "1", features = ["test-util"] }
-http = "1"
-proptest = "1"
+wiremock.workspace = true
+serde_json.workspace = true
+aws-smithy-runtime = { workspace = true, features = ["client", "test-util"] }
+ciborium.workspace = true
+aws-credential-types = { workspace = true, features = ["test-util"] }
+http.workspace = true
+proptest.workspace = true

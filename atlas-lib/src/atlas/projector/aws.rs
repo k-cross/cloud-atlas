@@ -1,13 +1,13 @@
 use super::{link_bgp_session, project_leaf, project_parallel};
 use crate::Settings;
-use crate::atlas::definition::{Edge, Node};
-use crate::atlas::derive::{self, HeldAddresses};
-use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::util::{canonical_address, is_large_cidr};
 use crate::cloud::definition::{
     AWSConnectivity, AWSDirectConnect, AWSDirectConnectGateways, AWSLoadBalancing, AWSNetworking,
     AWSRoute53, AWSTransitGatewayRouting, AmazonCollection, HostedZoneId,
 };
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::derive::{self, HeldAddresses};
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::util::{canonical_address, is_large_cidr};
 use aws_sdk_directconnect::types::{
     BgpPeerState, ConnectionState, DirectConnectGateway, DirectConnectGatewayAssociationState,
     DirectConnectGatewayState, GatewayType, VirtualInterface, VirtualInterfaceState,

@@ -1,7 +1,7 @@
 use crate::state::AppState;
-use atlas_lib::atlas::definition::{Edge, Node};
-use atlas_lib::atlas::derive;
-use atlas_lib::atlas::export::{
+use atlas_graph::definition::{Edge, Node};
+use atlas_graph::derive;
+use atlas_graph::export::{
     RenderEdge, RenderNode, SNAPSHOT_VERSION, node_key, render_snapshot_with,
 };
 use axum::extract::State;
@@ -188,12 +188,12 @@ fn neighbors_value(graph: &Graph<Node, Edge>, key: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{AppState, Message, handle_client_msg, neighbors_value, pump, send_snapshot};
-    use atlas_lib::atlas::collection::{CollectionReport, CollectionSource, FailureKind};
-    use atlas_lib::atlas::definition::{Edge, Node};
-    use atlas_lib::atlas::export::{SNAPSHOT_VERSION, node_key};
-    use atlas_lib::atlas::flow::FlowIndex;
-    use atlas_lib::atlas::graph_builder::GraphBuilder;
-    use atlas_lib::atlas::patch::GraphPatch;
+    use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
+    use atlas_graph::definition::{Edge, Node};
+    use atlas_graph::export::{SNAPSHOT_VERSION, node_key};
+    use atlas_graph::flow::FlowIndex;
+    use atlas_graph::graph_builder::GraphBuilder;
+    use atlas_graph::patch::GraphPatch;
     use futures::channel::mpsc;
     use futures::{SinkExt, StreamExt};
     use petgraph::graph::Graph;
@@ -230,7 +230,7 @@ mod tests {
     fn a_patch() -> GraphPatch {
         let mut graph: Graph<Node, Edge> = Graph::new();
         graph.add_node(Node::GenericIpAddress("203.0.113.7".into()));
-        atlas_lib::atlas::patch::diff(&Graph::new(), &graph)
+        atlas_graph::patch::diff(&Graph::new(), &graph)
     }
 
     #[tokio::test]
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn a_neighbors_payload_has_the_same_shape_as_a_snapshot() {
-        use atlas_lib::atlas::export::render_snapshot;
+        use atlas_graph::export::render_snapshot;
 
         let mut graph: Graph<Node, Edge> = Graph::new();
         let a = graph.add_node(Node::GenericHostname("center.example".into()));

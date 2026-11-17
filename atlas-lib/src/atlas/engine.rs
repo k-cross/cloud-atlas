@@ -1,14 +1,14 @@
 use crate::Settings;
-use crate::atlas::collection::CollectionReport;
-use crate::atlas::derive;
-use crate::atlas::flow::FlowIndex;
-use crate::atlas::graph_builder::GraphBuilder;
-use crate::atlas::patch::{Retention, carry_forward};
 use crate::atlas::projector;
 use crate::cloud::amazon::provider::build_aws;
 use crate::cloud::azure::provider::build_azure;
 use crate::cloud::cloudflare::provider::build_cloudflare;
 use crate::cloud::google::provider::build_gcp;
+use atlas_graph::collection::CollectionReport;
+use atlas_graph::derive;
+use atlas_graph::flow::FlowIndex;
+use atlas_graph::graph_builder::GraphBuilder;
+use atlas_graph::patch::{Retention, carry_forward};
 use petgraph::dot::Dot;
 use std::time::Duration;
 
@@ -138,7 +138,7 @@ impl AtlasEngine {
     async fn export_graph(&self) -> Result<(), Box<dyn std::error::Error>> {
         let s = format!("{}", Dot::with_config(&self.builder.graph, &[]));
         tokio::fs::write("atlas.dot", s).await?;
-        let json = crate::atlas::export::snapshot_json(&self.builder.graph)?;
+        let json = atlas_graph::export::snapshot_json(&self.builder.graph)?;
         tokio::fs::write("atlas.json", json).await?;
         println!("Graph updated successfully at atlas.dot (render snapshot: atlas.json)");
         Ok(())
@@ -148,8 +148,8 @@ impl AtlasEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atlas::collection::{CollectionSource, FailureKind};
-    use crate::atlas::definition::Node;
+    use atlas_graph::collection::{CollectionSource, FailureKind};
+    use atlas_graph::definition::Node;
 
     fn seeded(nodes: [Node; 2]) -> GraphBuilder {
         let mut builder = GraphBuilder::new();
