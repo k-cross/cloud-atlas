@@ -26,11 +26,11 @@ fn main() {
         "layout produced non-finite coordinates"
     );
     let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    for pair in positions.chunks_exact(2) {
-        min_x = min_x.min(pair[0]);
-        max_x = max_x.max(pair[0]);
-        min_y = min_y.min(pair[1]);
-        max_y = max_y.max(pair[1]);
+    for &[x, y] in positions.as_chunks::<2>().0 {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
     }
     println!(
         "{iterations} iterations in {elapsed:.2?} ({:.2?}/iter), final speed {:.4}",

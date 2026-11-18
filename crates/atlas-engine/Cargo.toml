@@ -3,6 +3,7 @@ name = "atlas-engine"
 description = "Aggregates every provider: runs collection, projects and reconciles the graph, and assembles the Globex fixture estate."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

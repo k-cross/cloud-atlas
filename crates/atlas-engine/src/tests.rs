@@ -1,4 +1,4 @@
-#[allow(clippy::module_inception)]
+#[expect(clippy::module_inception)]
 #[cfg(test)]
 mod tests {
     use crate::Settings;

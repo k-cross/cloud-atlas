@@ -135,10 +135,7 @@ impl AtlasEngine {
         self.update_graph().await
     }
 
-    pub async fn run_daemon(
-        &mut self,
-        interval_secs: u64,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run_daemon(&mut self, interval_secs: u64) -> ! {
         println!(
             "Starting in daemon mode. Polling for changes every {} seconds...",
             interval_secs

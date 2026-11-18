@@ -11,6 +11,7 @@ use cloudflare::framework::auth::Credentials;
 use cloudflare::framework::client::ClientConfig;
 use cloudflare::framework::client::async_api::Client;
 use serde_json::{Value, json};
+use std::assert_matches;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -275,19 +276,10 @@ async fn dns_records() {
     assert_eq!(records.len(), 4);
     assert_eq!(records[0].id, "rec-a");
     assert_eq!(records[0].name, "app.globex.com");
-    assert!(
-        matches!(&records[0].content, DnsContent::A { content } if content.to_string() == "203.0.113.10")
-    );
-    assert!(
-        matches!(&records[1].content, DnsContent::AAAA { content } if content.to_string() == "2001:db8::1")
-    );
-    assert!(
-        matches!(&records[2].content, DnsContent::CNAME { content } if content == "app.globex.com")
-    );
-    assert!(matches!(
-        &records[3].content,
-        DnsContent::MX { priority: 10, .. }
-    ));
+    assert_matches!(&records[0].content, DnsContent::A { content } if content.to_string() == "203.0.113.10");
+    assert_matches!(&records[1].content, DnsContent::AAAA { content } if content.to_string() == "2001:db8::1");
+    assert_matches!(&records[2].content, DnsContent::CNAME { content } if content == "app.globex.com");
+    assert_matches!(&records[3].content, DnsContent::MX { priority: 10, .. });
 }
 
 #[tokio::test]

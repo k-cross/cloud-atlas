@@ -198,7 +198,6 @@ mod tests {
     use futures::{SinkExt, StreamExt};
     use petgraph::graph::Graph;
     use serde_json::Value;
-    use std::convert::Infallible;
 
     fn state_with_a_pair() -> (AppState, String) {
         let mut builder = GraphBuilder::new();
@@ -301,7 +300,7 @@ mod tests {
     async fn a_connection_pushes_a_snapshot_before_the_client_asks() {
         let (state, _) = state_with_a_pair();
         let (out_tx, mut out_rx) = mpsc::unbounded::<Message>();
-        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
+        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, !>>();
 
         let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
 
@@ -320,7 +319,7 @@ mod tests {
     async fn a_broadcast_patch_reaches_a_connected_client() {
         let (state, _) = state_with_a_pair();
         let (out_tx, mut out_rx) = mpsc::unbounded::<Message>();
-        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
+        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, !>>();
 
         let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
         out_rx.next().await.expect("initial snapshot");
@@ -350,7 +349,7 @@ mod tests {
     async fn collection_health_follows_the_snapshot_and_every_change() {
         let (state, _) = state_with_a_pair();
         let (out_tx, mut out_rx) = mpsc::unbounded::<Message>();
-        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
+        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, !>>();
 
         let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
         assert_eq!(next_value(&mut out_rx).await["type"], "snapshot");
@@ -380,7 +379,7 @@ mod tests {
         for closer in [Some(Message::Close(None)), None] {
             let (state, _) = state_with_a_pair();
             let (out_tx, mut out_rx) = mpsc::unbounded::<Message>();
-            let (mut in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
+            let (mut in_tx, in_rx) = mpsc::unbounded::<Result<Message, !>>();
 
             let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
             out_rx.next().await.expect("initial snapshot");
@@ -399,7 +398,7 @@ mod tests {
         let (state, _) = state_with_a_pair();
 
         let (out_tx, mut out_rx) = mpsc::channel::<Message>(0);
-        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, Infallible>>();
+        let (in_tx, in_rx) = mpsc::unbounded::<Result<Message, !>>();
 
         let task = tokio::spawn(pump(out_tx, in_rx, state.clone()));
 

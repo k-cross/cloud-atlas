@@ -3,6 +3,7 @@ name = "atlas-server"
 description = "Live backend: owns the in-memory graph, polls providers, and pushes incremental patches over WebSocket."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -61,7 +61,7 @@ impl ForceAtlas2 {
         };
         let free_count = fixed.iter().filter(|f| !**f).count();
 
-        let masses = (0..n).map(|i| graph.mass(i)).collect();
+        let masses = Vec::from_fn(n, |i| graph.mass(i));
         Self {
             graph,
             settings,
@@ -190,7 +190,7 @@ impl ForceAtlas2 {
             None
         };
 
-        let kernel = |i: usize, force: &mut [f32]| {
+        let kernel = |i: usize, force: &mut [f32; 2]| {
             let (x, y, m) = (positions[2 * i], positions[2 * i + 1], masses[i]);
             let (fx, fy) = match tree {
                 Some(tree) => tree.repulsion(i as u32, x, y, m, kr, theta),
@@ -207,17 +207,17 @@ impl ForceAtlas2 {
             }
         };
 
-        #[cfg(feature = "parallel")]
-        forces
-            .par_chunks_exact_mut(2)
-            .enumerate()
-            .for_each(|(i, force)| kernel(i, force));
-
-        #[cfg(not(feature = "parallel"))]
-        forces
-            .chunks_exact_mut(2)
-            .enumerate()
-            .for_each(|(i, force)| kernel(i, force));
+        let (forces, _) = forces.as_chunks_mut::<2>();
+        cfg_select! {
+            feature = "parallel" => forces
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, force)| kernel(i, force)),
+            _ => forces
+                .iter_mut()
+                .enumerate()
+                .for_each(|(i, force)| kernel(i, force)),
+        }
     }
 
     fn apply_attraction(&mut self) {

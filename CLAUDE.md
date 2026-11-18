@@ -130,7 +130,7 @@ Workspace members that must never depend on another atlas crate. Contract is ver
 ## Auth & Toolchain
 
 - **Auth (unavailable locally):** AWS standard credential chain; GCP OAuth2 (`yup-oauth2`); Cloudflare `CLOUDFLARE_API_TOKEN`; Azure `az login` (`AzureCliCredential`).
-- **Toolchain:** Rust **2024 edition** (let-chains), stable ≥ 1.85. VCS is **jj** on git (`jj describe` → `jj new` → `jj squash` → `jj git push --change <id>`).
+- **Toolchain:** Rust **2024 edition**, MSRV **1.100** (`rust-version` in the root `[workspace.package]`; every member, xtask included, declares `rust-version.workspace = true`, and clippy reads it for its MSRV-aware lints). Prefer the std APIs that floor allows: let-chains and `if let` match guards, `assert_matches!`, `extract_if`, `array_windows`, `Duration::from_mins`/`from_hours`, the never type `!`, `mem::DropGuard`. VCS is **jj** on git (`jj describe` → `jj new` → `jj squash` → `jj git push --change <id>`).
 
 ## Established Helpers
 

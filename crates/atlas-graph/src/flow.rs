@@ -172,7 +172,7 @@ impl Default for FlowIndex {
 }
 
 impl FlowIndex {
-    pub const DEFAULT_TTL: Duration = Duration::from_secs(15 * 60);
+    pub const DEFAULT_TTL: Duration = Duration::from_mins(15);
 
     pub const DEFAULT_CAPACITY: usize = 10_000;
 
@@ -220,30 +220,18 @@ impl FlowIndex {
 
     pub fn expire(&mut self, now_ms: i64) {
         let horizon = now_ms.saturating_sub(self.ttl_ms);
-        let mut lapsed = Vec::new();
-        let mut dirty_flows = std::mem::take(&mut self.dirty_flows);
-        let mut dirty_resources = std::mem::take(&mut self.dirty_resources);
 
-        self.flows.retain(|pair, stats| {
-            let alive = stats.last_seen >= horizon;
-            if !alive {
-                lapsed.push(flow_key(pair));
-                dirty_flows.remove(pair);
-            }
-            alive
-        });
-        self.resources.retain(|node, stats| {
-            let alive = stats.last_seen >= horizon;
-            if !alive {
-                lapsed.push(node_key(node));
-                dirty_resources.remove(node);
-            }
-            alive
-        });
-
-        self.dirty_flows = dirty_flows;
-        self.dirty_resources = dirty_resources;
-        self.lapsed.extend(lapsed);
+        for (pair, _) in self.flows.extract_if(|_, stats| stats.last_seen < horizon) {
+            self.lapsed.push(flow_key(&pair));
+            self.dirty_flows.remove(&pair);
+        }
+        for (node, _) in self
+            .resources
+            .extract_if(|_, stats| stats.last_seen < horizon)
+        {
+            self.lapsed.push(node_key(&node));
+            self.dirty_resources.remove(&node);
+        }
     }
 
     pub fn overlay(&self, builder: &mut GraphBuilder) {
@@ -316,30 +304,24 @@ impl FlowIndex {
         if self.flows.len() > self.capacity {
             let (cutoff, mut ties) =
                 eviction_cut(self.flows.values().map(|s| s.last_seen), low_water);
-            let lapsed = &mut self.lapsed;
-            let dirty = &mut self.dirty_flows;
-            self.flows.retain(|pair, stats| {
-                let keep = survives(stats.last_seen, cutoff, &mut ties);
-                if !keep {
-                    lapsed.push(flow_key(pair));
-                    dirty.remove(pair);
-                }
-                keep
-            });
+            let evicted = self
+                .flows
+                .extract_if(|_, stats| !survives(stats.last_seen, cutoff, &mut ties));
+            for (pair, _) in evicted {
+                self.lapsed.push(flow_key(&pair));
+                self.dirty_flows.remove(&pair);
+            }
         }
         if self.resources.len() > self.capacity {
             let (cutoff, mut ties) =
                 eviction_cut(self.resources.values().map(|s| s.last_seen), low_water);
-            let lapsed = &mut self.lapsed;
-            let dirty = &mut self.dirty_resources;
-            self.resources.retain(|node, stats| {
-                let keep = survives(stats.last_seen, cutoff, &mut ties);
-                if !keep {
-                    lapsed.push(node_key(node));
-                    dirty.remove(node);
-                }
-                keep
-            });
+            let evicted = self
+                .resources
+                .extract_if(|_, stats| !survives(stats.last_seen, cutoff, &mut ties));
+            for (node, _) in evicted {
+                self.lapsed.push(node_key(&node));
+                self.dirty_resources.remove(&node);
+            }
         }
     }
 }
@@ -492,7 +474,7 @@ mod tests {
 
     #[test]
     fn a_flow_that_goes_quiet_is_removed_by_the_next_reconciliation() {
-        let mut index = FlowIndex::new(Duration::from_secs(600), 100);
+        let mut index = FlowIndex::new(Duration::from_mins(10), 100);
         index.observe(&flow("10.0.0.1", "198.51.100.10", T0));
 
         let mut live = estate();
@@ -598,7 +580,7 @@ mod tests {
 
     #[test]
     fn expiry_is_reported_to_clients() {
-        let mut index = FlowIndex::new(Duration::from_secs(600), 100);
+        let mut index = FlowIndex::new(Duration::from_mins(10), 100);
         index.observe(&flow("10.0.0.1", "198.51.100.10", T0));
         index.drain_observations();
 
@@ -613,7 +595,7 @@ mod tests {
     #[test]
     fn eviction_leaves_headroom_rather_than_refiring_per_record() {
         let capacity = 100;
-        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
+        let mut index = FlowIndex::new(Duration::from_hours(1), capacity);
 
         for i in 0..=capacity as i64 {
             index.observe(&flow("10.0.0.1", &format!("203.0.113.{i}"), T0 + i));
@@ -630,7 +612,7 @@ mod tests {
     #[test]
     fn eviction_survives_a_batch_that_shares_one_timestamp() {
         let capacity = 100;
-        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
+        let mut index = FlowIndex::new(Duration::from_hours(1), capacity);
 
         for i in 0..=capacity as i64 {
             index.observe(&flow("10.0.0.1", &format!("203.0.113.{i}"), T0));
@@ -647,7 +629,7 @@ mod tests {
     #[test]
     fn the_merge_context_never_exceeds_what_the_index_kept() {
         let capacity = 20;
-        let mut index = FlowIndex::new(Duration::from_secs(3600), capacity);
+        let mut index = FlowIndex::new(Duration::from_hours(1), capacity);
         let observations: Vec<FlowObservation> = (0..capacity as i64 * 5)
             .map(|i| flow("10.0.0.1", &format!("203.0.113.{i}"), T0 + i))
             .collect();

@@ -127,7 +127,7 @@ pub async fn run(
     flows: stream::FlowSource,
     interval: Duration,
     retention: Retention,
-) {
+) -> ! {
     let mut retention = retention;
     let mut derived = DerivedObservations::default();
     let mut applier = EventApplier::new();
@@ -933,7 +933,7 @@ mod tests {
         let state = AppState::new(
             demo::graph(2),
             CollectionReport::default(),
-            FlowIndex::new(Duration::from_secs(3600), 4),
+            FlowIndex::new(Duration::from_hours(1), 4),
         );
         let mut patches = state.patches.subscribe();
         let observations = (0..12)
@@ -973,7 +973,7 @@ mod tests {
 
     #[test]
     fn an_observation_that_lapses_is_removed_by_the_next_reconciliation() {
-        let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
+        let mut flows = FlowIndex::new(Duration::from_mins(10), 100);
         flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
 
         let mut live = demo::graph(2);
@@ -994,7 +994,7 @@ mod tests {
 
     #[test]
     fn an_incomplete_scan_does_not_hold_traffic_edges() {
-        let mut flows = FlowIndex::new(Duration::from_secs(600), 100);
+        let mut flows = FlowIndex::new(Duration::from_mins(10), 100);
         flows.observe(&observed("10.10.1.10", "192.0.2.5", T0));
 
         let mut live = demo::graph(2);

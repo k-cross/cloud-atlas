@@ -204,6 +204,7 @@ impl LayoutGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     const SAMPLE: &str = r#"{
         "version": 3,
@@ -262,10 +263,10 @@ mod tests {
     #[test]
     fn rejects_future_version() {
         let json = r#"{"version": 4, "nodes": [], "edges": []}"#;
-        assert!(matches!(
+        assert_matches!(
             LayoutGraph::from_json(json).unwrap_err(),
             GraphError::UnsupportedVersion { found: 4, .. }
-        ));
+        );
     }
 
     #[test]
@@ -280,9 +281,9 @@ mod tests {
 
     #[test]
     fn rejects_out_of_bounds_edge() {
-        assert!(matches!(
+        assert_matches!(
             LayoutGraph::new(2, vec![(0, 2)]).unwrap_err(),
             GraphError::EdgeOutOfBounds { .. }
-        ));
+        );
     }
 }

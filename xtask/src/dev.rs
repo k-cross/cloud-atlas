@@ -1,5 +1,6 @@
 use crate::tasks::{ensure_demo_snapshot, ensure_wasm, repo_root, run, strip_inherited_cargo_env};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::mem::DropGuard;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -17,7 +18,7 @@ pub struct DevOpts {
     pub skip_wasm: bool,
 }
 
-const READY_TIMEOUT: Duration = Duration::from_secs(300);
+const READY_TIMEOUT: Duration = Duration::from_mins(5);
 
 pub fn dev(mut opts: DevOpts) -> Result<(), String> {
     let root = repo_root();
@@ -58,18 +59,17 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
     }
 
     println!("\n▶ atlas-server {}", server_args.join(" "));
-    let mut server = spawn_prefixed(
-        Command::new(&server_bin)
-            .args(&server_args)
-            .current_dir(&root),
-        "server",
-    )?;
+    let mut server = DropGuard::new(
+        spawn_prefixed(
+            Command::new(&server_bin)
+                .args(&server_args)
+                .current_dir(&root),
+            "server",
+        )?,
+        stop,
+    );
 
-    if let Err(e) = wait_ready(&mut server, opts.port) {
-        let _ = server.kill();
-        let _ = server.wait();
-        return Err(e);
-    }
+    wait_ready(&mut server, opts.port)?;
 
     println!(
         "\n▶ bun run dev (web on http://localhost:{})",
@@ -81,21 +81,13 @@ pub fn dev(mut opts: DevOpts) -> Result<(), String> {
             .env("PORT", opts.web_port.to_string())
             .current_dir(root.join("atlas-web")),
         "web",
-    );
-    let web = match web {
-        Ok(w) => w,
-        Err(e) => {
-            let _ = server.kill();
-            let _ = server.wait();
-            return Err(e);
-        }
-    };
+    )?;
 
     println!(
         "\natlas dev stack is up — web http://localhost:{}  api http://localhost:{}  (Ctrl-C stops everything)\n",
         opts.web_port, opts.port
     );
-    supervise(vec![("server", server), ("web", web)])
+    supervise(vec![("server", DropGuard::dismiss(server)), ("web", web)])
 }
 
 fn target_dir(root: &std::path::Path) -> PathBuf {
@@ -175,13 +167,17 @@ fn supervise(mut children: Vec<(&'static str, Child)>) -> Result<(), String> {
     };
 
     println!("\n{name} exited ({status}) — stopping the rest");
-    for (_, child) in &mut children {
-        let _ = child.kill();
-        let _ = child.wait();
+    for (_, child) in children {
+        stop(child);
     }
     if status.success() {
         Ok(())
     } else {
         Err(format!("{name} exited with {status}"))
     }
+}
+
+fn stop(mut child: Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }

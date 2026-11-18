@@ -3,6 +3,7 @@ name = "atlas-layout"
 description = "Force-directed layout engine for cloud-atlas render snapshots. Pure Rust, wasm-compatible."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

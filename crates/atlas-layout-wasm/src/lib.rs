@@ -23,7 +23,12 @@ impl LayoutEngine {
         if !edges.len().is_multiple_of(2) {
             return Err(JsError::new("edge list length must be even"));
         }
-        let pairs = edges.chunks_exact(2).map(|e| (e[0], e[1])).collect();
+        let pairs = edges
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[source, target]| (source, target))
+            .collect();
         let graph = LayoutGraph::new(node_count as usize, pairs)
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(Self {

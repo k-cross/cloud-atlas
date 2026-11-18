@@ -3,6 +3,7 @@ name = "xtask"
 description = "Workspace orchestration: run the full dev stack (wasm + server + frontend) and every test suite from one command."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 # Deliberately minimal: xtask sits on the critical path of every dev loop, so it

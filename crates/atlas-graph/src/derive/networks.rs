@@ -636,6 +636,7 @@ fn trails_back(
 mod tests {
     use super::*;
     use crate::graph_builder::GraphBuilder;
+    use std::assert_matches;
 
     fn vpc(id: &str) -> Node {
         Node::AwsEc2Vpc(id.into())
@@ -665,11 +666,9 @@ mod tests {
                     names,
                 } => {
                     for path in holds.iter().chain(*names) {
-                        assert!(
-                            matches!(
-                                path.last().map(|step| step.kind),
-                                Some("GenericIpAddress" | "GenericPrivateIpAddress")
-                            ),
+                        assert_matches!(
+                            path.last().map(|step| step.kind),
+                            Some("GenericIpAddress" | "GenericPrivateIpAddress"),
                             "a link meets at an address"
                         );
                     }

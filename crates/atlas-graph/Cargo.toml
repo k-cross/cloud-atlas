@@ -3,6 +3,7 @@ name = "atlas-graph"
 description = "Cloud-agnostic property graph model: typed nodes and edges, graph patches, the flow liveness overlay, and live change events."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

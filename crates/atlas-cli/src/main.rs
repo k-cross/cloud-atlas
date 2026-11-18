@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = AtlasEngine::new(settings);
 
     if opts.daemon {
-        engine.run_daemon(60).await?;
+        engine.run_daemon(60).await;
     } else {
         engine.run_once().await?;
     }

@@ -778,7 +778,7 @@ proptest! {
         capacity in 1usize..40,
         records in prop::collection::vec((0u8..200, 0i64..500), 1..200),
     ) {
-        let mut index = FlowIndex::new(Duration::from_secs(3_600), capacity);
+        let mut index = FlowIndex::new(Duration::from_hours(1), capacity);
         let mut newest: HashMap<u8, i64> = HashMap::new();
 
         for (dst, tick) in &records {
@@ -888,8 +888,8 @@ proptest! {
         let graphs: Vec<Graph<Node, Edge>> = steps.iter().map(|ids| build(ids)).collect();
 
         let mut folded = GraphPatch::empty();
-        for pair in graphs.windows(2) {
-            folded.extend(diff(&pair[0], &pair[1]));
+        for [before, after] in graphs.array_windows() {
+            folded.extend(diff(before, after));
         }
 
         // A client applies removals before additions, so what has to match is
@@ -1190,9 +1190,9 @@ fn wire(builder: &mut GraphBuilder, stack: Stack) {
         chain.push(Node::AwsEc2Eni(format!("eni-{}-{}", stack.id, step).into()));
     }
 
-    for pair in chain.windows(2) {
-        let holder = builder.get_or_add_ref(&pair[0]);
-        builder.link_to(holder, pair[1].clone(), Edge::HasIp);
+    for [outer, inner] in chain.array_windows() {
+        let holder = builder.get_or_add_ref(outer);
+        builder.link_to(holder, inner.clone(), Edge::HasIp);
     }
 
     let claimer = chain.last().expect("a stack has a bottom").clone();
@@ -1252,8 +1252,7 @@ proptest! {
         // the same way: the destination is the service.
         let mut flows = FlowIndex::default();
         let mut expected: HashSet<(String, String)> = HashSet::new();
-        for pair in stacks.windows(2) {
-            let (client, server) = (pair[0], pair[1]);
+        for &[client, server] in stacks.array_windows() {
             flows.observe(&FlowObservation {
                 source: CollectionSource::Aws,
                 scope: "us-east-1".to_owned(),

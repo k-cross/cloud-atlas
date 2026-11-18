@@ -53,58 +53,49 @@ pub fn cloudflare_projector(builder: &mut GraphBuilder, data: &CloudflareCollect
         if let Some(bindings) = data.worker_bindings.get(worker) {
             for binding in bindings {
                 match binding.binding_type.as_str() {
-                    "kv_namespace" => {
-                        if let Some(ns_id) = &binding.namespace_id {
-                            builder.link_to(
-                                worker_node,
-                                Node::CloudflareKvNamespace(ns_id.as_str().into()),
-                                Edge::ConnectsTo,
-                            );
-                        }
+                    "kv_namespace" if let Some(ns_id) = &binding.namespace_id => {
+                        builder.link_to(
+                            worker_node,
+                            Node::CloudflareKvNamespace(ns_id.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
-                    "r2_bucket" => {
-                        if let Some(bucket_name) = &binding.bucket_name {
-                            builder.link_to(
-                                worker_node,
-                                Node::CloudflareR2Bucket(bucket_name.as_str().into()),
-                                Edge::ConnectsTo,
-                            );
-                        }
+                    "r2_bucket" if let Some(bucket_name) = &binding.bucket_name => {
+                        builder.link_to(
+                            worker_node,
+                            Node::CloudflareR2Bucket(bucket_name.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
-                    "durable_object_namespace" => {
-                        if let Some(ns_id) = &binding.namespace_id {
-                            builder.link_to(
-                                worker_node,
-                                Node::CloudflareDurableObject(ns_id.as_str().into()),
-                                Edge::ConnectsTo,
-                            );
-                        }
+                    "durable_object_namespace" if let Some(ns_id) = &binding.namespace_id => {
+                        builder.link_to(
+                            worker_node,
+                            Node::CloudflareDurableObject(ns_id.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
-                    "d1" => {
-                        if let Some(db_id) = &binding.id {
-                            builder.link_to(
-                                worker_node,
-                                Node::CloudflareD1Database(db_id.as_str().into()),
-                                Edge::ConnectsTo,
-                            );
-                        }
+                    "d1" if let Some(db_id) = &binding.id => {
+                        builder.link_to(
+                            worker_node,
+                            Node::CloudflareD1Database(db_id.as_str().into()),
+                            Edge::ConnectsTo,
+                        );
                     }
-                    "secret_text" | "plain_text" => {
+                    "secret_text" | "plain_text"
                         if let Some(text) = binding.extra.get("text").and_then(|t| t.as_str())
                             && (text.starts_with("postgres://")
                                 || text.starts_with("postgresql://")
                                 || text.starts_with("mongodb://")
                                 || text.starts_with("mysql://"))
                             && let Ok(url) = url::Url::parse(text)
-                            && let Some(host) = url.host_str()
-                        {
-                            let external_id = format!("{}://{}", url.scheme(), host);
-                            builder.link_to(
-                                worker_node,
-                                Node::ExternalService(external_id.into()),
-                                Edge::ConnectsTo,
-                            );
-                        }
+                            && let Some(host) = url.host_str() =>
+                    {
+                        let external_id = format!("{}://{}", url.scheme(), host);
+                        builder.link_to(
+                            worker_node,
+                            Node::ExternalService(external_id.into()),
+                            Edge::ConnectsTo,
+                        );
                     }
                     _ => {}
                 }
