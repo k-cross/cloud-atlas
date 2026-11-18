@@ -25,64 +25,6 @@ fn map(rows: Vec<Value>) -> Vec<MicrosoftCollection> {
 }
 
 #[test]
-fn a_malformed_row_is_skipped_without_discarding_the_batch() {
-    let good = |id: &str, name: &str| {
-        json!({
-            "id": id,
-            "name": name,
-            "type": "microsoft.storage/storageaccounts",
-            "location": "eastus"
-        })
-    };
-
-    let malformed = json!({
-        "id": "/subscriptions/s/.../storageAccounts/broken",
-        "name": 12345,
-        "type": "microsoft.storage/storageaccounts",
-        "location": "eastus"
-    });
-
-    let (cols, report) = map_resources(vec![
-        good("/subscriptions/s/.../storageAccounts/a", "sa-a"),
-        malformed,
-        good("/subscriptions/s/.../storageAccounts/b", "sa-b"),
-    ]);
-
-    let accounts = variant!(cols, AzureStorageAccounts);
-    let names: Vec<&str> = accounts
-        .iter()
-        .filter_map(|a| a.name.as_deref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        ["sa-a", "sa-b"],
-        "rows either side of the malformed one must survive"
-    );
-
-    assert!(
-        !report.is_complete(),
-        "a skipped row must be reported, or its absence looks like a deletion"
-    );
-    assert!(
-        report.summary().contains("storageAccounts/broken"),
-        "the report must name the offending row: {}",
-        report.summary()
-    );
-}
-
-#[test]
-fn an_unmodelled_resource_type_is_filtered_without_being_reported() {
-    let (_cols, report) = map_resources(vec![json!({
-        "id": "/subscriptions/s/.../redis/cache1",
-        "name": "cache1",
-        "type": "microsoft.cache/redis",
-        "location": "eastus"
-    })]);
-
-    assert!(report.is_complete(), "got: {}", report.summary());
-}
-
-#[test]
 fn vm_extracts_nic_ids_from_network_profile() {
     let cols = map(vec![json!({
         "id": "/subscriptions/s/.../virtualMachines/vm1",
@@ -301,16 +243,6 @@ fn web_site_kind_splits_function_apps_from_app_services() {
         variant!(cols, AzureAppServices)[0].name.as_deref(),
         Some("web-app")
     );
-}
-
-#[test]
-fn unknown_resource_types_are_ignored() {
-    let cols = map(vec![json!({
-        "id": "/x", "name": "mystery", "type": "microsoft.unknown/thing", "location": "eastus",
-        "properties": {}
-    })]);
-    assert!(variant!(cols, AzureVirtualMachines).is_empty());
-    assert!(variant!(cols, AzureStorageAccounts).is_empty());
 }
 
 #[test]

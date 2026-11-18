@@ -112,3 +112,44 @@ pub fn render_snapshot_with(
 pub fn snapshot_json(graph: &Graph<Node, Edge>) -> serde_json::Result<String> {
     serde_json::to_string(&render_snapshot(graph))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_observation_without_volume_carries_no_volume_fields() {
+        let observation = |key: &str, volume: Option<u64>| RenderObservation {
+            key: key.into(),
+            last_seen: 7,
+            packets: volume,
+            bytes: volume.map(|packets| packets * 100),
+            status: "observed",
+        };
+        let snapshot = render_snapshot_with(
+            &Graph::new(),
+            vec![observation("liveness", None), observation("flow", Some(3))],
+        );
+
+        let json = serde_json::to_value(&snapshot).expect("serializes");
+
+        assert_eq!(
+            json["observations"],
+            json!([
+                { "key": "liveness", "last_seen": 7, "status": "observed" },
+                { "key": "flow", "last_seen": 7, "packets": 3, "bytes": 300, "status": "observed" }
+            ])
+        );
+    }
+
+    #[test]
+    fn the_exported_json_is_stamped_with_the_snapshot_version() {
+        let json = snapshot_json(&Graph::new()).expect("serializes");
+
+        let value: serde_json::Value = serde_json::from_str(&json).expect("parses");
+        assert_eq!(value["version"], SNAPSHOT_VERSION);
+        assert_eq!(value["nodes"], json!([]));
+        assert_eq!(value["observations"], json!([]));
+    }
+}

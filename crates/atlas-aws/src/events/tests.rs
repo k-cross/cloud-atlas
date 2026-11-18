@@ -1,7 +1,8 @@
 use super::stream::EventQueue;
 use super::*;
 use crate::definition::AmazonCollection;
-use crate::projector::aws_projector;
+use crate::fixtures;
+use crate::projector::{TYPED_CONFIG_TYPES, aws_projector};
 use atlas_graph::collection::{CollectionReport, FailureKind};
 use atlas_graph::event::EventApplier;
 use atlas_graph::export::{edge_key, node_key};
@@ -197,6 +198,29 @@ fn edge_keys(graph: &Graph<Node, Edge>) -> HashSet<String> {
         .collect()
 }
 
+fn assert_scan_would_produce(
+    label: &str,
+    context: &Graph<Node, Edge>,
+    scanned: &Graph<Node, Edge>,
+) {
+    let extra_nodes: Vec<_> = node_keys(context)
+        .difference(&node_keys(scanned))
+        .cloned()
+        .collect();
+    assert!(
+        extra_nodes.is_empty(),
+        "{label} invented nodes the full scan does not produce: {extra_nodes:?}"
+    );
+    let extra_edges: Vec<_> = edge_keys(context)
+        .difference(&edge_keys(scanned))
+        .cloned()
+        .collect();
+    assert!(
+        extra_edges.is_empty(),
+        "{label} invented edges the full scan does not produce: {extra_edges:?}"
+    );
+}
+
 #[test]
 fn an_instance_event_produces_only_what_a_full_scan_would() {
     let events = parse_ok(&instance_config_item("OK"));
@@ -207,23 +231,7 @@ fn an_instance_event_produces_only_what_a_full_scan_would() {
 
     let scanned = scanned_instance_graph();
 
-    let extra_nodes: Vec<_> = node_keys(&typed.context)
-        .difference(&node_keys(&scanned))
-        .cloned()
-        .collect();
-    assert!(
-        extra_nodes.is_empty(),
-        "event path invented nodes the full scan does not produce: {extra_nodes:?}"
-    );
-
-    let extra_edges: Vec<_> = edge_keys(&typed.context)
-        .difference(&edge_keys(&scanned))
-        .cloned()
-        .collect();
-    assert!(
-        extra_edges.is_empty(),
-        "event path invented edges the full scan does not produce: {extra_edges:?}"
-    );
+    assert_scan_would_produce("an instance event", &typed.context, &scanned);
 }
 
 #[test]
@@ -237,23 +245,7 @@ fn an_interface_event_produces_only_what_a_full_scan_would() {
 
     let scanned = scanned_interface_graph(description);
 
-    let extra_nodes: Vec<_> = node_keys(&typed.context)
-        .difference(&node_keys(&scanned))
-        .cloned()
-        .collect();
-    assert!(
-        extra_nodes.is_empty(),
-        "event path invented nodes the full scan does not produce: {extra_nodes:?}"
-    );
-
-    let extra_edges: Vec<_> = edge_keys(&typed.context)
-        .difference(&edge_keys(&scanned))
-        .cloned()
-        .collect();
-    assert!(
-        extra_edges.is_empty(),
-        "event path invented edges the full scan does not produce: {extra_edges:?}"
-    );
+    assert_scan_would_produce("an interface event", &typed.context, &scanned);
 }
 
 #[test]
@@ -405,15 +397,6 @@ fn an_eni_from_relationships_alone_attaches_to_no_subnet() {
 }
 
 #[test]
-fn a_config_item_for_a_typed_resource_yields_only_the_typed_node() {
-    let events = parse_ok(&instance_config_item("ResourceDeleted"));
-
-    assert_eq!(events.len(), 1, "no AwsConfigResource twin: {events:?}");
-    assert_eq!(events[0].op, ChangeOp::Deleted);
-    assert_eq!(events[0].node, Node::AwsEc2Instance("i-0abc123".into()));
-}
-
-#[test]
 fn a_resource_type_the_scan_skips_produces_no_catch_all_node() {
     let body = instance_config_item("OK").replace(
         r#""resourceType": "AWS::EC2::Instance""#,
@@ -495,37 +478,6 @@ fn state_change(state: &str) -> String {
           "detail": {{ "instance-id": "i-0abc123", "state": "{state}" }}
         }}"#
     )
-}
-
-#[test]
-fn a_peering_config_item_is_not_also_a_generic_resource() {
-    let events = parse_ok(
-        r#"{
-          "version": "0",
-          "id": "cfg-event-pcx",
-          "detail-type": "Config Configuration Item Change Notification",
-          "source": "aws.config",
-          "account": "111111111111",
-          "time": "2026-09-03T12:00:00Z",
-          "region": "us-east-1",
-          "detail": {
-            "messageType": "ConfigurationItemChangeNotification",
-            "configurationItem": {
-              "configurationItemStatus": "OK",
-              "configurationItemCaptureTime": "2026-09-03T12:00:00.000Z",
-              "resourceType": "AWS::EC2::VPCPeeringConnection",
-              "resourceId": "pcx-0abc",
-              "awsRegion": "us-east-1"
-            }
-          }
-        }"#,
-    );
-
-    assert!(
-        events.is_empty(),
-        "the scan models a peering as AwsEc2VpcPeeringConnection, so a generic \
-         AwsConfigResource here would be a second node for it: {events:?}"
-    );
 }
 
 #[test]
@@ -660,6 +612,228 @@ fn an_unmodelled_api_call_is_ignored_not_failed() {
     );
 
     assert!(parse_ok(&body).is_empty());
+}
+
+fn api_call(event_name: &str, request: &str, response: &str) -> String {
+    cloud_trail(&format!(
+        r#"{{
+          "eventName": "{event_name}",
+          "eventTime": "2026-09-03T12:20:00Z",
+          "awsRegion": "us-east-1",
+          "requestParameters": {request},
+          "responseElements": {response}
+        }}"#
+    ))
+}
+
+fn modelled_api_calls() -> Vec<(&'static str, &'static str, &'static str, ChangeOp, Node)> {
+    let vpc = || Node::AwsEc2Vpc("vpc-globex".into());
+    let subnet = || Node::AwsEc2Subnet("subnet-public-1a".into());
+    let group = || Node::AwsEc2SecurityGroup("sg-web".into());
+    let function = || Node::AwsLambdaFunction("globex-events-handler".into());
+    vec![
+        (
+            "CreateVpc",
+            r#"{ "cidrBlock": "10.10.0.0/16" }"#,
+            r#"{ "vpc": { "vpcId": "vpc-globex" } }"#,
+            ChangeOp::Created,
+            vpc(),
+        ),
+        (
+            "DeleteVpc",
+            r#"{ "vpcId": "vpc-globex" }"#,
+            "null",
+            ChangeOp::Deleted,
+            vpc(),
+        ),
+        (
+            "CreateSubnet",
+            r#"{ "vpcId": "vpc-globex" }"#,
+            r#"{ "subnet": { "subnetId": "subnet-public-1a", "vpcId": "vpc-globex" } }"#,
+            ChangeOp::Created,
+            subnet(),
+        ),
+        (
+            "DeleteSubnet",
+            r#"{ "subnetId": "subnet-public-1a" }"#,
+            "null",
+            ChangeOp::Deleted,
+            subnet(),
+        ),
+        (
+            "CreateSecurityGroup",
+            r#"{ "groupName": "web", "vpcId": "vpc-globex" }"#,
+            r#"{ "groupId": "sg-web" }"#,
+            ChangeOp::Created,
+            group(),
+        ),
+        (
+            "DeleteSecurityGroup",
+            r#"{ "groupId": "sg-web" }"#,
+            "null",
+            ChangeOp::Deleted,
+            group(),
+        ),
+        (
+            "CreateFunction20150331",
+            r#"{ "functionName": "globex-events-handler" }"#,
+            r#"{ "functionName": "globex-events-handler" }"#,
+            ChangeOp::Created,
+            function(),
+        ),
+        (
+            "DeleteFunction20150331",
+            r#"{ "functionName": "globex-events-handler" }"#,
+            "null",
+            ChangeOp::Deleted,
+            function(),
+        ),
+        (
+            "DeleteFunction20150331",
+            r#"{ "functionName": "arn:aws:lambda:us-east-1:123:function:globex-events-handler" }"#,
+            "null",
+            ChangeOp::Deleted,
+            function(),
+        ),
+        (
+            "DeleteFunction20150331",
+            r#"{ "functionName": "123:function:globex-events-handler" }"#,
+            "null",
+            ChangeOp::Deleted,
+            function(),
+        ),
+    ]
+}
+
+#[test]
+fn every_modelled_api_call_names_what_it_changed_and_only_what_a_scan_draws() {
+    let scan = globex_scan();
+    for (event_name, request, response, op, node) in modelled_api_calls() {
+        let events = parse_ok(&api_call(event_name, request, response));
+        let [event] = events.as_slice() else {
+            panic!("{event_name}: one event, got {events:?}");
+        };
+        assert_eq!(event.op, op, "{event_name}");
+        assert_eq!(event.node, node, "{event_name}");
+        assert_scan_would_produce(event_name, &event.context, &scan);
+    }
+}
+
+#[test]
+fn a_modelled_api_call_that_names_nothing_changes_nothing() {
+    let names = modelled_api_calls().into_iter().map(|(name, ..)| name);
+    for event_name in names.chain(["RunInstances", "TerminateInstances"]) {
+        let events = parse_ok(&api_call(event_name, "{}", "null"));
+        assert!(events.is_empty(), "{event_name}: {events:?}");
+    }
+}
+
+#[test]
+fn deleting_a_function_version_or_alias_leaves_the_function() {
+    for request in [
+        r#"{ "functionName": "globex-events-handler:3" }"#,
+        r#"{ "functionName": "arn:aws:lambda:us-east-1:123:function:globex-events-handler:live" }"#,
+        r#"{ "functionName": "globex-events-handler", "qualifier": "3" }"#,
+    ] {
+        let events = parse_ok(&api_call("DeleteFunction20150331", request, "null"));
+        assert!(events.is_empty(), "{request}: {events:?}");
+    }
+}
+
+#[test]
+fn a_drifted_instance_set_is_malformed_rather_than_empty() {
+    for (event_name, request, response) in [
+        (
+            "RunInstances",
+            "{}",
+            r#"{ "instancesSet": { "items": { "instanceId": "i-aaa" } } }"#,
+        ),
+        (
+            "RunInstances",
+            "{}",
+            r#"{ "instancesSet": { "items": [{ "instanceIdentifier": "i-aaa" }] } }"#,
+        ),
+        (
+            "TerminateInstances",
+            r#"{ "instancesSet": { "items": [{ "instanceId": 42 }] } }"#,
+            "null",
+        ),
+    ] {
+        let error =
+            parse(&api_call(event_name, request, response), INCLUDE_UNKNOWN).expect_err(event_name);
+        assert!(
+            error.to_string().contains("instancesSet"),
+            "{event_name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_created_subnet_whose_response_names_no_vpc_stands_alone() {
+    let events = parse_ok(&api_call(
+        "CreateSubnet",
+        "{}",
+        r#"{ "subnet": { "subnetId": "subnet-new" } }"#,
+    ));
+
+    let [event] = events.as_slice() else {
+        panic!("one event, got {events:?}");
+    };
+    assert_eq!(event.context.node_count(), 1);
+    assert_eq!(
+        event.context.edge_count(),
+        0,
+        "no VPC was named to put it in"
+    );
+}
+
+#[test]
+fn a_cloud_trail_record_that_cannot_be_read_named_or_timed_is_malformed() {
+    let untimed = r#"{
+      "version": "0",
+      "detail-type": "AWS API Call via CloudTrail",
+      "region": "us-east-1",
+      "detail": { "eventName": "DeleteVpc", "eventTime": "yesterday",
+                  "requestParameters": { "vpcId": "vpc-globex" } }
+    }"#;
+    for (body, reason) in [
+        (
+            cloud_trail(r#"{ "eventName": 42 }"#),
+            "unreadable CloudTrail detail",
+        ),
+        (
+            cloud_trail(r#"{ "eventTime": "2026-09-03T12:20:00Z" }"#),
+            "no eventName",
+        ),
+        (untimed.to_owned(), "no usable timestamp"),
+    ] {
+        let error = parse(&body, INCLUDE_UNKNOWN).expect_err(reason);
+        assert!(
+            error.to_string().contains(reason),
+            "expected {reason:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn a_cloud_trail_record_falls_back_to_its_envelope_only_for_what_it_omits() {
+    let envelope_time = 1_788_437_400_000;
+    let record_time = 1_788_438_000_000;
+
+    let omitted = parse_ok(&cloud_trail(
+        r#"{ "eventName": "DeleteVpc", "awsRegion": "",
+             "requestParameters": { "vpcId": "vpc-globex" } }"#,
+    ));
+    assert_eq!(omitted[0].scope, "us-east-1");
+    assert_eq!(omitted[0].observed_at, envelope_time);
+
+    let stated = parse_ok(&cloud_trail(
+        r#"{ "eventName": "DeleteVpc", "awsRegion": "us-west-2",
+             "eventTime": "2026-09-03T12:20:00Z",
+             "requestParameters": { "vpcId": "vpc-globex" } }"#,
+    ));
+    assert_eq!(stated[0].scope, "us-west-2");
+    assert_eq!(stated[0].observed_at, record_time);
 }
 
 #[test]
@@ -908,16 +1082,11 @@ fn a_subnet_still_lands_inside_the_vpc_its_event_named() {
     }));
 }
 
-fn connectivity_item(
-    resource_type: &str,
-    resource_id: &str,
-    status: &str,
-    configuration: &str,
-) -> String {
+fn config_item(resource_type: &str, status: &str, fields: &str) -> String {
     format!(
         r#"{{
           "version": "0",
-          "id": "cfg-{resource_id}",
+          "id": "cfg-{resource_type}",
           "detail-type": "Config Configuration Item Change Notification",
           "source": "aws.config",
           "time": "2026-09-03T12:00:00Z",
@@ -927,12 +1096,24 @@ fn connectivity_item(
               "configurationItemStatus": "{status}",
               "configurationItemCaptureTime": "2026-09-03T12:00:00.000Z",
               "resourceType": "{resource_type}",
-              "resourceId": "{resource_id}",
               "awsRegion": "us-east-1",
-              "configuration": {configuration}
+              {fields}
             }}
           }}
         }}"#
+    )
+}
+
+fn connectivity_item(
+    resource_type: &str,
+    resource_id: &str,
+    status: &str,
+    configuration: &str,
+) -> String {
+    config_item(
+        resource_type,
+        status,
+        &format!(r#""resourceId": "{resource_id}", "configuration": {configuration}"#),
     )
 }
 
@@ -1141,22 +1322,7 @@ fn every_connectivity_event_produces_only_what_a_full_scan_would() {
             typed.context.edge_count() > 0,
             "{resource_type} carries the edges its scan draws"
         );
-        let extra_nodes: Vec<_> = node_keys(&typed.context)
-            .difference(&node_keys(&scanned))
-            .cloned()
-            .collect();
-        assert!(
-            extra_nodes.is_empty(),
-            "{resource_type} invented {extra_nodes:?}"
-        );
-        let extra_edges: Vec<_> = edge_keys(&typed.context)
-            .difference(&edge_keys(&scanned))
-            .cloned()
-            .collect();
-        assert!(
-            extra_edges.is_empty(),
-            "{resource_type} invented {extra_edges:?}"
-        );
+        assert_scan_would_produce(resource_type, &typed.context, &scanned);
     }
 }
 
@@ -1273,5 +1439,174 @@ fn a_transit_gateway_item_can_only_remove_what_the_scan_drew() {
             panic!("{resource_type}: one typed event, got {deleted:?}");
         };
         assert_eq!(typed.op, ChangeOp::Deleted);
+    }
+}
+
+const CONFIG_STATUSES: &[&str] = &[
+    "ResourceDiscovered",
+    "OK",
+    "ResourceDeleted",
+    "ResourceDeletedNotRecorded",
+];
+
+#[test]
+fn a_typed_config_type_is_only_ever_its_typed_node() {
+    for typed in TYPED_CONFIG_TYPES {
+        for status in CONFIG_STATUSES {
+            for exclude_by_default in [false, true] {
+                let label = format!(
+                    "{} {status} (exclude_by_default: {exclude_by_default})",
+                    typed.resource_type
+                );
+                let body = config_item(
+                    typed.resource_type,
+                    status,
+                    r#""resourceId": "typed-1", "configuration": {}"#,
+                );
+                let events = parse(&body, exclude_by_default).expect("readable");
+
+                assert!(
+                    !events
+                        .iter()
+                        .any(|e| matches!(e.node, Node::AwsConfigResource { .. })),
+                    "{label}: the catch-all drew a second node for it: {events:?}"
+                );
+                if typed.event_key.is_none() {
+                    assert!(
+                        events.is_empty(),
+                        "{label}: keyed differently from its scan, so an event cannot name it: {events:?}"
+                    );
+                    continue;
+                }
+                assert!(
+                    events.len() <= 1
+                        && events
+                            .iter()
+                            .all(|e| e.node == (typed.node)("typed-1".into())),
+                    "{label}: {events:?}"
+                );
+                if status.starts_with("ResourceDeleted") {
+                    assert!(
+                        matches!(events.as_slice(), [event] if event.op == ChangeOp::Deleted),
+                        "{label}: a deletion always names the node it removes: {events:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+const GLOBEX_VPC: &str =
+    r#""relationships": [{ "resourceType": "AWS::EC2::VPC", "resourceId": "vpc-globex" }]"#;
+
+fn leaf_items() -> Vec<(&'static str, Node, String)> {
+    let balancer = "arn:aws:elasticloadbalancing:us-east-1:123:loadbalancer/app/globex/1";
+    let cluster = "arn:aws:ecs:us-east-1:123:cluster/globex-services";
+    let topic = "arn:aws:sns:us-east-1:123:globex-alerts";
+    vec![
+        (
+            "AWS::EC2::SecurityGroup",
+            Node::AwsEc2SecurityGroup("sg-web".into()),
+            r#""resourceId": "sg-web""#.to_owned(),
+        ),
+        (
+            "AWS::Lambda::Function",
+            Node::AwsLambdaFunction("globex-events-handler".into()),
+            r#""resourceId": "globex-events-handler", "resourceName": "globex-events-handler""#
+                .to_owned(),
+        ),
+        (
+            "AWS::ECS::Cluster",
+            Node::AwsEcsCluster(cluster.into()),
+            format!(r#""resourceId": "globex-services", "ARN": "{cluster}""#),
+        ),
+        (
+            "AWS::DynamoDB::Table",
+            Node::AwsDynamoDbTable("globex-events".into()),
+            r#""resourceId": "globex-events", "resourceName": "globex-events""#.to_owned(),
+        ),
+        (
+            "AWS::SNS::Topic",
+            Node::AwsSnsTopic(topic.into()),
+            format!(r#""resourceId": "{topic}", "ARN": "{topic}""#),
+        ),
+        (
+            "AWS::ApiGateway::RestApi",
+            Node::AwsApiGatewayRestApi("api-globex".into()),
+            r#""resourceId": "api-globex""#.to_owned(),
+        ),
+        (
+            "AWS::CloudFront::Distribution",
+            Node::AwsCloudFrontDistribution("EGLOBEX1".into()),
+            r#""resourceId": "EGLOBEX1""#.to_owned(),
+        ),
+        (
+            "AWS::EKS::Cluster",
+            Node::AwsEksCluster("globex-k8s".into()),
+            format!(r#""resourceId": "globex-k8s", "resourceName": "globex-k8s", {GLOBEX_VPC}"#),
+        ),
+        (
+            "AWS::RDS::DBInstance",
+            Node::AwsRdsDbInstance("globex-orders-db".into()),
+            format!(
+                r#""resourceId": "db-GLOBEXORDERS", "resourceName": "globex-orders-db", {GLOBEX_VPC}"#
+            ),
+        ),
+        (
+            "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            Node::AwsElbLoadBalancer(balancer.into()),
+            format!(r#""resourceId": "{balancer}", "ARN": "{balancer}", {GLOBEX_VPC}"#),
+        ),
+        (
+            "AWS::EC2::Subnet",
+            Node::AwsEc2Subnet("subnet-public-1a".into()),
+            format!(r#""resourceId": "subnet-public-1a", {GLOBEX_VPC}"#),
+        ),
+        (
+            "AWS::EC2::InternetGateway",
+            Node::AwsEc2InternetGateway("igw-globex".into()),
+            format!(r#""resourceId": "igw-globex", {GLOBEX_VPC}"#),
+        ),
+        (
+            "AWS::EC2::NatGateway",
+            Node::AwsEc2NatGateway("nat-globex".into()),
+            r#""resourceId": "nat-globex",
+               "relationships": [{ "resourceType": "AWS::EC2::Subnet", "resourceId": "subnet-public-1a" }]"#
+                .to_owned(),
+        ),
+        (
+            "AWS::EC2::EIP",
+            Node::AwsEc2Eip("eipalloc-globex".into()),
+            r#""resourceId": "eipalloc-globex", "configuration": { "publicIp": "203.0.113.50" }"#
+                .to_owned(),
+        ),
+    ]
+}
+
+fn globex_scan() -> Graph<Node, Edge> {
+    let mut scan = GraphBuilder::new();
+    aws_projector(
+        &mut scan,
+        &fixtures::collections(),
+        &atlas_provider::fixtures::settings(),
+    );
+    scan.graph
+}
+
+#[test]
+fn every_leaf_resource_event_produces_only_what_a_full_scan_would() {
+    let scan = globex_scan();
+
+    for (resource_type, node, fields) in leaf_items() {
+        let events = parse_ok(&config_item(resource_type, "OK", &fields));
+        let [typed] = events.as_slice() else {
+            panic!("{resource_type}: one typed event, got {events:?}");
+        };
+        assert_eq!(typed.node, node, "{resource_type}");
+        assert!(
+            typed.context.edge_count() > 0,
+            "{resource_type} carries the edge that places it"
+        );
+        assert_scan_would_produce(resource_type, &typed.context, &scan);
     }
 }

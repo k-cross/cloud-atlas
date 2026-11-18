@@ -1,3 +1,4 @@
+pub mod account;
 pub mod d1;
 pub mod definition;
 pub mod dns;
@@ -35,15 +36,32 @@ where
         >,
     >,
 {
+    paginate_pages(per_page, |page| {
+        let response = fetch(page);
+        async move {
+            let response = response.await?;
+            Ok((response.result, response.result_info))
+        }
+    })
+    .await
+}
+
+pub async fn paginate_pages<T, Fut>(
+    per_page: u32,
+    fetch: impl Fn(u32) -> Fut,
+) -> Result<Vec<T>, Box<dyn std::error::Error>>
+where
+    Fut: Future<Output = Result<(Vec<T>, Option<serde_json::Value>), Box<dyn std::error::Error>>>,
+{
     let mut items: Vec<T> = Vec::new();
     let mut page = 1;
 
     loop {
-        let response = fetch(page).await?;
-        let short_page = (response.result.len() as u32) < per_page;
-        items.extend(response.result);
+        let (result, result_info) = fetch(page).await?;
+        let short_page = (result.len() as u32) < per_page;
+        items.extend(result);
 
-        if !more_pages(response.result_info.as_ref(), page, items.len(), short_page) {
+        if !more_pages(result_info.as_ref(), page, items.len(), short_page) {
             return Ok(items);
         }
         if page == MAX_PAGES {

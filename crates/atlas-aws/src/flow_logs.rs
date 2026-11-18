@@ -330,12 +330,30 @@ pub mod stream {
         key: Option<String>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    pub struct ReadLimits {
+        pub records: usize,
+        pub object_bytes: u64,
+        pub text_bytes: u64,
+    }
+
+    impl Default for ReadLimits {
+        fn default() -> Self {
+            Self {
+                records: 100_000,
+                object_bytes: 64 * 1024 * 1024,
+                text_bytes: 128 * 1024 * 1024,
+            }
+        }
+    }
+
     pub struct FlowLogQueue {
         sqs: SqsClient,
         s3: S3Client,
         queue_url: String,
         region: String,
         wait_time_seconds: i32,
+        limits: ReadLimits,
     }
 
     impl FlowLogQueue {
@@ -343,11 +361,7 @@ pub mod stream {
 
         const BATCH: i32 = 10;
 
-        const MAX_RECORDS: usize = 100_000;
-
-        const MAX_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
-
-        const MAX_TEXT_BYTES: u64 = 128 * 1024 * 1024;
+        const EMPTY_OBJECT_STATUS: u16 = 416;
 
         pub fn new(
             config: &aws_config::SdkConfig,
@@ -360,11 +374,17 @@ pub mod stream {
                 queue_url: queue_url.into(),
                 region: region.into(),
                 wait_time_seconds: Self::WAIT_SECONDS,
+                limits: ReadLimits::default(),
             }
         }
 
         pub fn with_wait_seconds(mut self, seconds: i32) -> Self {
             self.wait_time_seconds = seconds;
+            self
+        }
+
+        pub fn with_limits(mut self, limits: ReadLimits) -> Self {
+            self.limits = limits;
             self
         }
 
@@ -443,14 +463,18 @@ pub mod stream {
                 .get_object()
                 .bucket(bucket)
                 .key(key)
-                .range(format!("bytes=0-{}", Self::MAX_OBJECT_BYTES))
+                .range(format!("bytes=0-{}", self.limits.object_bytes))
                 .send()
                 .await;
 
             let object = match object {
                 Ok(object) => object,
                 Err(error) => {
-                    let kind = match error.raw_response().map(|r| r.status().as_u16()) {
+                    let status = error.raw_response().map(|r| r.status().as_u16());
+                    if status == Some(Self::EMPTY_OBJECT_STATUS) {
+                        return Some(Vec::new());
+                    }
+                    let kind = match status {
                         Some(404 | 410) => FailureKind::Malformed,
                         status => feed::failure_kind(status),
                     };
@@ -470,7 +494,7 @@ pub mod stream {
             let body = match object.body.collect().await {
                 Ok(body) => body.into_bytes(),
                 Err(error) => {
-                    report.record(
+                    report.note(
                         SOURCE,
                         FailureKind::Unavailable,
                         scope,
@@ -480,21 +504,22 @@ pub mod stream {
                 }
             };
 
-            if body.len() as u64 > Self::MAX_OBJECT_BYTES {
+            if body.len() as u64 > self.limits.object_bytes {
                 report.note(
                     SOURCE,
                     FailureKind::Malformed,
                     scope,
                     format!(
                         "s3://{bucket}/{key} is larger than the {} byte limit; skipped",
-                        Self::MAX_OBJECT_BYTES
+                        self.limits.object_bytes
                     ),
                 );
                 return Some(Vec::new());
             }
 
-            let text = match decompress(&body, Self::MAX_TEXT_BYTES) {
+            let text = match decompress(&body, self.limits.text_bytes) {
                 Ok(decompressed) => {
+                    let mut text = decompressed.text;
                     if decompressed.truncated {
                         report.note(
                             SOURCE,
@@ -503,11 +528,12 @@ pub mod stream {
                             format!(
                                 "s3://{bucket}/{key} expanded past the {} byte limit; \
                                  read the first part only",
-                                Self::MAX_TEXT_BYTES
+                                self.limits.text_bytes
                             ),
                         );
+                        text.truncate(text.rfind('\n').map_or(0, |line_end| line_end + 1));
                     }
-                    decompressed.text
+                    text
                 }
                 Err(reason) => {
                     report.note(
@@ -520,7 +546,7 @@ pub mod stream {
                 }
             };
 
-            let parsed = parse(&text, &self.region, Self::MAX_RECORDS, networks);
+            let parsed = parse(&text, &self.region, self.limits.records, networks);
             if parsed.unusable_layout {
                 report.note(
                     SOURCE,
@@ -563,8 +589,7 @@ pub mod stream {
                     &scope,
                     format!(
                         "s3://{bucket}/{key}: kept {} records and left {} unread",
-                        Self::MAX_RECORDS,
-                        parsed.dropped
+                        self.limits.records, parsed.dropped
                     ),
                 );
             }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::fixtures::{self, azure_id, azure_network, azure_networking_id};
 use atlas_graph::testing::{assert_edge, assert_has_node, link, public};
+use proptest::prelude::*;
 
 #[test]
 fn azure_projection() {
@@ -479,4 +480,138 @@ fn only_a_standard_virtual_wan_carries_traffic_between_its_networks() {
         None,
         "a Basic hub carries no traffic between the networks on it"
     );
+}
+
+// Resource Graph does not guarantee that a resource's own top-level `id` and
+// the same id embedded inside another resource's `properties` share one
+// casing. A VM names its NIC, and the NIC's `properties` name a public IP and
+// a subnet — every one of those is a place two spellings of the same
+// resource could disagree, so the projector has to fold each to one form
+// before it becomes a node.
+#[derive(Debug, Clone, Copy)]
+enum Casing {
+    AsGiven,
+    Lower,
+    Upper,
+}
+
+fn casing() -> impl Strategy<Value = Casing> {
+    prop_oneof![
+        Just(Casing::AsGiven),
+        Just(Casing::Lower),
+        Just(Casing::Upper),
+    ]
+}
+
+fn recase(id: &str, casing: Casing) -> String {
+    match casing {
+        Casing::AsGiven => id.to_owned(),
+        Casing::Lower => id.to_ascii_lowercase(),
+        Casing::Upper => id.to_ascii_uppercase(),
+    }
+}
+
+fn azure_resource_json(id: &str, extra: serde_json::Value) -> serde_json::Value {
+    let mut value = serde_json::json!({ "id": id, "name": "r" });
+    for (key, v) in extra.as_object().into_iter().flatten() {
+        value[key] = v.clone();
+    }
+    value
+}
+
+proptest! {
+    #[test]
+    fn a_networking_resource_is_one_node_whatever_casing_names_it(
+        vm_self in casing(), vm_ref in casing(),
+        nic_self in casing(), pip_ref in casing(), subnet_ref in casing(),
+        vnet_self in casing(), subnet_self in casing(),
+        nsg_self in casing(), nsg_ref in casing(),
+        pip_self in casing(),
+    ) {
+        const VM: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1";
+        const NIC: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/networkInterfaces/nic1";
+        const VNET: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet1";
+        const SUBNET: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet1/subnets/default";
+        const NSG: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/nsg1";
+        const PIP: &str = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/publicIPAddresses/pip1";
+
+        let raw: Vec<serde_json::Value> = vec![
+            azure_resource_json(
+                &recase(VM, vm_self),
+                serde_json::json!({
+                    "type": "microsoft.compute/virtualmachines",
+                    "properties": {
+                        "networkProfile": {
+                            "networkInterfaces": [{"id": recase(NIC, vm_ref)}]
+                        }
+                    }
+                }),
+            ),
+            azure_resource_json(
+                &recase(NIC, nic_self),
+                serde_json::json!({
+                    "type": "microsoft.network/networkinterfaces",
+                    "properties": {
+                        "ipConfigurations": [{
+                            "properties": {
+                                "publicIPAddress": {"id": recase(PIP, pip_ref)},
+                                "subnet": {"id": recase(SUBNET, subnet_ref)}
+                            }
+                        }]
+                    }
+                }),
+            ),
+            azure_resource_json(
+                &recase(VNET, vnet_self),
+                serde_json::json!({
+                    "type": "microsoft.network/virtualnetworks",
+                    "properties": {
+                        "subnets": [{
+                            "id": recase(SUBNET, subnet_self),
+                            "properties": {
+                                "networkSecurityGroup": {"id": recase(NSG, nsg_ref)}
+                            }
+                        }]
+                    }
+                }),
+            ),
+            azure_resource_json(
+                &recase(NSG, nsg_self),
+                serde_json::json!({ "type": "microsoft.network/networksecuritygroups" }),
+            ),
+            azure_resource_json(
+                &recase(PIP, pip_self),
+                serde_json::json!({ "type": "microsoft.network/publicipaddresses" }),
+            ),
+        ];
+
+        let (collections, report) = crate::provider::map_resources(raw);
+        prop_assert!(report.is_complete(), "every row here is well-formed");
+
+        let mut builder = GraphBuilder::new();
+        azure_projector(&mut builder, &collections);
+
+        let count_of = |predicate: &dyn Fn(&Node) -> bool| {
+            builder.graph.node_weights().filter(|n| predicate(n)).count()
+        };
+        prop_assert_eq!(count_of(&|n| matches!(n, Node::AzureVirtualMachine(_))), 1);
+        prop_assert_eq!(count_of(&|n| matches!(n, Node::AzureNetworkInterface(_))), 1);
+        prop_assert_eq!(count_of(&|n| matches!(n, Node::AzureVirtualNetwork(_))), 1);
+        prop_assert_eq!(count_of(&|n| matches!(n, Node::AzureSubnet(_))), 1);
+        prop_assert_eq!(count_of(&|n| matches!(n, Node::AzureNetworkSecurityGroup(_))), 1);
+        prop_assert_eq!(count_of(&|n| matches!(n, Node::AzurePublicIpAddress(_))), 1);
+
+        let vm = Node::AzureVirtualMachine(VM.to_ascii_lowercase().into());
+        let nic = Node::AzureNetworkInterface(NIC.to_ascii_lowercase().into());
+        let vnet = Node::AzureVirtualNetwork(VNET.to_ascii_lowercase().into());
+        let subnet = Node::AzureSubnet(SUBNET.to_ascii_lowercase().into());
+        let nsg = Node::AzureNetworkSecurityGroup(NSG.to_ascii_lowercase().into());
+        let pip = Node::AzurePublicIpAddress(PIP.to_ascii_lowercase().into());
+
+        prop_assert!(builder.has_edge(&vm, &nic, &Edge::HasIp));
+        prop_assert!(builder.has_edge(&nic, &pip, &Edge::HasIp));
+        prop_assert!(builder.has_edge(&nic, &subnet, &Edge::AttachedTo));
+        prop_assert!(builder.has_edge(&vnet, &subnet, &Edge::Contains));
+        prop_assert!(builder.has_edge(&subnet, &nsg, &Edge::ConnectsTo));
+    }
 }

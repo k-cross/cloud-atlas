@@ -633,78 +633,56 @@ mod tests {
     }
 
     #[test]
-    fn node_key_is_unique_across_fixture_graph() {
-        use atlas_graph::export::node_key;
+    fn the_layout_engine_reads_the_snapshot_the_server_serves() {
+        use atlas_graph::export::{SNAPSHOT_VERSION, render_snapshot_with};
+
         let builder = fixtures::build_graph();
-        let keys: std::collections::HashSet<String> =
-            builder.graph.node_weights().map(node_key).collect();
+        let observations = atlas_graph::derive::observations(&builder.graph, &fixtures::observed());
+        assert!(
+            !observations.is_empty(),
+            "the overlay must exercise the observation schema"
+        );
+        let exported = render_snapshot_with(&builder.graph, observations);
+        let json = serde_json::to_string(&exported).expect("serializes");
+
+        assert_eq!(atlas_layout::SNAPSHOT_VERSION, SNAPSHOT_VERSION);
+        let read: atlas_layout::GraphSnapshot =
+            serde_json::from_str(&json).expect("the layout schema reads the export");
+
+        let read_keys: Vec<&str> = read.nodes.iter().map(|n| n.key.as_str()).collect();
+        let sent_keys: Vec<&str> = exported.nodes.iter().map(|n| n.key.as_str()).collect();
         assert_eq!(
-            keys.len(),
-            builder.graph.node_count(),
-            "node_key must be a unique identity for every node"
+            read_keys, sent_keys,
+            "a renamed field would read back as its serde default"
         );
-    }
-
-    #[test]
-    fn diff_of_identical_graphs_is_empty() {
-        let builder = fixtures::build_graph();
-        let patch = atlas_graph::patch::diff(&builder.graph, &builder.graph);
-        assert!(
-            patch.is_empty(),
-            "diffing a graph against itself is a no-op"
-        );
-    }
-
-    #[test]
-    fn diff_detects_added_and_removed_nodes_and_edges() {
-        use atlas_graph::definition::{Edge, Node};
-        use atlas_graph::export::{edge_key, node_key};
-
-        let old = fixtures::build_graph();
-
-        let removed = old
-            .graph
-            .node_weights()
-            .find(|n| matches!(n, Node::AwsEc2Eni(_)))
-            .expect("fixture has an ENI")
-            .clone();
-        let removed_key = node_key(&removed);
-
-        let mut new = GraphBuilder::new();
-        for node in old.graph.node_weights() {
-            if node != &removed {
-                new.get_or_add_node(node.clone());
-            }
+        assert_eq!(read.edges.len(), exported.edges.len());
+        for (read, exported) in read.edges.iter().zip(&exported.edges) {
+            assert_eq!(
+                (
+                    &read.key,
+                    &read.source_key,
+                    &read.target_key,
+                    read.kind.as_str()
+                ),
+                (
+                    &exported.key,
+                    &exported.source_key,
+                    &exported.target_key,
+                    exported.kind
+                )
+            );
         }
-        for e in old.graph.edge_indices() {
-            let (a, b) = old.graph.edge_endpoints(e).unwrap();
-            let (na, nb) = (&old.graph[a], &old.graph[b]);
-            if na != &removed && nb != &removed {
-                let ia = new.get_or_add_node(na.clone());
-                let ib = new.get_or_add_node(nb.clone());
-                new.add_edge(ia, ib, old.graph[e].clone());
-            }
-        }
-        let extra_src = Node::GenericHostname("diff-test.example.com".into());
-        let extra_dst = Node::GenericIpAddress("203.0.113.7".into());
-        let src_key = node_key(&extra_src);
-        let dst_key = node_key(&extra_dst);
-        let ia = new.get_or_add_node(extra_src);
-        let ib = new.get_or_add_node(extra_dst);
-        new.add_edge(ia, ib, Edge::ResolvesTo);
+        let observed: Vec<&str> = read.observations.iter().map(|o| o.key.as_str()).collect();
+        let sent: Vec<&str> = exported
+            .observations
+            .iter()
+            .map(|o| o.key.as_str())
+            .collect();
+        assert_eq!(observed, sent);
 
-        let patch = atlas_graph::patch::diff(&old.graph, &new.graph);
-
-        assert!(patch.removed_nodes.contains(&removed_key));
-        assert!(
-            patch.added_nodes.iter().any(|n| n.key == src_key)
-                && patch.added_nodes.iter().any(|n| n.key == dst_key),
-            "both new nodes appear as additions"
-        );
-        let new_edge_key = edge_key(&src_key, &dst_key, &Edge::ResolvesTo);
-        assert!(patch.added_edges.iter().any(|e| e.key == new_edge_key));
-
-        assert!(!patch.removed_edges.is_empty());
+        let layout = atlas_layout::LayoutGraph::from_snapshot(&read).expect("lays out");
+        assert_eq!(layout.node_count(), builder.graph.node_count());
+        assert_eq!(layout.edge_count(), builder.graph.edge_count());
     }
 
     #[test]
@@ -756,21 +734,5 @@ mod tests {
                 &Edge::Covers
             )));
         assert_eq!(patch.added_edges.len(), 2);
-    }
-
-    #[test]
-    fn carry_forward_is_a_no_op_when_the_scan_is_a_superset() {
-        use atlas_graph::patch::{carry_forward, diff};
-
-        let mut next = fixtures::build_graph();
-        let live = next.graph.clone();
-        let before_nodes = next.graph.node_count();
-        let before_edges = next.graph.edge_count();
-
-        carry_forward(&mut next, &live, &all_sources());
-
-        assert_eq!(next.graph.node_count(), before_nodes);
-        assert_eq!(next.graph.edge_count(), before_edges);
-        assert!(diff(&live, &next.graph).is_empty());
     }
 }

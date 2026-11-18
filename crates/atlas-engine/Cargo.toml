@@ -25,6 +25,7 @@ tokio.workspace = true
 
 [dev-dependencies]
 atlas-graph = { workspace = true, features = ["test-support"] }
+atlas-layout.workspace = true
 aws-sdk-ec2.workspace = true
 proptest.workspace = true
 serde_json.workspace = true

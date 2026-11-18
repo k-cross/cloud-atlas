@@ -1,10 +1,14 @@
 use atlas_cloudflare::CloudflareApiClient;
+use atlas_cloudflare::account::get_accounts;
 use atlas_cloudflare::d1::get_d1_databases;
+use atlas_cloudflare::definition::{CloudflareCollection, ScriptId, ZoneId};
 use atlas_cloudflare::dns::get_dns_records;
 use atlas_cloudflare::durable_objects::get_do_namespaces;
 use atlas_cloudflare::kv::get_kv_namespaces;
+use atlas_cloudflare::provider::collect;
 use atlas_cloudflare::r2::get_r2_buckets;
 use atlas_cloudflare::zone::get_zones;
+use atlas_graph::collection::{CollectionReport, CollectionSource, FailureKind};
 use cloudflare::endpoints::dns::dns::DnsContent;
 use cloudflare::framework::Environment;
 use cloudflare::framework::auth::Credentials;
@@ -358,4 +362,283 @@ async fn r2_buckets_follow_the_cursor_past_the_first_page() {
         ["globex-assets", "globex-backups"],
         "buckets past the first cursor page were dropped"
     );
+}
+
+#[tokio::test]
+async fn accounts_follow_the_total_count_past_a_clamped_page() {
+    let server = MockServer::start().await;
+    for (page, id) in [(1, "acct-1"), (2, "acct-2")] {
+        Mock::given(method("GET"))
+            .and(path("/client/v4/accounts"))
+            .and(query_param("page", page.to_string()))
+            .and(query_param("per_page", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true, "errors": [], "messages": [],
+                "result": [{ "id": id, "name": id }],
+                "result_info": { "page": page, "per_page": 1, "count": 1, "total_count": 2 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let client = CloudflareApiClient::with_base_url("test-token".into(), server.uri());
+
+    let accounts = get_accounts(&client).await.expect("ok");
+
+    let ids: Vec<&str> = accounts.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, ["acct-1", "acct-2"]);
+}
+
+const ACCOUNT: &str = "/client/v4/accounts/acct-1";
+
+fn envelope(result: Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "success": true, "errors": [], "messages": [], "result": result
+    }))
+}
+
+fn refusal() -> ResponseTemplate {
+    ResponseTemplate::new(500).set_body_json(json!({
+        "success": false,
+        "errors": [{ "code": 10000, "message": "internal error" }],
+        "messages": [],
+        "result": null
+    }))
+}
+
+fn globex_routes() -> Vec<(String, Value)> {
+    let a_record = |id: &str, name: &str, address: &str| {
+        dns_record_json(id, name, json!({ "type": "A", "content": address }))
+    };
+    vec![
+        (
+            "/client/v4/accounts".to_owned(),
+            json!([{ "id": "acct-1", "name": "Globex Corp" }]),
+        ),
+        (
+            "/client/v4/zones".to_owned(),
+            json!([
+                zone_json("zone-1", "globex.com", "acct-1"),
+                zone_json("zone-2", "globex.io", "acct-1")
+            ]),
+        ),
+        (
+            "/client/v4/zones/zone-1/dns_records".to_owned(),
+            json!([a_record("rec-com", "app.globex.com", "203.0.113.10")]),
+        ),
+        (
+            "/client/v4/zones/zone-2/dns_records".to_owned(),
+            json!([a_record("rec-io", "app.globex.io", "203.0.113.11")]),
+        ),
+        (
+            format!("{ACCOUNT}/workers/scripts"),
+            json!([{ "id": "edge-router" }, { "id": "cron-jobs" }]),
+        ),
+        (
+            format!("{ACCOUNT}/workers/scripts/edge-router/bindings"),
+            json!([{ "name": "SESSIONS", "type": "kv_namespace", "namespace_id": "kv-1" }]),
+        ),
+        (
+            format!("{ACCOUNT}/workers/scripts/cron-jobs/bindings"),
+            json!([]),
+        ),
+        (
+            format!("{ACCOUNT}/storage/kv/namespaces"),
+            json!([{ "id": "kv-1", "title": "sessions" }]),
+        ),
+        (
+            format!("{ACCOUNT}/r2/buckets"),
+            json!({ "buckets": [{ "name": "globex-assets", "creation_date": "2024-01-01T00:00:00Z" }] }),
+        ),
+        (
+            format!("{ACCOUNT}/workers/durable_objects/namespaces"),
+            json!([{ "id": "do-1", "name": "Counter", "class": "Counter", "script": "edge-router" }]),
+        ),
+        (
+            format!("{ACCOUNT}/d1/database"),
+            json!([{ "uuid": "d1-uuid", "name": "app-db", "version": "production" }]),
+        ),
+    ]
+}
+
+async fn globex_account(failing: &[&str]) -> MockServer {
+    serve_routes(globex_routes(), failing).await
+}
+
+async fn serve_routes(routes: Vec<(String, Value)>, failing: &[&str]) -> MockServer {
+    let server = MockServer::start().await;
+    for (route, result) in routes {
+        let response = if failing.contains(&route.as_str()) {
+            refusal()
+        } else {
+            envelope(result)
+        };
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+async fn collect_from(server: &MockServer) -> (CloudflareCollection, CollectionReport) {
+    let client = crate_client(server);
+    let cf = CloudflareApiClient::with_base_url("test-token".into(), server.uri());
+    let mut data = CloudflareCollection::default();
+    let mut report = CollectionReport::default();
+    collect(&client, &cf, false, &mut data, &mut report).await;
+    (data, report)
+}
+
+#[tokio::test]
+async fn a_healthy_account_is_read_once_however_many_zones_it_owns() {
+    let server = globex_account(&[]).await;
+
+    let (data, report) = collect_from(&server).await;
+
+    assert!(report.is_complete(), "{}", report.summary());
+    assert_eq!(data.zones.len(), 2);
+    assert_eq!(data.dns_records.len(), 2);
+    assert_eq!(data.workers.len(), 2);
+    assert_eq!(data.worker_bindings.len(), 2);
+    assert_eq!(data.kv_namespaces.len(), 1);
+    assert_eq!(data.r2_buckets.len(), 1);
+    assert_eq!(data.durable_objects.len(), 1);
+    assert_eq!(data.d1_databases.len(), 1);
+}
+
+#[tokio::test]
+async fn a_failing_endpoint_is_attributed_and_costs_only_itself() {
+    let failing = [
+        "/client/v4/zones/zone-2/dns_records".to_owned(),
+        format!("{ACCOUNT}/workers/scripts/cron-jobs/bindings"),
+        format!("{ACCOUNT}/r2/buckets"),
+    ];
+    let failing: Vec<&str> = failing.iter().map(String::as_str).collect();
+    let server = globex_account(&failing).await;
+
+    let (data, report) = collect_from(&server).await;
+
+    let mut scopes: Vec<&str> = report.failures.iter().map(|f| f.scope.as_str()).collect();
+    scopes.sort_unstable();
+    assert_eq!(
+        scopes,
+        [
+            "account acct-1/r2_buckets",
+            "account acct-1/worker cron-jobs/bindings",
+            "zone globex.io/dns",
+        ]
+    );
+    assert!(report.failures.iter().all(|f| {
+        f.source == CollectionSource::Cloudflare && f.kind == FailureKind::Unavailable
+    }));
+
+    assert!(data.dns_records.contains_key(&ZoneId("zone-1".into())));
+    assert!(!data.dns_records.contains_key(&ZoneId("zone-2".into())));
+    assert_eq!(
+        data.workers.len(),
+        2,
+        "a script whose bindings failed is still a script"
+    );
+    let cron = ScriptId {
+        account: "acct-1".into(),
+        script: "cron-jobs".into(),
+    };
+    assert!(!data.worker_bindings.contains_key(&cron));
+    assert!(data.r2_buckets.is_empty());
+    assert_eq!(data.kv_namespaces.len(), 1);
+    assert_eq!(data.durable_objects.len(), 1);
+    assert_eq!(data.d1_databases.len(), 1);
+}
+
+#[tokio::test]
+async fn unreadable_zones_end_the_scan_before_anything_else_is_asked() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/client/v4/zones"))
+        .respond_with(refusal())
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (data, report) = collect_from(&server).await;
+
+    let scopes: Vec<&str> = report.failures.iter().map(|f| f.scope.as_str()).collect();
+    assert_eq!(scopes, ["zones"]);
+    assert_eq!(report.failures[0].kind, FailureKind::Unavailable);
+    assert!(data.zones.is_empty() && data.workers.is_empty());
+    assert_eq!(
+        server
+            .received_requests()
+            .await
+            .map_or(0, |requests| requests.len()),
+        1
+    );
+}
+
+#[tokio::test]
+async fn an_account_with_no_zones_is_still_read() {
+    let account = "/client/v4/accounts/acct-edge";
+    let server = serve_routes(
+        vec![
+            ("/client/v4/zones".to_owned(), json!([])),
+            (
+                "/client/v4/accounts".to_owned(),
+                json!([{ "id": "acct-edge", "name": "Edge Only" }]),
+            ),
+            (
+                format!("{account}/workers/scripts"),
+                json!([{ "id": "edge-router" }]),
+            ),
+            (
+                format!("{account}/workers/scripts/edge-router/bindings"),
+                json!([]),
+            ),
+            (
+                format!("{account}/storage/kv/namespaces"),
+                json!([{ "id": "kv-edge", "title": "cache" }]),
+            ),
+            (format!("{account}/r2/buckets"), json!({ "buckets": [] })),
+            (
+                format!("{account}/workers/durable_objects/namespaces"),
+                json!([]),
+            ),
+            (format!("{account}/d1/database"), json!([])),
+        ],
+        &[],
+    )
+    .await;
+
+    let (data, report) = collect_from(&server).await;
+
+    assert!(report.is_complete(), "{}", report.summary());
+    assert!(data.zones.is_empty());
+    assert_eq!(
+        data.workers,
+        [ScriptId {
+            account: "acct-edge".into(),
+            script: "edge-router".into(),
+        }],
+        "a Workers-only account owns no zone, so only the account listing can find it"
+    );
+    assert_eq!(data.kv_namespaces.len(), 1);
+}
+
+#[tokio::test]
+async fn an_unlistable_account_set_is_reported_and_zone_accounts_are_still_read() {
+    let server = globex_account(&["/client/v4/accounts"]).await;
+
+    let (data, report) = collect_from(&server).await;
+
+    let scopes: Vec<&str> = report.failures.iter().map(|f| f.scope.as_str()).collect();
+    assert_eq!(
+        scopes,
+        ["accounts"],
+        "an incomplete listing has to say so, or a missing account reads as deleted"
+    );
+    assert_eq!(report.failures[0].kind, FailureKind::Unavailable);
+    assert_eq!(data.workers.len(), 2);
+    assert_eq!(data.kv_namespaces.len(), 1);
 }

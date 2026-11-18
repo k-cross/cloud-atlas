@@ -46,3 +46,4 @@ aws-credential-types = { workspace = true, features = ["test-util"] }
 aws-smithy-runtime = { workspace = true, features = ["client", "test-util"] }
 ciborium.workspace = true
 http.workspace = true
+proptest.workspace = true

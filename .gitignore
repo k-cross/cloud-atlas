@@ -5,4 +5,3 @@ references
 *.dot
 atlas.json
 multi_cloud_demo.json
-**/proptest-regressions

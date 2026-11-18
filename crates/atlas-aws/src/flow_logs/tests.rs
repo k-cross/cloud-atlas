@@ -1,7 +1,7 @@
-use super::stream::{FlowLogQueue, decompress, objects};
+use super::stream::{FlowLogQueue, ReadLimits, decompress, objects};
 use super::*;
 use crate::projector::aws_projector;
-use atlas_graph::collection::CollectionReport;
+use atlas_graph::collection::{CollectionReport, FailureKind};
 use atlas_graph::definition::Edge;
 use atlas_graph::flow::FlowIndex;
 use atlas_graph::graph_builder::GraphBuilder;
@@ -9,6 +9,7 @@ use atlas_provider::Settings;
 use aws_credential_types::Credentials;
 use aws_smithy_runtime::client::http::test_util::{ReplayEvent, StaticReplayClient};
 use aws_smithy_types::body::SdkBody;
+use proptest::prelude::*;
 use std::io::Write;
 
 const SCOPE: &str = "us-east-1";
@@ -574,6 +575,167 @@ async fn an_object_that_was_read_but_makes_no_sense_is_deleted_anyway() {
     );
 }
 
+fn unusable_objects() -> Vec<(&'static str, Vec<u8>, &'static str)> {
+    let record = default_record("10.10.1.10", "198.51.100.10", "ACCEPT");
+    vec![
+        (
+            "oversized",
+            vec![b'x'; 2049],
+            "is larger than the 2048 byte limit",
+        ),
+        (
+            "expands past the text limit",
+            gzip(&format!("{record}\n").repeat(64)),
+            "expanded past the 1024 byte limit",
+        ),
+        (
+            "a corrupt gzip stream",
+            vec![0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad, 0xbe, 0xef],
+            "could not decompress",
+        ),
+        ("not text", vec![0xff, 0xfe, 0xfd], "not text"),
+        (
+            "no usable layout",
+            gzip("version srcport dstport protocol\n2 51234 443 6"),
+            "no usable field layout",
+        ),
+        (
+            "a truncated record",
+            gzip(&format!("{record}\n2 111111111111 eni-0abc 10.10.1.10")),
+            "dropped 1 unreadable record(s)",
+        ),
+        (
+            "past the record cap",
+            gzip(&[record.as_str(), &record, &record].join("\n")),
+            "kept 2 records and left 1 unread",
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn every_object_that_reads_but_cannot_be_used_is_malformed_and_released() {
+    let limits = ReadLimits {
+        records: 2,
+        object_bytes: 2048,
+        text_bytes: 1024,
+    };
+    for (case, object, reason) in unusable_objects() {
+        let http = replay(vec![
+            (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+            (OK, object),
+            (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+        ]);
+        let config = replay_config(http.clone()).await;
+
+        let batch = flow_queue(&config)
+            .with_limits(limits)
+            .receive(&networks())
+            .await;
+
+        assert!(
+            batch.report.failures.iter().any(|failure| {
+                failure.kind == FailureKind::Malformed && failure.message.contains(reason)
+            }),
+            "{case}: expected {reason:?} in {}",
+            batch.report.summary()
+        );
+        assert_eq!(batch.report.unreadable_kind(SOURCE), None, "{case}");
+        assert_eq!(
+            http.actual_requests().count(),
+            3,
+            "{case}: an object that will never read differently is released, not redelivered"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_object_is_released_without_a_failure() {
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (
+            416,
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>InvalidRange</Code><Message>The requested range is not satisfiable</Message><ActualObjectSize>0</ActualObjectSize></Error>"#
+                .to_vec(),
+        ),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config).receive(&networks()).await;
+
+    assert!(batch.observations.is_empty());
+    assert!(batch.report.is_complete(), "{}", batch.report.summary());
+    assert_eq!(
+        http.actual_requests().count(),
+        3,
+        "an empty object will never read differently, so its notification is deleted"
+    );
+}
+
+#[tokio::test]
+async fn a_record_cut_off_at_the_text_limit_is_not_read_as_a_shorter_one() {
+    let header = "version srcaddr dstaddr end vpc-id";
+    let line = "2 10.0.0.1 10.0.0.2 1788436800 vpc-0123456789";
+    let text = format!("{header}\n{line}\n{line}\n");
+    let cut_inside_the_last_vpc_id = header.len() + 1 + line.len() + 1 + line.len() - 4;
+    let http = replay(vec![
+        (OK, received(&[notification(BUCKET, KEY)]).into_bytes()),
+        (OK, gzip(&text)),
+        (OK, br#"{"Successful":[{"Id":"0"}]}"#.to_vec()),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config)
+        .with_limits(ReadLimits {
+            text_bytes: cut_inside_the_last_vpc_id as u64,
+            ..ReadLimits::default()
+        })
+        .receive(&networks())
+        .await;
+
+    let [flow] = batch.observations.as_slice() else {
+        panic!(
+            "only the whole record survives the cut, got {:?}",
+            batch.observations
+        );
+    };
+    assert_eq!(flow.src, Node::ip("10.0.0.1", "vpc-0123456789"));
+}
+
+#[tokio::test]
+async fn an_object_whose_body_breaks_off_is_unreadable_and_kept_on_the_queue() {
+    let http = StaticReplayClient::new(vec![
+        replay_event(
+            http::Response::builder()
+                .status(OK)
+                .body(SdkBody::from(received(&[notification(BUCKET, KEY)])))
+                .unwrap(),
+        ),
+        replay_event(
+            http::Response::builder()
+                .status(OK)
+                .header("content-length", "4096")
+                .body(SdkBody::from(gzip("2 111111111111")))
+                .unwrap(),
+        ),
+    ]);
+    let config = replay_config(http.clone()).await;
+
+    let batch = flow_queue(&config).receive(&networks()).await;
+
+    assert!(batch.observations.is_empty());
+    assert_eq!(
+        batch.report.unreadable_kind(SOURCE),
+        Some(FailureKind::Unavailable)
+    );
+    assert_eq!(
+        http.actual_requests().count(),
+        2,
+        "a read that broke off may succeed next time, so the notification stays queued"
+    );
+}
+
 #[tokio::test]
 async fn an_unreachable_queue_is_reported_rather_than_read_as_silence() {
     let http = replay(vec![(403, br#"{"__type":"AccessDenied"}"#.to_vec())]);
@@ -614,15 +776,21 @@ fn gzip(text: &str) -> Vec<u8> {
     encoder.finish().expect("gzip")
 }
 
+fn replay_event(response: http::Response<SdkBody>) -> ReplayEvent {
+    ReplayEvent::new(
+        http::Request::builder()
+            .uri("https://example.amazonaws.com/")
+            .body(SdkBody::empty())
+            .unwrap(),
+        response,
+    )
+}
+
 fn replay(responses: Vec<(u16, Vec<u8>)>) -> StaticReplayClient {
     let events = responses
         .into_iter()
         .map(|(status, body)| {
-            ReplayEvent::new(
-                http::Request::builder()
-                    .uri("https://example.amazonaws.com/")
-                    .body(SdkBody::empty())
-                    .unwrap(),
+            replay_event(
                 http::Response::builder()
                     .status(status)
                     .body(SdkBody::from(body))
@@ -664,4 +832,106 @@ fn received(bodies: &[String]) -> String {
         })
         .collect();
     serde_json::json!({ "Messages": messages }).to_string()
+}
+
+const FIELDS: &[&str] = &[
+    "version",
+    "account-id",
+    "interface-id",
+    "instance-id",
+    "srcaddr",
+    "dstaddr",
+    "srcport",
+    "dstport",
+    "protocol",
+    "packets",
+    "bytes",
+    "start",
+    "end",
+    "action",
+    "log-status",
+];
+
+fn layout() -> impl Strategy<Value = Vec<&'static str>> {
+    any::<bool>().prop_flat_map(|names_vpc| {
+        let mut fields = FIELDS.to_vec();
+        if names_vpc {
+            fields.push("vpc-id");
+        }
+        Just(fields).prop_shuffle()
+    })
+}
+
+proptest! {
+    #[test]
+    fn a_record_reads_the_same_whatever_order_its_own_header_declares(
+        order in layout(),
+        src in any::<u32>(),
+        dst in any::<u32>(),
+        src_port in 1u16..=u16::MAX,
+        dst_port in 1u16..=u16::MAX,
+        packets in 0u64..100_000,
+        bytes in 0u64..10_000_000,
+        end in 1i64..2_000_000_000,
+        accepted in any::<bool>(),
+    ) {
+        let src = std::net::Ipv4Addr::from(src).to_string();
+        let dst = std::net::Ipv4Addr::from(dst).to_string();
+        let action = if accepted { "ACCEPT" } else { "REJECT" };
+
+        let cell = |field: &str| match field {
+            "version" => "2".to_owned(),
+            "account-id" => "111111111111".to_owned(),
+            "interface-id" => "eni-0abc".to_owned(),
+            "vpc-id" => "vpc-named".to_owned(),
+            "instance-id" => "i-0abc".to_owned(),
+            "srcaddr" => src.clone(),
+            "dstaddr" => dst.clone(),
+            "srcport" => src_port.to_string(),
+            "dstport" => dst_port.to_string(),
+            "protocol" => "6".to_owned(),
+            "packets" => packets.to_string(),
+            "bytes" => bytes.to_string(),
+            "start" => (end - 1).to_string(),
+            "end" => end.to_string(),
+            "action" => action.to_owned(),
+            "log-status" => "OK".to_owned(),
+            other => panic!("unmodelled field {other}"),
+        };
+
+        let object = format!(
+            "{}\n{}",
+            order.join(" "),
+            order.iter().map(|f| cell(f)).collect::<Vec<_>>().join(" ")
+        );
+
+        let parsed = parsed(&object);
+        let network = if order.contains(&"vpc-id") { "vpc-named" } else { NETWORK };
+
+        prop_assert_eq!(parsed.unusable, 0);
+        prop_assert!(!parsed.unusable_layout);
+        let [flow] = &parsed.observations[..] else {
+            prop_assert!(false, "expected one record from {:?}", order);
+            unreachable!()
+        };
+
+        // Field order is the object's own business; what the projector reads
+        // has to come out identical regardless.
+        prop_assert_eq!(&flow.src, &Node::ip(&src, network));
+        prop_assert_eq!(&flow.dst, &Node::ip(&dst, network));
+        prop_assert_eq!(flow.src_port, Some(src_port));
+        prop_assert_eq!(flow.dst_port, Some(dst_port));
+        prop_assert_eq!(flow.packets, packets);
+        prop_assert_eq!(flow.bytes, bytes);
+        prop_assert_eq!(flow.observed_at, end * 1_000);
+        prop_assert_eq!(
+            flow.action,
+            Some(if accepted { FlowAction::Accepted } else { FlowAction::Rejected })
+        );
+        prop_assert_eq!(
+            &flow.resources,
+            &vec![Node::AwsEc2Instance("i-0abc".into()), Node::AwsEc2Eni("eni-0abc".into())],
+            "both identities, keyed the way the projector keys them"
+        );
+    }
 }

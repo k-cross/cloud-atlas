@@ -680,6 +680,20 @@ mod tests {
             let capped = drifted.min(MAX_REPORTED_ROWS);
             let tail = usize::from(drifted > MAX_REPORTED_ROWS);
             prop_assert_eq!(report.failures.len(), capped + tail);
+            let named: Vec<String> = rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| matches!(row, Row::Drifted))
+                .take(MAX_REPORTED_ROWS)
+                .map(|(seq, _)| format!("resource_graph/row row-{seq}"))
+                .collect();
+            let reported: Vec<&str> = report
+                .failures
+                .iter()
+                .take(capped)
+                .map(|failure| failure.scope.as_str())
+                .collect();
+            prop_assert_eq!(reported, named);
             prop_assert_eq!(report.is_complete(), drifted == 0);
 
             // The whole point of `Malformed`: one bad row must never freeze

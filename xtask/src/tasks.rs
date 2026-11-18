@@ -198,6 +198,7 @@ pub fn coverage(opts: CoverageOpts) -> Result<(), String> {
     } else {
         "test"
     };
+    run(&root, "cargo", &["llvm-cov", "clean", "--workspace"])?;
     run(
         &root,
         "cargo",

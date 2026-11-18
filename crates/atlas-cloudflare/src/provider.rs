@@ -44,7 +44,7 @@ fn clients() -> Result<(Client, super::CloudflareApiClient), Box<dyn std::error:
     Ok((client, super::CloudflareApiClient::new(token)))
 }
 
-async fn collect(
+pub async fn collect(
     client: &Client,
     cf: &super::CloudflareApiClient,
     verbose: bool,
@@ -84,13 +84,29 @@ async fn collect(
         }
     }
 
-    let mut accounts_seen = std::collections::HashSet::new();
-
-    for zone in &data.zones {
-        let account_id = &zone.account.id;
-        if !accounts_seen.insert(account_id.as_str()) {
-            continue;
+    if verbose {
+        println!("Fetching Cloudflare accounts...");
+    }
+    let listed = match super::account::get_accounts(cf).await {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            report.record(SOURCE, FailureKind::Unavailable, "accounts", e);
+            Vec::new()
         }
+    };
+    let mut account_ids: Vec<String> = Vec::new();
+    let zone_accounts = data.zones.iter().map(|zone| zone.account.id.clone());
+    for account_id in listed
+        .into_iter()
+        .map(|account| account.id)
+        .chain(zone_accounts)
+    {
+        if !account_ids.contains(&account_id) {
+            account_ids.push(account_id);
+        }
+    }
+
+    for account_id in &account_ids {
         if verbose {
             println!("Fetching workers for account: {}", account_id);
         }

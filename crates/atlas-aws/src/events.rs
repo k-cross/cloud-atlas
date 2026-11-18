@@ -786,9 +786,9 @@ fn from_cloud_trail(
     };
 
     let events = match event_name {
-        "RunInstances" => launched_instances(&response, region, id, observed_at),
+        "RunInstances" => launched_instances(&response, region, id, observed_at)?,
 
-        "TerminateInstances" => instance_ids(&request)
+        "TerminateInstances" => instance_ids(&request)?
             .into_iter()
             .map(|instance_id| {
                 event(
@@ -864,7 +864,7 @@ fn from_cloud_trail(
                 )]
             })
             .unwrap_or_default(),
-        "DeleteFunction20150331" => string_at(&request, &["functionName"])
+        "DeleteFunction20150331" => deleted_function(&request)
             .map(|name| {
                 vec![event(
                     ChangeOp::Deleted,
@@ -879,23 +879,33 @@ fn from_cloud_trail(
     Ok(events)
 }
 
+fn instance_set(value: &Value) -> Result<Vec<(String, TrailInstance)>, MalformedEvent> {
+    let set = match value.get("instancesSet") {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(set) => set,
+    };
+    let set: ItemSet<TrailInstance> = serde_json::from_value(set.clone())
+        .map_err(|e| malformed(format!("unreadable instancesSet: {e}")))?;
+    set.items
+        .unwrap_or_default()
+        .into_iter()
+        .map(|instance| match instance.instance_id.clone() {
+            Some(instance_id) => Ok((instance_id, instance)),
+            None => Err(malformed("instancesSet item has no instanceId")),
+        })
+        .collect()
+}
+
 fn launched_instances(
     response: &Value,
     region: &str,
     id: &str,
     observed_at: i64,
-) -> Vec<ChangeEvent> {
-    let items: ItemSet<TrailInstance> = match response.get("instancesSet") {
-        Some(set) => serde_json::from_value(set.clone()).unwrap_or(ItemSet { items: None }),
-        None => ItemSet { items: None },
-    };
-
-    items
-        .items
-        .unwrap_or_default()
+) -> Result<Vec<ChangeEvent>, MalformedEvent> {
+    let launched = instance_set(response)?
         .into_iter()
-        .filter_map(|instance| {
-            let instance_id = instance.instance_id.as_deref()?;
+        .map(|(instance_id, instance)| {
+            let instance_id = instance_id.as_str();
             let mut builder = GraphBuilder::new();
             let region_idx = builder.get_or_add_node(Node::AwsRegion(region.into()));
             project_instance(
@@ -936,33 +946,39 @@ fn launched_instances(
                         .collect(),
                 },
             );
-            Some(
-                ChangeEvent::new(
-                    SOURCE,
-                    region,
-                    id,
-                    observed_at,
-                    ChangeOp::Created,
-                    Node::AwsEc2Instance(instance_id.into()),
-                )
-                .with_context(builder.graph),
+            ChangeEvent::new(
+                SOURCE,
+                region,
+                id,
+                observed_at,
+                ChangeOp::Created,
+                Node::AwsEc2Instance(instance_id.into()),
             )
+            .with_context(builder.graph)
         })
-        .collect()
+        .collect();
+    Ok(launched)
 }
 
-fn instance_ids(value: &Value) -> Vec<String> {
-    let Some(set) = value.get("instancesSet") else {
-        return Vec::new();
-    };
-    let items: ItemSet<TrailInstance> =
-        serde_json::from_value(set.clone()).unwrap_or(ItemSet { items: None });
-    items
-        .items
-        .unwrap_or_default()
+fn instance_ids(value: &Value) -> Result<Vec<String>, MalformedEvent> {
+    Ok(instance_set(value)?
         .into_iter()
-        .filter_map(|instance| instance.instance_id)
-        .collect()
+        .map(|(instance_id, _)| instance_id)
+        .collect())
+}
+
+fn deleted_function(request: &Value) -> Option<String> {
+    if request
+        .get("qualifier")
+        .is_some_and(|qualifier| !qualifier.is_null())
+    {
+        return None;
+    }
+    let reference = string_at(request, &["functionName"])?;
+    let name = reference
+        .split_once(":function:")
+        .map_or(reference.as_str(), |(_, name)| name);
+    (!name.is_empty() && !name.contains(':')).then(|| name.to_owned())
 }
 
 fn string_at(value: &Value, path: &[&str]) -> Option<String> {

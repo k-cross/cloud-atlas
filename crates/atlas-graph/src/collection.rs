@@ -137,3 +137,52 @@ impl CollectionReport {
             .join("; ")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_summary_names_each_failure_by_source_scope_and_kind() {
+        let mut report = CollectionReport::default();
+        report.note(
+            CollectionSource::Aws,
+            FailureKind::Unauthorized,
+            "us-east-1/credentials",
+            "expired token",
+        );
+        report.note(
+            CollectionSource::Cloudflare,
+            FailureKind::Malformed,
+            "zone globex.io/dns",
+            "unknown record type",
+        );
+
+        assert_eq!(
+            report.summary(),
+            "AWS [us-east-1/credentials] unauthorized: expired token; \
+             Cloudflare [zone globex.io/dns] malformed: unknown record type"
+        );
+    }
+
+    #[test]
+    fn the_wire_names_are_the_lowercase_ones_the_frontend_matches_on() {
+        for (source, shown, wire) in [
+            (CollectionSource::Aws, "AWS", "aws"),
+            (CollectionSource::Gcp, "GCP", "gcp"),
+            (CollectionSource::Azure, "Azure", "azure"),
+            (CollectionSource::Cloudflare, "Cloudflare", "cloudflare"),
+        ] {
+            assert_eq!(source.to_string(), shown);
+            assert_eq!(serde_json::to_value(source).unwrap(), wire);
+        }
+        for (kind, wire) in [
+            (FailureKind::Unavailable, "unavailable"),
+            (FailureKind::Unauthorized, "unauthorized"),
+            (FailureKind::Malformed, "malformed"),
+        ] {
+            assert_eq!(kind.to_string(), wire);
+            assert_eq!(serde_json::to_value(kind).unwrap(), wire);
+        }
+    }
+}
