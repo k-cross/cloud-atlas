@@ -63,9 +63,12 @@ cargo xtask dev             # real collection; forwards provider flags + --demo 
 cargo xtask wasm [--force]  # rebuild atlas-web/static/pkg/ (required after SNAPSHOT_VERSION bump)
 cargo xtask demo            # regenerate multi_cloud_demo.json and atlas-web/static/snapshot.json
 cargo xtask test [--e2e]    # nextest (workspace) → biome → svelte-check → bun unit [→ atlas-server build → playwright]
+cargo xtask cov [--html|--open] [--lcov] [--fail-under <pct>]  # llvm-cov over nextest → per-file table (target/llvm-cov/)
 ```
 
 **Test runner:** `cargo nextest run --all-targets` (falls back to `cargo test --all-targets`; `--all-targets` compile-checks `examples/demo.rs` and `layout_demo.rs`; add `cargo test --doc` if doctests are introduced). Configured in `.config/nextest.toml` (`default`: fail-fast, 30 s slow warning; `-P ci`: full run, 1 retry).
+
+**Coverage:** `cargo xtask cov` wraps `cargo-llvm-cov` (`cargo install cargo-llvm-cov`, `rustup component add llvm-tools`): one instrumented nextest run, then reports that exclude `xtask/`, `fixtures.rs`, and `testing.rs` (test data, always 100%). `--html` writes `target/llvm-cov/html/`, `--open` also opens it, `--lcov` writes `target/llvm-cov/lcov.info` for editor gutters, and `--fail-under` gates on line coverage after the other reports are written.
 
 ## Live Server (`crates/atlas-server/`)
 

@@ -43,16 +43,18 @@ pub fn run(dir: &Path, program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
+fn cargo_subcommand_available(subcommand: &str) -> bool {
+    Command::new("cargo")
+        .args([subcommand, "--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn nextest_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        Command::new("cargo")
-            .args(["nextest", "--version"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+    *AVAILABLE.get_or_init(|| cargo_subcommand_available("nextest"))
 }
 
 pub fn cargo_test(dir: &Path, scope: &[&str]) -> Result<(), String> {
@@ -173,6 +175,71 @@ fn publish_demo_snapshot() -> Result<(), String> {
     })?;
     println!("refreshed {} (the UI's offline snapshot)", target.display());
     Ok(())
+}
+
+const COVERAGE_IGNORED: &str = r"(^|/)(xtask/|(fixtures|testing)\.rs$)";
+
+pub struct CoverageOpts {
+    pub html: bool,
+    pub open: bool,
+    pub lcov: bool,
+    pub fail_under: Option<f64>,
+}
+
+pub fn coverage(opts: CoverageOpts) -> Result<(), String> {
+    if !cargo_subcommand_available("llvm-cov") {
+        return Err("cargo-llvm-cov is not installed: \
+             `cargo install cargo-llvm-cov && rustup component add llvm-tools`"
+            .into());
+    }
+    let root = repo_root();
+    let runner = if nextest_available() {
+        "nextest"
+    } else {
+        "test"
+    };
+    run(
+        &root,
+        "cargo",
+        &[
+            "llvm-cov",
+            runner,
+            "--workspace",
+            "--all-targets",
+            "--no-report",
+        ],
+    )?;
+
+    let report = [
+        "llvm-cov",
+        "report",
+        "--ignore-filename-regex",
+        COVERAGE_IGNORED,
+    ];
+    if opts.html || opts.open {
+        let mut html = report.to_vec();
+        html.push(if opts.open { "--open" } else { "--html" });
+        run(&root, "cargo", &html)?;
+        println!(
+            "html report: {}",
+            root.join("target/llvm-cov/html/index.html").display()
+        );
+    }
+    if opts.lcov {
+        let lcov_path = root.join("target/llvm-cov/lcov.info");
+        let lcov_path = lcov_path.to_string_lossy();
+        let mut lcov = report.to_vec();
+        lcov.extend(["--lcov", "--output-path", &lcov_path]);
+        run(&root, "cargo", &lcov)?;
+        println!("lcov report: {lcov_path}");
+    }
+
+    let threshold = opts.fail_under.map(|pct| pct.to_string());
+    let mut summary = report.to_vec();
+    if let Some(threshold) = &threshold {
+        summary.extend(["--fail-under-lines", threshold]);
+    }
+    run(&root, "cargo", &summary)
 }
 
 pub fn test(e2e: bool) -> Result<(), String> {

@@ -12,7 +12,7 @@ All four providers collect, all three change-detection tiers run for AWS, and th
 - **Derived edges (`atlas_graph::derive::all`):** `Covers` (host IP in CIDR, per network) and `Serves` (`inferred`/`confirmed` service topology across instance and IP target groups, gated on `scanned_instances`).
 - **`atlas-server` & `atlas-web`:** `/snapshot.json` (v3), `/collection.json` (with per-source retention), `/ws` (pushes `collection` health beside snapshots and patches); Wasm ForceAtlas2 layout + Sigma.js WebGL with traffic overlay, `Serves` status styling, service view, node search with fly-to focus, and a Collection health panel.
 - **Demo:** A scripted 16-tick loop (`crates/atlas-server/src/demo.rs`) launches web-04 behind the balancer, confirms it with traffic, quiets web-01, holds Azure through a three-scan outage, then recovers (`docs/demo_design.md`).
-- **`cargo xtask`:** `dev [--demo]`, `wasm`, `demo`, `test [--e2e]`.
+- **`cargo xtask`:** `dev [--demo]`, `wasm`, `demo`, `test [--e2e]`, `cov [--html|--open] [--lcov] [--fail-under]`.
 
 ## Next Up
 

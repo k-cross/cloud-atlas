@@ -57,6 +57,7 @@ In `--daemon` mode, unreadable sources are carried forward for a bounded number 
 cargo xtask dev --demo    # credential-free: wasm → atlas-server :4681 → frontend :4680
 cargo xtask dev           # real collection; pass provider flags
 cargo xtask test [--e2e]  # all test suites in order
+cargo xtask cov [--open]  # Rust line coverage (cargo-llvm-cov)
 ```
 
 With live AWS feeds:

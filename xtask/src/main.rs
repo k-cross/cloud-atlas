@@ -51,6 +51,21 @@ enum Cmd {
         #[clap(long)]
         e2e: bool,
     },
+
+    #[clap(alias = "coverage")]
+    Cov {
+        #[clap(long)]
+        html: bool,
+
+        #[clap(long)]
+        open: bool,
+
+        #[clap(long)]
+        lcov: bool,
+
+        #[clap(long, value_name = "PERCENT")]
+        fail_under: Option<f64>,
+    },
 }
 
 fn main() {
@@ -79,6 +94,17 @@ fn main() {
         Cmd::Wasm { force } => tasks::ensure_wasm(force),
         Cmd::Demo => tasks::demo_snapshot(),
         Cmd::Test { e2e } => tasks::test(e2e),
+        Cmd::Cov {
+            html,
+            open,
+            lcov,
+            fail_under,
+        } => tasks::coverage(tasks::CoverageOpts {
+            html,
+            open,
+            lcov,
+            fail_under,
+        }),
     };
 
     if let Err(e) = result {
